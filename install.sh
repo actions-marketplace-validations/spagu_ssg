@@ -38,7 +38,7 @@ detect_platform() {
 }
 
 download_and_install() {
-    local url="https://github.com/spagu/ssg/releases/download/v${VERSION}/ssg-${VERSION}-${OS}-${ARCH}.tar.gz"
+    local url="https://github.com/spagu/ssg/releases/download/v${VERSION}/ssg-${OS}-${ARCH}.tar.gz"
     local tmp_dir=$(mktemp -d)
     
     log_info "Downloading SSG v${VERSION}..."
