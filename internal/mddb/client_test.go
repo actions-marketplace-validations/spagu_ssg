@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
-	"time"
 )
 
 func TestNewClient(t *testing.T) {
@@ -58,19 +57,18 @@ func TestClient_Get(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		resp := GetResponse{
-			Success: true,
-			Document: Document{
-				Key:        req.Key,
-				Collection: req.Collection,
-				Content:    "# Test Content",
-				Metadata: map[string]any{
-					"title": "Test Title",
-					"type":  "post",
-				},
-				CreatedAt: time.Now(),
-				UpdatedAt: time.Now(),
+		// Return MDDB format response
+		resp := mddbDocument{
+			ID:        "doc|blog|hello-world|en_US",
+			Key:       req.Key,
+			Lang:      "en_US",
+			ContentMd: "# Test Content",
+			Meta: map[string][]any{
+				"title": {"Test Title"},
+				"type":  {"post"},
 			},
+			AddedAt:   1704844800,
+			UpdatedAt: 1704931200,
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -96,6 +94,10 @@ func TestClient_Get(t *testing.T) {
 	if doc.Metadata["title"] != "Test Title" {
 		t.Errorf("doc.Metadata[title] = %v, want Test Title", doc.Metadata["title"])
 	}
+
+	if doc.Content != "# Test Content" {
+		t.Errorf("doc.Content = %v, want # Test Content", doc.Content)
+	}
 }
 
 func TestClient_Search(t *testing.T) {
@@ -107,26 +109,30 @@ func TestClient_Search(t *testing.T) {
 			t.Errorf("Expected /v1/search, got %s", r.URL.Path)
 		}
 
-		resp := SearchResponse{
-			Success: true,
-			Total:   2,
-			Documents: []Document{
-				{
-					Key:        "post-1",
-					Collection: "blog",
-					Content:    "# Post 1",
-					Metadata:   map[string]any{"title": "Post 1"},
-				},
-				{
-					Key:        "post-2",
-					Collection: "blog",
-					Content:    "# Post 2",
-					Metadata:   map[string]any{"title": "Post 2"},
-				},
+		// Return MDDB format - array with X-Total-Count header
+		resp := []mddbDocument{
+			{
+				ID:        "doc|blog|post-1|en_US",
+				Key:       "post-1",
+				Lang:      "en_US",
+				ContentMd: "# Post 1",
+				Meta:      map[string][]any{"title": {"Post 1"}},
+				AddedAt:   1704844800,
+				UpdatedAt: 1704931200,
+			},
+			{
+				ID:        "doc|blog|post-2|en_US",
+				Key:       "post-2",
+				Lang:      "en_US",
+				ContentMd: "# Post 2",
+				Meta:      map[string][]any{"title": {"Post 2"}},
+				AddedAt:   1704844801,
+				UpdatedAt: 1704931201,
 			},
 		}
 
 		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Total-Count", "2")
 		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer server.Close()
@@ -159,22 +165,17 @@ func TestClient_GetAll(t *testing.T) {
 		var req SearchRequest
 		_ = json.NewDecoder(r.Body).Decode(&req)
 
-		var docs []Document
+		var docs []mddbDocument
 		if req.Offset == 0 {
-			docs = []Document{
-				{Key: "post-1", Collection: "blog"},
-				{Key: "post-2", Collection: "blog"},
+			docs = []mddbDocument{
+				{Key: "post-1", Lang: "en_US", ContentMd: "# Post 1"},
+				{Key: "post-2", Lang: "en_US", ContentMd: "# Post 2"},
 			}
 		}
 
-		resp := SearchResponse{
-			Success:   true,
-			Total:     2,
-			Documents: docs,
-		}
-
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(resp)
+		w.Header().Set("X-Total-Count", "2")
+		_ = json.NewEncoder(w).Encode(docs)
 	}))
 	defer server.Close()
 
@@ -197,7 +198,12 @@ func TestClient_Health(t *testing.T) {
 			if r.URL.Path != "/v1/health" {
 				t.Errorf("Expected /v1/health, got %s", r.URL.Path)
 			}
+			if r.Method != "GET" {
+				t.Errorf("Expected GET, got %s", r.Method)
+			}
+			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"status":"healthy","mode":"wr"}`))
 		}))
 		defer server.Close()
 
@@ -211,6 +217,7 @@ func TestClient_Health(t *testing.T) {
 	t.Run("unhealthy server", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"error":"service unavailable"}`))
 		}))
 		defer server.Close()
 
@@ -227,19 +234,26 @@ func TestClient_GetByType(t *testing.T) {
 		var req SearchRequest
 		_ = json.NewDecoder(r.Body).Decode(&req)
 
-		if req.Filters["type"] != "post" {
-			t.Errorf("Expected type filter 'post', got %v", req.Filters["type"])
+		// Check filterMeta instead of filters
+		if req.FilterMeta == nil {
+			t.Error("Expected filterMeta to be set")
+		}
+		typeFilter, ok := req.FilterMeta["type"]
+		if !ok || len(typeFilter) == 0 || typeFilter[0] != "post" {
+			t.Errorf("Expected filterMeta[type] = [post], got %v", req.FilterMeta["type"])
 		}
 
-		resp := SearchResponse{
-			Success: true,
-			Total:   1,
-			Documents: []Document{
-				{Key: "post-1", Collection: "blog", Metadata: map[string]any{"type": "post"}},
+		resp := []mddbDocument{
+			{
+				Key:       "post-1",
+				Lang:      "en_US",
+				ContentMd: "# Post 1",
+				Meta:      map[string][]any{"type": {"post"}},
 			},
 		}
 
 		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Total-Count", "1")
 		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer server.Close()
@@ -264,9 +278,10 @@ func TestClient_WithAPIKey(t *testing.T) {
 			t.Errorf("Expected Authorization header 'Bearer test-api-key', got '%s'", auth)
 		}
 
-		resp := GetResponse{
-			Success:  true,
-			Document: Document{Key: "test"},
+		resp := mddbDocument{
+			Key:       "test",
+			Lang:      "en_US",
+			ContentMd: "# Test",
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -287,14 +302,11 @@ func TestClient_WithAPIKey(t *testing.T) {
 }
 
 func TestClient_ErrorHandling(t *testing.T) {
-	t.Run("server error response", func(t *testing.T) {
+	t.Run("document not found", func(t *testing.T) {
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			resp := GetResponse{
-				Success: false,
-				Error:   "document not found",
-			}
 			w.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(w).Encode(resp)
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"error":"document not found"}`))
 		}))
 		defer server.Close()
 
@@ -322,4 +334,52 @@ func TestClient_ErrorHandling(t *testing.T) {
 			t.Error("Get() error = nil, want error")
 		}
 	})
+}
+
+func TestMddbDocument_ToDocument(t *testing.T) {
+	mddbDoc := mddbDocument{
+		ID:        "doc|blog|test|en_US",
+		Key:       "test",
+		Lang:      "en_US",
+		ContentMd: "# Hello World",
+		Meta: map[string][]any{
+			"title":    {"Test Title"},
+			"tags":     {"go", "markdown"},
+			"category": {"blog"},
+		},
+		AddedAt:   1704844800,
+		UpdatedAt: 1704931200,
+	}
+
+	doc := mddbDoc.toDocument("blog")
+
+	if doc.ID != "doc|blog|test|en_US" {
+		t.Errorf("doc.ID = %v, want doc|blog|test|en_US", doc.ID)
+	}
+
+	if doc.Key != "test" {
+		t.Errorf("doc.Key = %v, want test", doc.Key)
+	}
+
+	if doc.Content != "# Hello World" {
+		t.Errorf("doc.Content = %v, want # Hello World", doc.Content)
+	}
+
+	if doc.Metadata["title"] != "Test Title" {
+		t.Errorf("doc.Metadata[title] = %v, want Test Title", doc.Metadata["title"])
+	}
+
+	// Multi-value field should remain as array
+	tags, ok := doc.Metadata["tags"].([]any)
+	if !ok || len(tags) != 2 {
+		t.Errorf("doc.Metadata[tags] = %v, want [go markdown]", doc.Metadata["tags"])
+	}
+
+	if doc.CreatedAt.Unix() != 1704844800 {
+		t.Errorf("doc.CreatedAt.Unix() = %v, want 1704844800", doc.CreatedAt.Unix())
+	}
+
+	if doc.UpdatedAt.Unix() != 1704931200 {
+		t.Errorf("doc.UpdatedAt.Unix() = %v, want 1704931200", doc.UpdatedAt.Unix())
+	}
 }

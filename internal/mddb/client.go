@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -26,47 +27,74 @@ type Config struct {
 }
 
 // Document represents a markdown document from mddb
+// This is the normalized format used internally by SSG
 type Document struct {
+	ID         string         `json:"id"`
 	Key        string         `json:"key"`
 	Collection string         `json:"collection"`
 	Lang       string         `json:"lang"`
-	Content    string         `json:"content"`
-	Metadata   map[string]any `json:"metadata"`
-	CreatedAt  time.Time      `json:"created_at"`
-	UpdatedAt  time.Time      `json:"updated_at"`
+	Content    string         `json:"content"`    // Mapped from contentMd
+	Metadata   map[string]any `json:"metadata"`   // Mapped from meta
+	CreatedAt  time.Time      `json:"created_at"` // Mapped from addedAt
+	UpdatedAt  time.Time      `json:"updated_at"` // Mapped from updatedAt
+}
+
+// mddbDocument represents the raw document format from MDDB API
+type mddbDocument struct {
+	ID        string           `json:"id"`
+	Key       string           `json:"key"`
+	Lang      string           `json:"lang"`
+	ContentMd string           `json:"contentMd"`
+	Meta      map[string][]any `json:"meta"`
+	AddedAt   int64            `json:"addedAt"`
+	UpdatedAt int64            `json:"updatedAt"`
+}
+
+// toDocument converts mddbDocument to Document
+func (m *mddbDocument) toDocument(collection string) Document {
+	// Flatten meta arrays to single values where appropriate
+	metadata := make(map[string]any)
+	for k, v := range m.Meta {
+		if len(v) == 1 {
+			metadata[k] = v[0]
+		} else if len(v) > 1 {
+			metadata[k] = v
+		}
+	}
+
+	return Document{
+		ID:         m.ID,
+		Key:        m.Key,
+		Collection: collection,
+		Lang:       m.Lang,
+		Content:    m.ContentMd,
+		Metadata:   metadata,
+		CreatedAt:  time.Unix(m.AddedAt, 0),
+		UpdatedAt:  time.Unix(m.UpdatedAt, 0),
+	}
 }
 
 // GetRequest represents a request to fetch a single document
 type GetRequest struct {
-	Collection string `json:"collection"`
-	Key        string `json:"key"`
-	Lang       string `json:"lang,omitempty"`
-}
-
-// GetResponse represents response from /v1/get endpoint
-type GetResponse struct {
-	Document Document `json:"document"`
-	Success  bool     `json:"success"`
-	Error    string   `json:"error,omitempty"`
+	Collection string            `json:"collection"`
+	Key        string            `json:"key"`
+	Lang       string            `json:"lang,omitempty"`
+	Env        map[string]string `json:"env,omitempty"` // Template variables
 }
 
 // SearchRequest represents a request to search documents
 type SearchRequest struct {
-	Collection string         `json:"collection"`
-	Lang       string         `json:"lang,omitempty"`
-	Filters    map[string]any `json:"filters,omitempty"`
-	Limit      int            `json:"limit,omitempty"`
-	Offset     int            `json:"offset,omitempty"`
-	OrderBy    string         `json:"order_by,omitempty"`
-	OrderDir   string         `json:"order_dir,omitempty"` // "asc" or "desc"
+	Collection string             `json:"collection"`
+	FilterMeta map[string][]any   `json:"filterMeta,omitempty"`
+	Sort       string             `json:"sort,omitempty"`   // Field to sort by (e.g., "updatedAt")
+	Asc        bool               `json:"asc,omitempty"`    // Sort ascending
+	Limit      int                `json:"limit,omitempty"`  // Max results
+	Offset     int                `json:"offset,omitempty"` // Skip results
 }
 
-// SearchResponse represents response from /v1/search endpoint
-type SearchResponse struct {
-	Documents []Document `json:"documents"`
-	Total     int        `json:"total"`
-	Success   bool       `json:"success"`
-	Error     string     `json:"error,omitempty"`
+// ErrorResponse represents an error from MDDB
+type ErrorResponse struct {
+	Error string `json:"error"`
 }
 
 // NewClient creates a new mddb client
@@ -100,16 +128,18 @@ func (c *Client) Get(req GetRequest) (*Document, error) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	var getResp GetResponse
-	if err := json.NewDecoder(resp.Body).Decode(&getResp); err != nil {
+	// Check for error response
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("document not found: %s/%s", req.Collection, req.Key)
+	}
+
+	var mddbDoc mddbDocument
+	if err := json.NewDecoder(resp.Body).Decode(&mddbDoc); err != nil {
 		return nil, fmt.Errorf("decoding response: %w", err)
 	}
 
-	if !getResp.Success {
-		return nil, fmt.Errorf("mddb error: %s", getResp.Error)
-	}
-
-	return &getResp.Document, nil
+	doc := mddbDoc.toDocument(req.Collection)
+	return &doc, nil
 }
 
 // Search fetches multiple documents matching filters
@@ -125,16 +155,29 @@ func (c *Client) Search(req SearchRequest) ([]Document, int, error) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	var searchResp SearchResponse
-	if err := json.NewDecoder(resp.Body).Decode(&searchResp); err != nil {
+	// Get total count from header
+	totalCount := 0
+	if tc := resp.Header.Get("X-Total-Count"); tc != "" {
+		totalCount, _ = strconv.Atoi(tc)
+	}
+
+	var mddbDocs []mddbDocument
+	if err := json.NewDecoder(resp.Body).Decode(&mddbDocs); err != nil {
 		return nil, 0, fmt.Errorf("decoding response: %w", err)
 	}
 
-	if !searchResp.Success {
-		return nil, 0, fmt.Errorf("mddb error: %s", searchResp.Error)
+	// Convert to Document format
+	docs := make([]Document, len(mddbDocs))
+	for i, mddbDoc := range mddbDocs {
+		docs[i] = mddbDoc.toDocument(req.Collection)
 	}
 
-	return searchResp.Documents, searchResp.Total, nil
+	// If no header, use array length
+	if totalCount == 0 {
+		totalCount = len(docs)
+	}
+
+	return docs, totalCount, nil
 }
 
 // GetAll fetches all documents from a collection with pagination
@@ -149,7 +192,6 @@ func (c *Client) GetAll(collection string, lang string, batchSize int) ([]Docume
 	for {
 		req := SearchRequest{
 			Collection: collection,
-			Lang:       lang,
 			Limit:      batchSize,
 			Offset:     offset,
 		}
@@ -175,9 +217,8 @@ func (c *Client) GetAll(collection string, lang string, batchSize int) ([]Docume
 func (c *Client) GetByType(collection string, docType string, lang string) ([]Document, error) {
 	req := SearchRequest{
 		Collection: collection,
-		Lang:       lang,
-		Filters: map[string]any{
-			"type": docType,
+		FilterMeta: map[string][]any{
+			"type": {docType},
 		},
 		Limit: 1000, // Reasonable default for most sites
 	}
@@ -232,7 +273,8 @@ func (c *Client) doRequest(method, endpoint string, body []byte) (*http.Response
 		return nil, fmt.Errorf("executing request to %s: %w", url, err)
 	}
 
-	if resp.StatusCode >= 400 {
+	// Don't treat 404 as error for Get - let caller handle it
+	if resp.StatusCode >= 400 && resp.StatusCode != http.StatusNotFound {
 		body, _ := io.ReadAll(resp.Body)
 		_ = resp.Body.Close()
 		return nil, fmt.Errorf("request failed with status %d: %s", resp.StatusCode, string(body))
