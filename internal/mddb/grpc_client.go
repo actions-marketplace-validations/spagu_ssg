@@ -157,12 +157,22 @@ func (c *GRPCClient) Search(req SearchRequest) ([]Document, int, error) {
 	ctx, cancel := c.contextWithAuth()
 	defer cancel()
 
+	// Bounds check for int32 conversion (max ~2 billion)
+	limit := req.Limit
+	if limit > 2147483647 {
+		limit = 2147483647
+	}
+	offset := req.Offset
+	if offset > 2147483647 {
+		offset = 2147483647
+	}
+
 	protoReq := &pb.SearchRequest{
 		Collection: req.Collection,
 		Sort:       req.Sort,
 		Asc:        req.Asc,
-		Limit:      int32(req.Limit),
-		Offset:     int32(req.Offset),
+		Limit:      int32(limit),  // #nosec G115 -- bounds checked above
+		Offset:     int32(offset), // #nosec G115 -- bounds checked above
 	}
 
 	if req.FilterMeta != nil {
