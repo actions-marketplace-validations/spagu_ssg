@@ -1196,7 +1196,7 @@ func (g *Generator) generateSitemap() error {
 
 	// Homepage
 	sb.WriteString("  <url>\n")
-	sb.WriteString(fmt.Sprintf("    <loc>https://%s/</loc>\n", g.config.Domain))
+	fmt.Fprintf(&sb, "    <loc>https://%s/</loc>\n", g.config.Domain)
 	sb.WriteString("    <changefreq>daily</changefreq>\n")
 	sb.WriteString("    <priority>1.0</priority>\n")
 	sb.WriteString("  </url>\n")
@@ -1204,8 +1204,8 @@ func (g *Generator) generateSitemap() error {
 	// Pages
 	for _, page := range g.siteData.Pages {
 		sb.WriteString("  <url>\n")
-		sb.WriteString(fmt.Sprintf("    <loc>%s</loc>\n", page.GetCanonical(g.config.Domain)))
-		sb.WriteString(fmt.Sprintf("    <lastmod>%s</lastmod>\n", page.Modified.Format("2006-01-02")))
+		fmt.Fprintf(&sb, "    <loc>%s</loc>\n", page.GetCanonical(g.config.Domain))
+		fmt.Fprintf(&sb, "    <lastmod>%s</lastmod>\n", page.Modified.Format("2006-01-02"))
 		sb.WriteString("    <changefreq>monthly</changefreq>\n")
 		sb.WriteString("    <priority>0.8</priority>\n")
 		sb.WriteString("  </url>\n")
@@ -1214,8 +1214,8 @@ func (g *Generator) generateSitemap() error {
 	// Posts
 	for _, post := range g.siteData.Posts {
 		sb.WriteString("  <url>\n")
-		sb.WriteString(fmt.Sprintf("    <loc>%s</loc>\n", post.GetCanonical(g.config.Domain)))
-		sb.WriteString(fmt.Sprintf("    <lastmod>%s</lastmod>\n", post.Modified.Format("2006-01-02")))
+		fmt.Fprintf(&sb, "    <loc>%s</loc>\n", post.GetCanonical(g.config.Domain))
+		fmt.Fprintf(&sb, "    <lastmod>%s</lastmod>\n", post.Modified.Format("2006-01-02"))
 		sb.WriteString("    <changefreq>monthly</changefreq>\n")
 		sb.WriteString("    <priority>0.6</priority>\n")
 		sb.WriteString("  </url>\n")
@@ -1225,7 +1225,7 @@ func (g *Generator) generateSitemap() error {
 	for _, cat := range g.siteData.Categories {
 		if cat.ID != 1 { // Skip "Bez kategorii"
 			sb.WriteString("  <url>\n")
-			sb.WriteString(fmt.Sprintf("    <loc>https://%s/category/%s/</loc>\n", g.config.Domain, cat.Slug))
+			fmt.Fprintf(&sb, "    <loc>https://%s/category/%s/</loc>\n", g.config.Domain, cat.Slug)
 			sb.WriteString("    <changefreq>weekly</changefreq>\n")
 			sb.WriteString("    <priority>0.5</priority>\n")
 			sb.WriteString("  </url>\n")
