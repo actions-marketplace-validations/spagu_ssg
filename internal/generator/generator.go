@@ -528,6 +528,7 @@ func (g *Generator) loadMarkdownDir(dir string) ([]models.Page, error) {
 			continue
 		}
 		if page.Status == "publish" {
+			page.SourceDir = dir
 			pages = append(pages, *page)
 		}
 	}
@@ -936,9 +937,17 @@ func (g *Generator) generatePage(page models.Page) error {
 	}
 
 	outputPath := filepath.Join(g.config.OutputDir, outputSubPath, "index.html")
+	outputDir := filepath.Dir(outputPath)
 	// #nosec G301 -- Web content directories need to be world-traversable
-	if err := os.MkdirAll(filepath.Dir(outputPath), 0755); err != nil {
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
 		return err
+	}
+
+	// Copy co-located assets (images, etc.) from content source directory
+	if page.SourceDir != "" {
+		if err := g.copyColocatedAssets(page.SourceDir, outputDir); err != nil {
+			fmt.Printf("   ⚠️  Warning: couldn't copy co-located assets for page %s: %v\n", page.Slug, err)
+		}
 	}
 
 	return g.renderTemplate("page.html", outputPath, data)
@@ -958,9 +967,17 @@ func (g *Generator) generatePost(post models.Page) error {
 
 	// Create date-based URL structure: /YYYY/MM/DD/slug/
 	outputPath := filepath.Join(g.config.OutputDir, post.GetOutputPath(), "index.html")
+	outputDir := filepath.Dir(outputPath)
 	// #nosec G301 -- Web content directories need to be world-traversable
-	if err := os.MkdirAll(filepath.Dir(outputPath), 0755); err != nil {
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
 		return err
+	}
+
+	// Copy co-located assets (images, etc.) from content source directory
+	if post.SourceDir != "" {
+		if err := g.copyColocatedAssets(post.SourceDir, outputDir); err != nil {
+			fmt.Printf("   ⚠️  Warning: couldn't copy co-located assets for post %s: %v\n", post.Slug, err)
+		}
 	}
 
 	return g.renderTemplate("post.html", outputPath, data)
@@ -1106,6 +1123,57 @@ func (g *Generator) copyFile(src, dst string) error {
 
 	_, err = io.Copy(dstFile, srcFile)
 	return err
+}
+
+// isContentAsset returns true if the file is a non-markdown content asset (image, etc.)
+func isContentAsset(name string) bool {
+	ext := strings.ToLower(filepath.Ext(name))
+	assetExts := map[string]bool{
+		".png": true, ".jpg": true, ".jpeg": true, ".gif": true, ".svg": true,
+		".webp": true, ".ico": true, ".bmp": true, ".tiff": true, ".avif": true,
+		".mp4": true, ".webm": true, ".ogg": true, ".mp3": true, ".wav": true,
+		".pdf": true, ".zip": true, ".tar": true, ".gz": true,
+	}
+	return assetExts[ext]
+}
+
+// copyColocatedAssets copies non-markdown files from a content source directory
+// to the corresponding output directory of the generated page/post
+func (g *Generator) copyColocatedAssets(sourceDir, outputDir string) error {
+	entries, err := os.ReadDir(sourceDir)
+	if err != nil {
+		return nil // Source dir might not exist, that's fine
+	}
+
+	copied := 0
+	for _, entry := range entries {
+		if entry.IsDir() || strings.HasSuffix(entry.Name(), ".md") {
+			continue
+		}
+		if !isContentAsset(entry.Name()) {
+			continue
+		}
+
+		srcPath := filepath.Join(sourceDir, entry.Name())
+		dstPath := filepath.Join(outputDir, entry.Name())
+
+		// #nosec G301 -- Web content directories need to be world-traversable
+		if err := os.MkdirAll(outputDir, 0755); err != nil {
+			return err
+		}
+
+		if err := g.copyFile(srcPath, dstPath); err != nil {
+			fmt.Printf("   ⚠️  Warning: couldn't copy co-located asset %s: %v\n", entry.Name(), err)
+			continue
+		}
+		copied++
+	}
+
+	if copied > 0 && !g.config.Quiet {
+		fmt.Printf("   📎 Copied %d co-located asset(s) from %s\n", copied, filepath.Base(sourceDir))
+	}
+
+	return nil
 }
 
 // fixMediaPaths converts relative media paths to absolute paths
@@ -1392,7 +1460,7 @@ func minifyHTMLFile(path string) error {
 	// Trim lines
 	s = strings.TrimSpace(s)
 
-	// #nosec G306 -- Web content files need to be world-readable
+	// #nosec G306,G703 -- Web content files need to be world-readable, CLI tool writes user's output
 	return os.WriteFile(path, []byte(s), 0644)
 }
 
@@ -1418,7 +1486,7 @@ func minifyCSSFile(path string) error {
 	s = reMultiSpace.ReplaceAllString(s, " ")
 	s = strings.TrimSpace(s)
 
-	// #nosec G306 -- Web content files need to be world-readable
+	// #nosec G306,G703 -- Web content files need to be world-readable, CLI tool writes user's output
 	return os.WriteFile(path, []byte(s), 0644)
 }
 
@@ -1442,7 +1510,7 @@ func minifyJSFile(path string) error {
 	// Trim
 	s = strings.TrimSpace(s)
 
-	// #nosec G306 -- Web content files need to be world-readable
+	// #nosec G306,G703 -- Web content files need to be world-readable, CLI tool writes user's output
 	return os.WriteFile(path, []byte(s), 0644)
 }
 
@@ -1472,7 +1540,7 @@ func prettifyHTMLFile(path string) error {
 	// Join with newlines and ensure file ends with single newline
 	s = strings.Join(result, "\n") + "\n"
 
-	// #nosec G306 -- Web content files need to be world-readable
+	// #nosec G306,G703 -- Web content files need to be world-readable, CLI tool writes user's output
 	return os.WriteFile(path, []byte(s), 0644)
 }
 
@@ -1539,6 +1607,6 @@ func convertToRelativeLinksFile(path string, domain string) error {
 		s = strings.ReplaceAll(s, `url('`+pattern+`/`, `url('/`)
 	}
 
-	// #nosec G306 -- Web content files need to be world-readable
+	// #nosec G306,G703 -- Web content files need to be world-readable, CLI tool writes user's output
 	return os.WriteFile(path, []byte(s), 0644)
 }

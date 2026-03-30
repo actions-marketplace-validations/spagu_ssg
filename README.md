@@ -1,6 +1,6 @@
 # SSG - Static Site Generator
 
-[![Go Version](https://img.shields.io/badge/Go-1.25+-00ADD8?style=flat&logo=go)](https://go.dev/)
+[![Go Version](https://img.shields.io/badge/Go-1.26+-00ADD8?style=flat&logo=go)](https://go.dev/)
 [![Go Report Card](https://goreportcard.com/badge/github.com/spagu/ssg)](https://goreportcard.com/report/github.com/spagu/ssg)
 [![License](https://img.shields.io/badge/License-BSD_3--Clause-blue.svg)](LICENSE)
 [![CI](https://github.com/spagu/ssg/actions/workflows/ci.yml/badge.svg)](https://github.com/spagu/ssg/actions/workflows/ci.yml)
@@ -67,6 +67,7 @@ Then deploy to any static hosting:
 SSG includes powerful asset processing:
 
 - **Image Processing** - Convert JPG/PNG to WebP with configurable quality
+- **Co-located Assets** - Images placed next to Markdown files are auto-copied to output
 - **HTML Minification** - Remove whitespace, comments, optimize output
 - **CSS Minification** - Bundle and compress stylesheets
 - **JS Minification** - Optimize JavaScript files
@@ -108,7 +109,7 @@ SSG includes powerful asset processing:
 
 ## 📦 Requirements
 
-- Go 1.25 or later
+- Go 1.26 or later
 - Make (optional, for Makefile)
 - `cwebp` (optional, for WebP conversion)
 
@@ -636,6 +637,8 @@ ssg/
 │       ├── metadata.json
 │       ├── media/
 │       ├── pages/
+│       │   ├── about.md
+│       │   └── about-photo.png  # Co-located asset (auto-copied)
 │       └── posts/
 ├── templates/                # Templates
 │   ├── simple/
@@ -776,7 +779,7 @@ make generate-simple # Generate site (simple template)
 make serve          # Generate and serve locally
 make deploy         # Generate with WebP + ZIP for Cloudflare Pages
 make clean          # Clean artifacts
-make install        # Install binary to /usr/local/bin
+make install        # Install binary and man page to /usr/local
 ```
 
 ### Creating Your Own Template

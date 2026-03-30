@@ -3746,3 +3746,373 @@ func TestMinifyHTMLFileConditionalComment(t *testing.T) {
 		t.Error("Conditional comment should be preserved")
 	}
 }
+
+func TestIsContentAsset(t *testing.T) {
+	tests := []struct {
+		name     string
+		filename string
+		want     bool
+	}{
+		{"png", "image.png", true},
+		{"jpg", "photo.jpg", true},
+		{"jpeg", "photo.jpeg", true},
+		{"gif", "anim.gif", true},
+		{"svg", "icon.svg", true},
+		{"webp", "image.webp", true},
+		{"ico", "favicon.ico", true},
+		{"bmp", "image.bmp", true},
+		{"tiff", "photo.tiff", true},
+		{"avif", "photo.avif", true},
+		{"mp4", "video.mp4", true},
+		{"webm", "video.webm", true},
+		{"ogg", "audio.ogg", true},
+		{"mp3", "audio.mp3", true},
+		{"wav", "audio.wav", true},
+		{"pdf", "doc.pdf", true},
+		{"zip", "archive.zip", true},
+		{"uppercase PNG", "IMAGE.PNG", true},
+		{"mixed case", "Photo.JpG", true},
+		{"markdown not asset", "entry.md", false},
+		{"html not asset", "page.html", false},
+		{"css not asset", "style.css", false},
+		{"js not asset", "app.js", false},
+		{"yaml not asset", "config.yaml", false},
+		{"no extension", "README", false},
+		{"go file", "main.go", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isContentAsset(tt.filename)
+			if got != tt.want {
+				t.Errorf("isContentAsset(%q) = %v, want %v", tt.filename, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestCopyColocatedAssets(t *testing.T) {
+	tmpDir := t.TempDir()
+	srcDir := filepath.Join(tmpDir, "src")
+	dstDir := filepath.Join(tmpDir, "dst")
+
+	if err := os.MkdirAll(srcDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create test files
+	if err := os.WriteFile(filepath.Join(srcDir, "entry.md"), []byte("# Hello"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "photo.png"), []byte("fakepng"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "style.css"), []byte("body{}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	gen := &Generator{config: Config{Quiet: false}}
+	if err := gen.copyColocatedAssets(srcDir, dstDir); err != nil {
+		t.Fatalf("copyColocatedAssets failed: %v", err)
+	}
+
+	// PNG should be copied
+	if _, err := os.Stat(filepath.Join(dstDir, "photo.png")); os.IsNotExist(err) {
+		t.Error("photo.png should have been copied")
+	}
+	// .md should NOT be copied
+	if _, err := os.Stat(filepath.Join(dstDir, "entry.md")); !os.IsNotExist(err) {
+		t.Error("entry.md should not have been copied")
+	}
+	// .css should NOT be copied (not a content asset)
+	if _, err := os.Stat(filepath.Join(dstDir, "style.css")); !os.IsNotExist(err) {
+		t.Error("style.css should not have been copied")
+	}
+}
+
+func TestCopyColocatedAssetsNonExistentDir(t *testing.T) {
+	gen := &Generator{config: Config{Quiet: true}}
+	err := gen.copyColocatedAssets("/nonexistent/path", "/tmp/out")
+	if err != nil {
+		t.Errorf("Expected nil for nonexistent source dir, got: %v", err)
+	}
+}
+
+func TestCopyColocatedAssetsQuietMode(t *testing.T) {
+	tmpDir := t.TempDir()
+	srcDir := filepath.Join(tmpDir, "src")
+	dstDir := filepath.Join(tmpDir, "dst")
+	if err := os.MkdirAll(srcDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "photo.jpg"), []byte("fakejpg"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	gen := &Generator{config: Config{Quiet: true}}
+	if err := gen.copyColocatedAssets(srcDir, dstDir); err != nil {
+		t.Fatalf("copyColocatedAssets failed: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(dstDir, "photo.jpg")); os.IsNotExist(err) {
+		t.Error("photo.jpg should have been copied even in quiet mode")
+	}
+}
+
+func TestCopyColocatedAssetsEmptyDir(t *testing.T) {
+	tmpDir := t.TempDir()
+	srcDir := filepath.Join(tmpDir, "src")
+	dstDir := filepath.Join(tmpDir, "dst")
+	if err := os.MkdirAll(srcDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	gen := &Generator{config: Config{Quiet: true}}
+	if err := gen.copyColocatedAssets(srcDir, dstDir); err != nil {
+		t.Fatalf("copyColocatedAssets failed: %v", err)
+	}
+
+	// Dst dir should NOT be created if no assets to copy
+	if _, err := os.Stat(dstDir); !os.IsNotExist(err) {
+		t.Error("dstDir should not be created when no assets to copy")
+	}
+}
+
+func TestCopyColocatedAssetsSkipsSubdirectories(t *testing.T) {
+	tmpDir := t.TempDir()
+	srcDir := filepath.Join(tmpDir, "src")
+	dstDir := filepath.Join(tmpDir, "dst")
+	if err := os.MkdirAll(filepath.Join(srcDir, "subdir"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "subdir", "nested.png"), []byte("fake"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "top.png"), []byte("fake"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	gen := &Generator{config: Config{Quiet: true}}
+	if err := gen.copyColocatedAssets(srcDir, dstDir); err != nil {
+		t.Fatal(err)
+	}
+
+	// Top-level asset should be copied
+	if _, err := os.Stat(filepath.Join(dstDir, "top.png")); os.IsNotExist(err) {
+		t.Error("top.png should be copied")
+	}
+	// Nested subdir should NOT be copied
+	if _, err := os.Stat(filepath.Join(dstDir, "subdir")); !os.IsNotExist(err) {
+		t.Error("subdir should not be copied")
+	}
+}
+
+func TestConvertToRelativeLinks(t *testing.T) {
+	tmpDir := t.TempDir()
+	outputDir := filepath.Join(tmpDir, "output")
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	htmlContent := `<html>
+<body>
+<a href="https://example.com/about/">About</a>
+<img src="https://example.com/media/photo.jpg">
+<a href="https://other.com/page/">External</a>
+</body>
+</html>`
+
+	htmlFile := filepath.Join(outputDir, "index.html")
+	if err := os.WriteFile(htmlFile, []byte(htmlContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	gen := &Generator{config: Config{OutputDir: outputDir, Domain: "example.com"}}
+	if err := gen.convertToRelativeLinks(); err != nil {
+		t.Fatalf("convertToRelativeLinks failed: %v", err)
+	}
+
+	result, _ := os.ReadFile(htmlFile)
+	resultStr := string(result)
+
+	if strings.Contains(resultStr, "https://example.com/about/") {
+		t.Error("Should have converted internal link to relative")
+	}
+	if !strings.Contains(resultStr, "https://other.com/page/") {
+		t.Error("External link should be preserved")
+	}
+}
+
+func TestGeneratePostWithColocatedAssets(t *testing.T) {
+	tmpDir := t.TempDir()
+	srcDir := filepath.Join(tmpDir, "content", "test", "posts", "cat1")
+	outputDir := filepath.Join(tmpDir, "output")
+	templateDir := filepath.Join(tmpDir, "templates", "simple")
+
+	for _, d := range []string{srcDir, outputDir, templateDir} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := os.WriteFile(filepath.Join(srcDir, "post-image.png"), []byte("fakepng"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	post := models.Page{
+		Title:     "Test Post",
+		Slug:      "test-post",
+		Date:      time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC),
+		Type:      "post",
+		Status:    "publish",
+		Content:   "<p>Hello</p>",
+		SourceDir: srcDir,
+	}
+
+	gen := &Generator{
+		config: Config{
+			OutputDir:    outputDir,
+			TemplatesDir: filepath.Join(tmpDir, "templates"),
+			Template:     "simple",
+			Domain:       "example.com",
+			Quiet:        true,
+		},
+		siteData: &models.SiteData{
+			Domain: "example.com",
+		},
+		tmpl: template.Must(template.New("post.html").Parse(`<html><body>{{.Post.Title}}</body></html>`)),
+	}
+
+	err := gen.generatePost(post)
+	if err != nil {
+		t.Fatalf("generatePost failed: %v", err)
+	}
+
+	// Check that co-located image was copied
+	expectedImagePath := filepath.Join(outputDir, "2026", "01", "15", "test-post", "post-image.png")
+	if _, err := os.Stat(expectedImagePath); os.IsNotExist(err) {
+		t.Errorf("Co-located image should have been copied to %s", expectedImagePath)
+	}
+}
+
+func TestGeneratePageWithColocatedAssets(t *testing.T) {
+	tmpDir := t.TempDir()
+	srcDir := filepath.Join(tmpDir, "content", "test", "pages")
+	outputDir := filepath.Join(tmpDir, "output")
+	templateDir := filepath.Join(tmpDir, "templates", "simple")
+
+	for _, d := range []string{srcDir, outputDir, templateDir} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := os.WriteFile(filepath.Join(srcDir, "about-photo.jpg"), []byte("fakejpg"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	page := models.Page{
+		Title:     "About",
+		Slug:      "about",
+		Type:      "page",
+		Status:    "publish",
+		Content:   "<p>About us</p>",
+		SourceDir: srcDir,
+	}
+
+	gen := &Generator{
+		config: Config{
+			OutputDir:    outputDir,
+			TemplatesDir: filepath.Join(tmpDir, "templates"),
+			Template:     "simple",
+			Domain:       "example.com",
+			Quiet:        true,
+		},
+		siteData: &models.SiteData{
+			Domain: "example.com",
+		},
+		tmpl: template.Must(template.New("page.html").Parse(`<html><body>{{.Page.Title}}</body></html>`)),
+	}
+
+	err := gen.generatePage(page)
+	if err != nil {
+		t.Fatalf("generatePage failed: %v", err)
+	}
+
+	expectedImagePath := filepath.Join(outputDir, "about", "about-photo.jpg")
+	if _, err := os.Stat(expectedImagePath); os.IsNotExist(err) {
+		t.Errorf("Co-located image should have been copied to %s", expectedImagePath)
+	}
+}
+
+func TestGeneratePageNoSourceDir(t *testing.T) {
+	tmpDir := t.TempDir()
+	outputDir := filepath.Join(tmpDir, "output")
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	page := models.Page{
+		Title:   "Test",
+		Slug:    "test",
+		Type:    "page",
+		Status:  "publish",
+		Content: "<p>Test</p>",
+		// SourceDir intentionally empty
+	}
+
+	gen := &Generator{
+		config: Config{
+			OutputDir: outputDir,
+			Domain:    "example.com",
+			Quiet:     true,
+		},
+		siteData: &models.SiteData{
+			Domain: "example.com",
+		},
+		tmpl: template.Must(template.New("page.html").Parse(`<html>{{.Page.Title}}</html>`)),
+	}
+
+	err := gen.generatePage(page)
+	if err != nil {
+		t.Fatalf("generatePage should work without SourceDir: %v", err)
+	}
+}
+
+func TestLoadMarkdownDirSetsSourceDir(t *testing.T) {
+	tmpDir := t.TempDir()
+	pagesDir := filepath.Join(tmpDir, "pages")
+	if err := os.MkdirAll(pagesDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	mdContent := `---
+title: "Test Page"
+slug: "test"
+status: "publish"
+type: "page"
+date: "2026-01-01"
+---
+Hello world`
+
+	if err := os.WriteFile(filepath.Join(pagesDir, "test.md"), []byte(mdContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pagesDir, "test-image.png"), []byte("fake"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	gen := &Generator{config: Config{Quiet: true}}
+	pages, err := gen.loadMarkdownDir(pagesDir)
+	if err != nil {
+		t.Fatalf("loadMarkdownDir failed: %v", err)
+	}
+
+	if len(pages) != 1 {
+		t.Fatalf("Expected 1 page, got %d", len(pages))
+	}
+
+	if pages[0].SourceDir != pagesDir {
+		t.Errorf("Expected SourceDir=%s, got %s", pagesDir, pages[0].SourceDir)
+	}
+}

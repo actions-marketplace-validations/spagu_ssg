@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.1] - 2026-03-30
+
+### Added
+- 📎 **Co-located content assets** - Images and media files placed alongside Markdown content files are automatically copied to the corresponding output directory
+  - Place `entry-image.png` next to `entry.md` and reference it with `![](entry-image.png)`
+  - Supports: PNG, JPG, JPEG, GIF, SVG, WebP, ICO, BMP, TIFF, AVIF, MP4, WebM, OGG, MP3, WAV, PDF, ZIP
+  - Works for both pages and posts
+- 📖 **Man page** - Comprehensive `ssg.1` man page with full documentation of all options, configuration, and examples
+  - Installed automatically via `make install`, DEB, and RPM packages
+
+### Changed
+- ⬆️ **Go dependencies updated** - All modules bumped to latest versions
+  - goldmark v1.7.16 → v1.8.2
+  - grpc v1.79.1 → v1.79.3
+  - golang.org/x/net v0.48.0 → v0.52.0
+  - golang.org/x/sys v0.39.0 → v0.42.0
+  - golang.org/x/text v0.32.0 → v0.35.0
+- 🐳 **Docker image updated**
+  - Go builder: 1.25 → 1.26
+  - Alpine runtime: 3.19 → 3.23
+- 🔧 **GitHub Actions updated to latest versions**
+  - codecov/codecov-action v4 → v5
+  - docker/setup-qemu-action v3 → v4
+  - docker/setup-buildx-action v3 → v4
+  - docker/login-action v3 → v4
+  - docker/metadata-action v5 → v6
+  - docker/build-push-action v5 → v7
+  - actions/upload-artifact v4 → v7
+  - actions/download-artifact v4 → v8
+  - github/codeql-action v3 → v4
+- 📦 **Snap package updated** - base core22 → core24, platforms syntax
+- 🔒 **Security** - Added gosec `#nosec` annotations for all G703/G122 false positives
+
 ## [1.7.0] - 2026-03-05
 
 ### Added

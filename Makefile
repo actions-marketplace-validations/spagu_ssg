@@ -173,14 +173,20 @@ clean: ## 🗑️  Clean build artifacts
 	@echo "${GREEN}✅ Cleaned${RESET}"
 
 # Install
-install: build ## 💿 Install binary to /usr/local/bin
+install: build ## 💿 Install binary and man page
 	@echo "${BLUE}💿 Installing $(BINARY_NAME)...${RESET}"
 	@sudo cp $(BUILD_DIR)/$(BINARY_NAME) /usr/local/bin/$(BINARY_NAME)
+	@if [ -f man/ssg.1 ]; then \
+		sudo mkdir -p /usr/local/share/man/man1; \
+		sudo cp man/ssg.1 /usr/local/share/man/man1/ssg.1; \
+		echo "${GREEN}✅ Man page installed${RESET}"; \
+	fi
 	@echo "${GREEN}✅ Installed to /usr/local/bin/$(BINARY_NAME)${RESET}"
 
-uninstall: ## 🗑️  Uninstall binary
+uninstall: ## 🗑️  Uninstall binary and man page
 	@echo "${BLUE}🗑️  Uninstalling $(BINARY_NAME)...${RESET}"
 	@sudo rm -f /usr/local/bin/$(BINARY_NAME)
+	@sudo rm -f /usr/local/share/man/man1/ssg.1
 	@echo "${GREEN}✅ Uninstalled${RESET}"
 
 # Release

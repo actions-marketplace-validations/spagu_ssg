@@ -1,0 +1,355 @@
+.\" SSG - Static Site Generator
+.\" Man page for ssg(1)
+.TH SSG 1 "2026-03-30" "1.7.1" "SSG Manual"
+.SH NAME
+ssg \- fast static site generator written in Go
+.SH SYNOPSIS
+.B ssg
+.I source template domain
+.RI [ options ]
+.br
+.B ssg
+.B \-\-config
+.I file
+.RI [ options ]
+.br
+.B ssg
+.B \-\-mddb\-url\fR=\fIURL
+.B \-\-mddb\-collection\fR=\fINAME
+.I template domain
+.RI [ options ]
+.SH DESCRIPTION
+.B ssg
+is a fast and flexible static site generator that converts Markdown content
+with YAML frontmatter into static HTML websites. It supports multiple template
+engines (Go, Pongo2/Jinja2, Mustache, Handlebars), WebP image conversion,
+built-in HTTP server with live reload, and deployment packaging for
+Cloudflare Pages.
+.PP
+SSG can read content from local Markdown files or from a remote MDDB
+(Markdown Database) server via HTTP or gRPC.
+.SH ARGUMENTS
+.TP
+.I source
+Content source folder name (inside content-dir). Not required when using
+MDDB content source.
+.TP
+.I template
+Template name (inside templates-dir).
+.TP
+.I domain
+Target domain for the generated site (e.g., example.com).
+.SH OPTIONS
+.SS Configuration
+.TP
+.BR \-\-config =\fIFILE
+Load configuration from a YAML, TOML, or JSON file. If not specified,
+auto-detects \fB.ssg.yaml\fR, \fB.ssg.toml\fR, or \fB.ssg.json\fR in the
+current directory.
+.SS Template Engine
+.TP
+.BR \-\-engine =\fIENGINE
+Template engine to use. Available engines:
+.BR go " (default),"
+.BR pongo2 " (Jinja2/Django-like),"
+.BR mustache ","
+.BR handlebars .
+.TP
+.BR \-\-online\-theme =\fIURL
+Download theme from a URL. Supports GitHub, GitLab repositories, or direct
+ZIP file URLs.
+.SS MDDB Content Source
+.TP
+.BR \-\-mddb\-url =\fIURL
+MDDB server URL. Enables MDDB mode. Use \fBhttp://localhost:11023\fR for
+HTTP or \fBlocalhost:11024\fR for gRPC.
+.TP
+.BR \-\-mddb\-protocol =\fIPROTO
+Connection protocol: \fBhttp\fR (default) or \fBgrpc\fR.
+.TP
+.BR \-\-mddb\-collection =\fINAME
+Collection name for fetching pages and posts.
+.TP
+.BR \-\-mddb\-key =\fIKEY
+API key for MDDB authentication (optional).
+.TP
+.BR \-\-mddb\-lang =\fILANG
+Language filter for MDDB documents (e.g., \fBen_US\fR, \fBpl_PL\fR).
+.TP
+.BR \-\-mddb\-timeout =\fISEC
+Request timeout in seconds (default: 30).
+.TP
+.BR \-\-mddb\-batch\-size =\fIN
+Batch size for pagination when fetching documents (default: 1000).
+.TP
+.B \-\-mddb\-watch
+Watch MDDB for content changes and rebuild automatically.
+.TP
+.BR \-\-mddb\-watch\-interval =\fISEC
+Polling interval for MDDB watch mode in seconds (default: 30).
+.SS Server & Development
+.TP
+.B \-\-http
+Start the built-in HTTP server after generating the site.
+.TP
+.BR \-\-port =\fIPORT
+HTTP server port (default: 8888).
+.TP
+.B \-\-watch
+Watch content and template directories for file changes and rebuild
+automatically.
+.TP
+.B \-\-clean
+Remove the output directory before building.
+.SS Output Control
+.TP
+.B \-\-sitemap\-off
+Disable sitemap.xml generation.
+.TP
+.B \-\-robots\-off
+Disable robots.txt generation.
+.TP
+.BR \-\-pretty\-html ", " \-\-pretty
+Clean up generated HTML by removing all blank lines, without aggressive
+minification.
+.TP
+.B \-\-relative\-links
+Convert absolute URLs containing the site domain to relative links.
+Supports href, src, action attributes and url() in inline styles.
+.TP
+.BR \-\-post\-url\-format =\fIFMT
+Post URL format. Options:
+.RS
+.TP
+.B date
+Date-based URLs: \fB/YYYY/MM/DD/slug/\fR (default).
+.TP
+.B slug
+SEO-friendly slug-only URLs: \fB/slug/\fR.
+.RE
+.TP
+.B \-\-minify\-all
+Minify HTML, CSS, and JS output.
+.TP
+.B \-\-minify\-html
+Minify only HTML output.
+.TP
+.B \-\-minify\-css
+Minify only CSS output.
+.TP
+.B \-\-minify\-js
+Minify only JS output.
+.TP
+.B \-\-sourcemap
+Include source maps in output.
+.SS Image Processing
+.TP
+.B \-\-webp
+Convert images to WebP format. Requires \fBcwebp\fR to be installed.
+.TP
+.BR \-\-webp\-quality =\fIN
+WebP compression quality, 1\-100 (default: 60).
+.TP
+.B \-\-reconvert\-images
+Force reconversion of images even if WebP versions already exist.
+.SS Deployment
+.TP
+.B \-\-zip
+Create a ZIP deployment package for Cloudflare Pages.
+.SS Paths
+.TP
+.BR \-\-content\-dir =\fIPATH
+Content directory (default: \fBcontent\fR).
+.TP
+.BR \-\-templates\-dir =\fIPATH
+Templates directory (default: \fBtemplates\fR).
+.TP
+.BR \-\-output\-dir =\fIPATH
+Output directory (default: \fBoutput\fR).
+.SS Other
+.TP
+.BR \-\-quiet ", " \-q
+Suppress all output; only exit codes indicate success or failure.
+.TP
+.BR \-\-version ", " \-v
+Print the version and exit.
+.TP
+.BR \-\-help ", " \-h
+Print usage information and exit.
+.SH CONFIGURATION FILE
+SSG supports configuration via YAML, TOML, or JSON files. The config file
+is specified with \fB\-\-config\fR or auto-detected as \fB.ssg.yaml\fR,
+\fB.ssg.toml\fR, or \fB.ssg.json\fR.
+.PP
+Example \fB.ssg.yaml\fR:
+.PP
+.RS
+.nf
+source: "my-content"
+template: "simple"
+domain: "example.com"
+webp: true
+webp_quality: 80
+pretty_html: true
+post_url_format: "slug"
+engine: "go"
+
+shortcodes:
+  - name: "promo"
+    template: "shortcodes/banner.html"
+    title: "Special Offer"
+    text: "Get 50% off!"
+    url: "https://example.com"
+
+mddb:
+  enabled: true
+  url: "http://localhost:11023"
+  collection: "blog"
+  protocol: "http"
+  lang: "en_US"
+  watch: true
+  watch_interval: 30
+.fi
+.RE
+.SH TEMPLATE ENGINES
+SSG supports four template engines:
+.TP
+.B go
+Go's standard \fBhtml/template\fR package (default). Uses \fB{{ .Field }}\fR
+syntax.
+.TP
+.B pongo2
+Jinja2/Django-like templates. Uses \fB{{ field }}\fR and
+\fB{% block %}\fR syntax.
+.TP
+.B mustache
+Logic-less templates. Uses \fB{{field}}\fR and \fB{{#section}}\fR syntax.
+.TP
+.B handlebars
+Extension of Mustache with helpers. Uses \fB{{field}}\fR and
+\fB{{#if condition}}\fR syntax.
+.SH CO-LOCATED ASSETS
+Images and other media files placed alongside Markdown content files are
+automatically copied to the corresponding output directory. This allows
+you to reference images with simple relative paths in your Markdown.
+.PP
+For example, if you have:
+.PP
+.RS
+.nf
+content/my-site/pages/about.md
+content/my-site/pages/about-photo.png
+.fi
+.RE
+.PP
+The \fBabout-photo.png\fR will be copied to \fBoutput/about/about-photo.png\fR,
+and you can reference it in \fBabout.md\fR as:
+.PP
+.RS
+.nf
+![Photo](about-photo.png)
+.fi
+.RE
+.PP
+Supported asset types: PNG, JPG, JPEG, GIF, SVG, WebP, ICO, BMP, TIFF,
+AVIF, MP4, WebM, OGG, MP3, WAV, PDF, ZIP.
+.SH BUILT-IN THEMES
+.TP
+.B simple
+Modern dark theme with glassmorphism effects, purple gradient accents, and
+micro-animations.
+.TP
+.B krowy
+Light green farm theme inspired by krowy.net, with natural colors and
+organic design.
+.SH EXIT STATUS
+.TP
+.B 0
+Successful execution.
+.TP
+.B 1
+Error during generation, invalid configuration, or missing required
+arguments.
+.SH EXAMPLES
+Generate a site with the simple template:
+.PP
+.RS
+.nf
+ssg my-site simple example.com
+.fi
+.RE
+.PP
+Start development server with live reload:
+.PP
+.RS
+.nf
+ssg my-site simple example.com --http --watch
+.fi
+.RE
+.PP
+Build with minification and WebP conversion:
+.PP
+.RS
+.nf
+ssg my-site krowy example.com --clean --minify-all --webp --zip
+.fi
+.RE
+.PP
+Use Pongo2 template engine with an online theme:
+.PP
+.RS
+.nf
+ssg my-site mytheme example.com --engine=pongo2 \\
+    --online-theme=https://github.com/user/hugo-theme
+.fi
+.RE
+.PP
+Use MDDB content source with gRPC:
+.PP
+.RS
+.nf
+ssg --mddb-url=localhost:11024 --mddb-protocol=grpc \\
+    --mddb-collection=blog krowy example.com
+.fi
+.RE
+.PP
+Load all settings from config file:
+.PP
+.RS
+.nf
+ssg --config .ssg.yaml --http --watch
+.fi
+.RE
+.SH FILES
+.TP
+.I .ssg.yaml
+Default YAML configuration file (auto-detected).
+.TP
+.I .ssg.toml
+Default TOML configuration file (auto-detected).
+.TP
+.I .ssg.json
+Default JSON configuration file (auto-detected).
+.TP
+.I content/
+Default content directory containing Markdown files.
+.TP
+.I templates/
+Default templates directory containing theme files.
+.TP
+.I output/
+Default output directory for generated HTML.
+.SH ENVIRONMENT
+SSG does not use environment variables. All configuration is done via
+command-line flags or configuration files.
+.SH BUGS
+Report bugs at: https://github.com/spagu/ssg/issues
+.SH AUTHORS
+spagu <spagu@github.com>
+.SH SEE ALSO
+.BR goldmark (7),
+.BR cwebp (1)
+.PP
+Full documentation: https://github.com/spagu/ssg
+.SH LICENSE
+BSD 3-Clause License. See LICENSE file for details.

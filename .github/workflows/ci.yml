@@ -45,7 +45,7 @@ jobs:
         run: go test -v -race -coverprofile=coverage.out ./...
 
       - name: Upload coverage
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v5
         with:
           files: ./coverage.out
           fail_ci_if_error: false
@@ -180,7 +180,7 @@ jobs:
           mv ssg.exe "ssg-${{ matrix.suffix }}.exe"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ssg-${{ matrix.suffix }}
           path: dist/*
@@ -231,11 +231,14 @@ jobs:
           mkdir -p "${PKG_DIR}/DEBIAN"
           mkdir -p "${PKG_DIR}/usr/bin"
           mkdir -p "${PKG_DIR}/usr/share/doc/ssg"
+          mkdir -p "${PKG_DIR}/usr/share/man/man1"
 
           cp ssg "${PKG_DIR}/usr/bin/"
           chmod 755 "${PKG_DIR}/usr/bin/ssg"
 
           cp README.md CHANGELOG.md "${PKG_DIR}/usr/share/doc/ssg/"
+          cp man/ssg.1 "${PKG_DIR}/usr/share/man/man1/ssg.1"
+          gzip -9 "${PKG_DIR}/usr/share/man/man1/ssg.1"
           echo "MIT License" > "${PKG_DIR}/usr/share/doc/ssg/LICENSE"
 
           cat > "${PKG_DIR}/DEBIAN/control" << EOF
@@ -256,7 +259,7 @@ jobs:
           dpkg-deb --build "${PKG_DIR}"
 
       - name: Upload DEB artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ssg-deb-${{ matrix.arch }}
           path: "*.deb"
@@ -336,7 +339,7 @@ jobs:
           cp ~/rpmbuild/RPMS/${ARCH}/*.rpm .
 
       - name: Upload RPM artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ssg-rpm-${{ matrix.rpmarch }}
           path: "*.rpm"
@@ -363,7 +366,7 @@ jobs:
           fi
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
 

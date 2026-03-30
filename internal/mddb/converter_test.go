@@ -236,6 +236,286 @@ func TestExtractMedia(t *testing.T) {
 	}
 }
 
+func TestToMetadata(t *testing.T) {
+	docs := []Document{
+		{
+			Collection: "categories",
+			Key:        "tech",
+			Metadata: map[string]any{
+				"id":          float64(1),
+				"name":        "Technology",
+				"description": "Tech posts",
+				"link":        "/category/tech/",
+				"count":       float64(10),
+				"parent":      float64(0),
+			},
+		},
+		{
+			Collection: "media",
+			Key:        "img-1",
+			Metadata: map[string]any{
+				"id":         float64(100),
+				"media_type": "image",
+				"mime_type":  "image/png",
+				"source_url": "https://example.com/img.png",
+			},
+		},
+		{
+			Collection: "users",
+			Key:        "admin",
+			Metadata: map[string]any{
+				"id":   float64(1),
+				"name": "Admin",
+			},
+		},
+		{
+			Collection: "unknown",
+			Key:        "other",
+			Metadata:   map[string]any{},
+		},
+	}
+
+	metadata, err := ToMetadata(docs)
+	if err != nil {
+		t.Fatalf("ToMetadata() error = %v", err)
+	}
+
+	if len(metadata.Categories) != 1 {
+		t.Errorf("len(Categories) = %v, want 1", len(metadata.Categories))
+	}
+	if metadata.Categories[0].Name != "Technology" {
+		t.Errorf("Categories[0].Name = %v, want Technology", metadata.Categories[0].Name)
+	}
+
+	if len(metadata.Media) != 1 {
+		t.Errorf("len(Media) = %v, want 1", len(metadata.Media))
+	}
+	if metadata.Media[0].MediaType != "image" {
+		t.Errorf("Media[0].MediaType = %v, want image", metadata.Media[0].MediaType)
+	}
+
+	if len(metadata.Users) != 1 {
+		t.Errorf("len(Users) = %v, want 1", len(metadata.Users))
+	}
+	if metadata.Users[0].Name != "Admin" {
+		t.Errorf("Users[0].Name = %v, want Admin", metadata.Users[0].Name)
+	}
+}
+
+func TestToMetadata_EmptyDocs(t *testing.T) {
+	metadata, err := ToMetadata(nil)
+	if err != nil {
+		t.Fatalf("ToMetadata() error = %v", err)
+	}
+	if len(metadata.Categories) != 0 {
+		t.Error("expected no categories")
+	}
+	if len(metadata.Media) != 0 {
+		t.Error("expected no media")
+	}
+	if len(metadata.Users) != 0 {
+		t.Error("expected no users")
+	}
+}
+
+func TestExtractMedia_WithDetails(t *testing.T) {
+	doc := Document{
+		Key: "photo-1",
+		Metadata: map[string]any{
+			"id":         float64(200),
+			"media_type": "image",
+			"mime_type":  "image/jpeg",
+			"source_url": "https://example.com/photo.jpg",
+			"title": map[string]interface{}{
+				"rendered": "Photo Title",
+			},
+			"media_details": map[string]interface{}{
+				"width":  float64(1920),
+				"height": float64(1080),
+				"file":   "2024/01/photo.jpg",
+			},
+		},
+	}
+
+	media := extractMedia(doc)
+
+	if media.ID != 200 {
+		t.Errorf("media.ID = %v, want 200", media.ID)
+	}
+	if int(media.MediaDetails.Width) != 1920 {
+		t.Errorf("media.MediaDetails.Width = %v, want 1920", media.MediaDetails.Width)
+	}
+	if int(media.MediaDetails.Height) != 1080 {
+		t.Errorf("media.MediaDetails.Height = %v, want 1080", media.MediaDetails.Height)
+	}
+	if media.MediaDetails.File != "2024/01/photo.jpg" {
+		t.Errorf("media.MediaDetails.File = %v, want '2024/01/photo.jpg'", media.MediaDetails.File)
+	}
+	if media.Title.Rendered != "Photo Title" {
+		t.Errorf("media.Title.Rendered = %v, want 'Photo Title'", media.Title.Rendered)
+	}
+	if media.SourceURL != "https://example.com/photo.jpg" {
+		t.Errorf("media.SourceURL = %v, want 'https://example.com/photo.jpg'", media.SourceURL)
+	}
+}
+
+func TestExtractMedia_EmptyMetadata(t *testing.T) {
+	doc := Document{
+		Key:      "empty",
+		Metadata: map[string]any{},
+	}
+
+	media := extractMedia(doc)
+
+	if media.Slug != "empty" {
+		t.Errorf("media.Slug = %v, want empty", media.Slug)
+	}
+	if media.ID != 0 {
+		t.Errorf("media.ID = %v, want 0", media.ID)
+	}
+}
+
+func TestExtractCategory_EmptyMetadata(t *testing.T) {
+	doc := Document{
+		Key:      "uncategorized",
+		Metadata: map[string]any{},
+	}
+
+	cat := extractCategory(doc)
+
+	if cat.Slug != "uncategorized" {
+		t.Errorf("cat.Slug = %v, want uncategorized", cat.Slug)
+	}
+	if cat.ID != 0 {
+		t.Errorf("cat.ID = %v, want 0", cat.ID)
+	}
+}
+
+func TestExtractAuthor_EmptyMetadata(t *testing.T) {
+	doc := Document{
+		Key:      "anon",
+		Metadata: map[string]any{},
+	}
+
+	author := extractAuthor(doc)
+
+	if author.Slug != "anon" {
+		t.Errorf("author.Slug = %v, want anon", author.Slug)
+	}
+	if author.ID != 0 {
+		t.Errorf("author.ID = %v, want 0", author.ID)
+	}
+}
+
+func TestToPages_EmptySlice(t *testing.T) {
+	pages, err := ToPages(nil)
+	if err != nil {
+		t.Fatalf("ToPages() error = %v", err)
+	}
+	if len(pages) != 0 {
+		t.Errorf("expected empty pages, got %d", len(pages))
+	}
+}
+
+func TestToPages_AllDrafts(t *testing.T) {
+	docs := []Document{
+		{Key: "d1", Metadata: map[string]any{"status": "draft"}},
+		{Key: "d2", Metadata: map[string]any{"status": "private"}},
+	}
+
+	pages, err := ToPages(docs)
+	if err != nil {
+		t.Fatalf("ToPages() error = %v", err)
+	}
+	if len(pages) != 0 {
+		t.Errorf("expected 0 pages, got %d", len(pages))
+	}
+}
+
+func TestDocument_ToPage_AllDateFormats(t *testing.T) {
+	tests := []struct {
+		name     string
+		dateStr  string
+		wantYear int
+	}{
+		{"RFC3339", "2024-06-15T10:30:00Z", 2024},
+		{"datetime no tz", "2024-06-15T10:30:00", 2024},
+		{"datetime space", "2024-06-15 10:30:00", 2024},
+		{"date only", "2024-06-15", 2024},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			doc := Document{
+				Key:      "test",
+				Metadata: map[string]any{"date": tt.dateStr, "modified": tt.dateStr},
+			}
+
+			page, err := doc.ToPage()
+			if err != nil {
+				t.Fatalf("ToPage() error = %v", err)
+			}
+			if page.Date.Year() != tt.wantYear {
+				t.Errorf("Date.Year = %v, want %v", page.Date.Year(), tt.wantYear)
+			}
+			if page.Modified.Year() != tt.wantYear {
+				t.Errorf("Modified.Year = %v, want %v", page.Modified.Year(), tt.wantYear)
+			}
+		})
+	}
+}
+
+func TestDocument_ToPage_InvalidDate(t *testing.T) {
+	now := time.Now()
+	doc := Document{
+		Key:       "test",
+		Metadata:  map[string]any{"date": "not-a-date", "modified": "also-bad"},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+
+	page, err := doc.ToPage()
+	if err != nil {
+		t.Fatalf("ToPage() error = %v", err)
+	}
+	if !page.Date.Equal(now) {
+		t.Error("Date should fall back to CreatedAt for invalid date string")
+	}
+	if !page.Modified.Equal(now) {
+		t.Error("Modified should fall back to UpdatedAt for invalid modified string")
+	}
+}
+
+func TestDocument_ToPage_NoCategories(t *testing.T) {
+	doc := Document{
+		Key:      "test",
+		Metadata: map[string]any{},
+	}
+
+	page, err := doc.ToPage()
+	if err != nil {
+		t.Fatalf("ToPage() error = %v", err)
+	}
+	if len(page.Categories) != 0 {
+		t.Errorf("expected no categories, got %v", page.Categories)
+	}
+}
+
+func TestDocument_ToPage_SlugFallback(t *testing.T) {
+	doc := Document{
+		Key:      "my-key",
+		Metadata: map[string]any{},
+	}
+
+	page, err := doc.ToPage()
+	if err != nil {
+		t.Fatalf("ToPage() error = %v", err)
+	}
+	if page.Slug != "my-key" {
+		t.Errorf("Slug = %v, want my-key (fallback to Key)", page.Slug)
+	}
+}
+
 func TestExtractAuthor(t *testing.T) {
 	doc := Document{
 		Key: "john-doe",

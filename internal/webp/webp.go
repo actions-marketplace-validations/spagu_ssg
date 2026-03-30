@@ -42,7 +42,7 @@ func ConvertDirectory(dir string, opts ConvertOptions) (converted int, savedByte
 			if !opts.Force {
 				if _, statErr := os.Stat(webpPath); statErr == nil {
 					// WebP exists - delete the original jpg/png from output
-					_ = os.Remove(path)
+					_ = os.Remove(path) // #nosec G122 -- CLI tool operates on user's output files
 					skipped++
 					return nil
 				}
@@ -132,7 +132,7 @@ func UpdateReferences(dir string) error {
 			return nil
 		}
 
-		content, err := os.ReadFile(path) // #nosec G304 -- CLI tool reads user's output files
+		content, err := os.ReadFile(path) // #nosec G304,G122 -- CLI tool reads user's output files
 		if err != nil {
 			return err
 		}
@@ -155,7 +155,7 @@ func UpdateReferences(dir string) error {
 		newContent = strings.ReplaceAll(newContent, ".png ", ".webp ")
 
 		if newContent != string(content) {
-			return os.WriteFile(path, []byte(newContent), info.Mode())
+			return os.WriteFile(path, []byte(newContent), info.Mode()) // #nosec G703,G122 -- CLI tool writes user's output files
 		}
 		return nil
 	})

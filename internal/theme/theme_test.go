@@ -871,3 +871,264 @@ func createZipBytes(t *testing.T, files map[string]string) []byte {
 
 	return content
 }
+
+func TestExtractZipPrefixDirectorySkipped(t *testing.T) {
+	tmpDir := t.TempDir()
+	destDir := filepath.Join(tmpDir, "extracted")
+
+	zipPath := filepath.Join(tmpDir, "test.zip")
+	zipFile, err := os.Create(zipPath)
+	if err != nil {
+		t.Fatalf("Failed to create zip file: %v", err)
+	}
+
+	zipWriter := zip.NewWriter(zipFile)
+
+	dirHeader := &zip.FileHeader{
+		Name:   "root/",
+		Method: zip.Store,
+	}
+	dirHeader.SetMode(os.ModeDir | 0755)
+	_, err = zipWriter.CreateHeader(dirHeader)
+	if err != nil {
+		t.Fatalf("Failed to create dir entry: %v", err)
+	}
+
+	fileWriter, err := zipWriter.Create("root/file.txt")
+	if err != nil {
+		t.Fatalf("Failed to create file entry: %v", err)
+	}
+	_, _ = fileWriter.Write([]byte("content"))
+
+	_ = zipWriter.Close()
+	_ = zipFile.Close()
+
+	if extractErr := extractZip(zipPath, destDir); extractErr != nil {
+		t.Fatalf("extractZip failed: %v", extractErr)
+	}
+
+	if _, statErr := os.Stat(filepath.Join(destDir, "file.txt")); statErr != nil {
+		t.Errorf("file.txt not extracted: %v", statErr)
+	}
+}
+
+func TestExtractZipFileOpenError(t *testing.T) {
+	tmpDir := t.TempDir()
+	destDir := filepath.Join(tmpDir, "extracted")
+
+	zipPath := filepath.Join(tmpDir, "test.zip")
+	zipFile, err := os.Create(zipPath)
+	if err != nil {
+		t.Fatalf("Failed to create zip file: %v", err)
+	}
+
+	zipWriter := zip.NewWriter(zipFile)
+
+	fileWriter, err := zipWriter.Create("root/file.txt")
+	if err != nil {
+		t.Fatalf("Failed to create file entry: %v", err)
+	}
+	_, _ = fileWriter.Write([]byte("content"))
+
+	_ = zipWriter.Close()
+	_ = zipFile.Close()
+
+	if extractErr := extractZip(zipPath, destDir); extractErr != nil {
+		t.Fatalf("extractZip failed: %v", extractErr)
+	}
+
+	resultContent, readErr := os.ReadFile(filepath.Join(destDir, "file.txt"))
+	if readErr != nil {
+		t.Errorf("file.txt not found: %v", readErr)
+	} else if string(resultContent) != "content" {
+		t.Errorf("Expected 'content', got '%s'", string(resultContent))
+	}
+}
+
+func TestExtractZipParentDirCreationFail(t *testing.T) {
+	tmpDir := t.TempDir()
+	destDir := filepath.Join(tmpDir, "extracted")
+
+	zipPath := filepath.Join(tmpDir, "test.zip")
+	if createErr := createTestZip(zipPath, map[string]string{
+		"root/sub/deep/file.txt": "content",
+	}); createErr != nil {
+		t.Fatalf("Failed to create test zip: %v", createErr)
+	}
+
+	if mkErr := os.MkdirAll(destDir, 0755); mkErr != nil {
+		t.Fatalf("Failed to create dest dir: %v", mkErr)
+	}
+
+	blockPath := filepath.Join(destDir, "sub")
+	if writeErr := os.WriteFile(blockPath, []byte("blocker"), 0444); writeErr != nil {
+		t.Fatalf("Failed to create blocker file: %v", writeErr)
+	}
+
+	extractErr := extractZip(zipPath, destDir)
+	if extractErr == nil {
+		t.Error("Expected error when parent dir creation fails")
+	}
+}
+
+func TestExtractZipOpenFileError(t *testing.T) {
+	tmpDir := t.TempDir()
+	destDir := filepath.Join(tmpDir, "extracted")
+
+	zipPath := filepath.Join(tmpDir, "test.zip")
+	if createErr := createTestZip(zipPath, map[string]string{
+		"root/target.txt": "content",
+	}); createErr != nil {
+		t.Fatalf("Failed to create test zip: %v", createErr)
+	}
+
+	if mkErr := os.MkdirAll(destDir, 0755); mkErr != nil {
+		t.Fatalf("Failed to create dest: %v", mkErr)
+	}
+
+	targetPath := filepath.Join(destDir, "target.txt")
+	if mkErr := os.MkdirAll(targetPath, 0755); mkErr != nil {
+		t.Fatalf("Failed to create blocker dir: %v", mkErr)
+	}
+
+	extractErr := extractZip(zipPath, destDir)
+	if extractErr == nil {
+		t.Error("Expected error when file open fails due to existing directory")
+	}
+}
+
+func TestCopyDirRelPathError(t *testing.T) {
+	tmpDir := t.TempDir()
+	srcDir := filepath.Join(tmpDir, "src")
+	dstDir := filepath.Join(tmpDir, "dst")
+
+	if mkErr := os.MkdirAll(srcDir, 0755); mkErr != nil {
+		t.Fatalf("Failed to create src: %v", mkErr)
+	}
+	if writeErr := os.WriteFile(filepath.Join(srcDir, "file.txt"), []byte("data"), 0644); writeErr != nil {
+		t.Fatalf("Failed to write file: %v", writeErr)
+	}
+
+	if copyErr := copyDir(srcDir, dstDir); copyErr != nil {
+		t.Fatalf("copyDir should succeed: %v", copyErr)
+	}
+
+	dstContent, readErr := os.ReadFile(filepath.Join(dstDir, "file.txt"))
+	if readErr != nil {
+		t.Fatalf("Failed to read copied file: %v", readErr)
+	}
+	if string(dstContent) != "data" {
+		t.Errorf("Expected 'data', got '%s'", string(dstContent))
+	}
+}
+
+func TestDownloadServerError500(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	tmpDir := t.TempDir()
+	downloadErr := Download(server.URL+"/theme.zip", filepath.Join(tmpDir, "theme"))
+	if downloadErr == nil {
+		t.Error("Expected error for HTTP 500")
+	}
+	if !strings.Contains(downloadErr.Error(), "HTTP 500") {
+		t.Errorf("Expected HTTP 500 in error message, got: %v", downloadErr)
+	}
+}
+
+func TestExtractZipDirMkdirAllError(t *testing.T) {
+	tmpDir := t.TempDir()
+	destDir := filepath.Join(tmpDir, "extracted")
+
+	if mkErr := os.MkdirAll(destDir, 0755); mkErr != nil {
+		t.Fatalf("Failed to create dest: %v", mkErr)
+	}
+
+	blockerPath := filepath.Join(destDir, "parent")
+	if writeErr := os.WriteFile(blockerPath, []byte("blocker"), 0444); writeErr != nil {
+		t.Fatalf("Failed to create blocker: %v", writeErr)
+	}
+
+	zipPath := filepath.Join(tmpDir, "test.zip")
+	zipFile, fileErr := os.Create(zipPath)
+	if fileErr != nil {
+		t.Fatalf("Failed to create zip: %v", fileErr)
+	}
+
+	zipWriter := zip.NewWriter(zipFile)
+
+	dirHeader := &zip.FileHeader{
+		Name:   "root/parent/child/",
+		Method: zip.Store,
+	}
+	dirHeader.SetMode(os.ModeDir | 0755)
+	_, headerErr := zipWriter.CreateHeader(dirHeader)
+	if headerErr != nil {
+		t.Fatalf("Failed to create dir header: %v", headerErr)
+	}
+
+	_ = zipWriter.Close()
+	_ = zipFile.Close()
+
+	extractErr := extractZip(zipPath, destDir)
+	if extractErr == nil {
+		t.Error("Expected error when MkdirAll fails for directory entry")
+	}
+}
+
+func TestDownloadIOCopyError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "1000000")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("partial"))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			return
+		}
+		conn, _, hijackErr := hj.Hijack()
+		if hijackErr != nil {
+			return
+		}
+		_ = conn.Close()
+	}))
+	defer server.Close()
+
+	tmpDir := t.TempDir()
+	downloadErr := Download(server.URL+"/theme.zip", filepath.Join(tmpDir, "theme"))
+	if downloadErr == nil {
+		t.Error("Expected error when server cuts connection mid-stream")
+	}
+}
+
+func TestDownloadGitHubURL(t *testing.T) {
+	zipContent := createZipBytes(t, map[string]string{
+		"repo-main/index.html": "<html>test</html>",
+	})
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/user/repo/archive/refs/heads/main.zip" {
+			w.Header().Set("Content-Type", "application/zip")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(zipContent)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	tmpDir := t.TempDir()
+	gitHubURL := server.URL + "/user/repo/archive/refs/heads/main.zip"
+	downloadErr := Download(gitHubURL, filepath.Join(tmpDir, "theme"))
+	if downloadErr != nil {
+		t.Fatalf("Download failed: %v", downloadErr)
+	}
+
+	if _, statErr := os.Stat(filepath.Join(tmpDir, "theme", "index.html")); statErr != nil {
+		t.Error("index.html not extracted")
+	}
+}

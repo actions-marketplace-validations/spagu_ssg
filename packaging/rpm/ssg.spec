@@ -1,5 +1,5 @@
 Name:           ssg
-Version:        1.7.0
+Version:        1.7.1
 Release:        1%{?dist}
 Summary:        Fast static site generator written in Go
 
@@ -31,13 +31,22 @@ go build -ldflags "-s -w -X main.Version=%{version}" -o ssg ./cmd/ssg
 install -Dm755 ssg %{buildroot}%{_bindir}/ssg
 install -Dm644 README.md %{buildroot}%{_docdir}/%{name}/README.md
 install -Dm644 CHANGELOG.md %{buildroot}%{_docdir}/%{name}/CHANGELOG.md
+install -Dm644 man/ssg.1 %{buildroot}%{_mandir}/man1/ssg.1
 
 %files
 %license LICENSE
 %doc README.md CHANGELOG.md
 %{_bindir}/ssg
+%{_mandir}/man1/ssg.1*
 
 %changelog
+* Mon Mar 30 2026 spagu <spagu@github.com> - 1.7.1-1
+- Updated Go dependencies to latest versions
+- Updated Alpine base image to 3.23
+- Updated GitHub Actions to latest versions
+- Added comprehensive man page (ssg.1)
+- Updated snapcraft base to core24
+
 * Wed Mar 05 2026 spagu <spagu@github.com> - 1.7.0-1
 - Added optional gRPC connection for MDDB (--mddb-protocol=grpc)
 - Added MDDB watch mode with checksum polling (--mddb-watch)

@@ -55,6 +55,7 @@ type Page struct {
 	Excerpt    string    `yaml:"-"`
 	Content    string    `yaml:"-"`
 	URLFormat  string    `yaml:"-"` // URL format: "date" or "slug" (set by generator)
+	SourceDir  string    `yaml:"-"` // Source directory path (for co-located asset copying)
 }
 
 // GetURL returns the URL path for this page/post

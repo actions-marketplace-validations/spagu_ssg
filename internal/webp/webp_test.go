@@ -3,6 +3,7 @@ package webp
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 )
@@ -639,5 +640,234 @@ func TestUpdateReferencesReadError(t *testing.T) {
 	err := UpdateReferences(tmpDir)
 	if err == nil {
 		t.Error("Expected error for unreadable file")
+	}
+}
+
+func TestConvertDirectorySkipExistingWebP(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	pngData := []byte{
+		0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
+		0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+		0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+		0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53, 0xDE,
+		0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54,
+		0x08, 0xD7, 0x63, 0xF8, 0xFF, 0xFF, 0x3F, 0x00,
+		0x05, 0xFE, 0x02, 0xFE, 0xDC, 0xCC, 0x59, 0xE7,
+		0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44,
+		0xAE, 0x42, 0x60, 0x82,
+	}
+
+	pngPath := filepath.Join(tmpDir, "test.png")
+	if err := os.WriteFile(pngPath, pngData, 0644); err != nil {
+		t.Fatalf("Failed to write PNG: %v", err)
+	}
+
+	webpPath := filepath.Join(tmpDir, "test.webp")
+	if err := os.WriteFile(webpPath, []byte("existing webp"), 0644); err != nil {
+		t.Fatalf("Failed to write WebP: %v", err)
+	}
+
+	opts := ConvertOptions{
+		Quality: 80,
+		Quiet:   true,
+		Force:   false,
+	}
+
+	converted, _, err := ConvertDirectory(tmpDir, opts)
+	if err != nil {
+		t.Skipf("cwebp not available: %v", err)
+	}
+
+	if converted != 0 {
+		t.Errorf("Expected 0 conversions when webp exists, got %d", converted)
+	}
+
+	if _, statErr := os.Stat(pngPath); statErr == nil {
+		t.Error("Original PNG should be removed when webp already exists")
+	}
+
+	existingContent, readErr := os.ReadFile(webpPath)
+	if readErr != nil {
+		t.Fatalf("Failed to read existing webp: %v", readErr)
+	}
+	if string(existingContent) != "existing webp" {
+		t.Error("Existing webp should not be modified")
+	}
+}
+
+func TestConvertDirectorySkipExistingWebPNonQuiet(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	pngData := []byte{
+		0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
+		0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+		0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+		0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53, 0xDE,
+		0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54,
+		0x08, 0xD7, 0x63, 0xF8, 0xFF, 0xFF, 0x3F, 0x00,
+		0x05, 0xFE, 0x02, 0xFE, 0xDC, 0xCC, 0x59, 0xE7,
+		0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44,
+		0xAE, 0x42, 0x60, 0x82,
+	}
+
+	pngPath := filepath.Join(tmpDir, "test.png")
+	if err := os.WriteFile(pngPath, pngData, 0644); err != nil {
+		t.Fatalf("Failed to write PNG: %v", err)
+	}
+
+	webpPath := filepath.Join(tmpDir, "test.webp")
+	if err := os.WriteFile(webpPath, []byte("existing"), 0644); err != nil {
+		t.Fatalf("Failed to write WebP: %v", err)
+	}
+
+	opts := ConvertOptions{
+		Quality: 80,
+		Quiet:   false,
+		Force:   false,
+	}
+
+	converted, _, err := ConvertDirectory(tmpDir, opts)
+	if err != nil {
+		t.Skipf("cwebp not available: %v", err)
+	}
+
+	if converted != 0 {
+		t.Errorf("Expected 0 conversions, got %d", converted)
+	}
+}
+
+func TestConvertDirectoryForceReconvert(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	pngData := []byte{
+		0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
+		0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+		0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+		0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53, 0xDE,
+		0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54,
+		0x08, 0xD7, 0x63, 0xF8, 0xFF, 0xFF, 0x3F, 0x00,
+		0x05, 0xFE, 0x02, 0xFE, 0xDC, 0xCC, 0x59, 0xE7,
+		0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44,
+		0xAE, 0x42, 0x60, 0x82,
+	}
+
+	pngPath := filepath.Join(tmpDir, "test.png")
+	if err := os.WriteFile(pngPath, pngData, 0644); err != nil {
+		t.Fatalf("Failed to write PNG: %v", err)
+	}
+
+	webpPath := filepath.Join(tmpDir, "test.webp")
+	if err := os.WriteFile(webpPath, []byte("old webp"), 0644); err != nil {
+		t.Fatalf("Failed to write WebP: %v", err)
+	}
+
+	opts := ConvertOptions{
+		Quality: 80,
+		Quiet:   true,
+		Force:   true,
+	}
+
+	converted, _, err := ConvertDirectory(tmpDir, opts)
+	if err != nil {
+		t.Skipf("cwebp not available: %v", err)
+	}
+
+	if converted != 1 {
+		t.Errorf("Expected 1 conversion with Force, got %d", converted)
+	}
+
+	newContent, readErr := os.ReadFile(webpPath)
+	if readErr != nil {
+		t.Fatalf("Failed to read webp: %v", readErr)
+	}
+	if string(newContent) == "old webp" {
+		t.Error("WebP should be reconverted with Force=true")
+	}
+}
+
+func TestConvertDirectoryWithSkippedAndNewNonQuiet(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	pngData := []byte{
+		0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
+		0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+		0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+		0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53, 0xDE,
+		0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54,
+		0x08, 0xD7, 0x63, 0xF8, 0xFF, 0xFF, 0x3F, 0x00,
+		0x05, 0xFE, 0x02, 0xFE, 0xDC, 0xCC, 0x59, 0xE7,
+		0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44,
+		0xAE, 0x42, 0x60, 0x82,
+	}
+
+	skippedPng := filepath.Join(tmpDir, "skipped.png")
+	if err := os.WriteFile(skippedPng, pngData, 0644); err != nil {
+		t.Fatalf("Failed to write skipped PNG: %v", err)
+	}
+	skippedWebp := filepath.Join(tmpDir, "skipped.webp")
+	if err := os.WriteFile(skippedWebp, []byte("exists"), 0644); err != nil {
+		t.Fatalf("Failed to write existing WebP: %v", err)
+	}
+
+	newPng := filepath.Join(tmpDir, "new.png")
+	if err := os.WriteFile(newPng, pngData, 0644); err != nil {
+		t.Fatalf("Failed to write new PNG: %v", err)
+	}
+
+	opts := ConvertOptions{
+		Quality: 80,
+		Quiet:   false,
+		Force:   false,
+	}
+
+	converted, _, err := ConvertDirectory(tmpDir, opts)
+	if err != nil {
+		t.Skipf("cwebp not available: %v", err)
+	}
+
+	if converted != 1 {
+		t.Errorf("Expected 1 conversion, got %d", converted)
+	}
+}
+
+func TestConvertDirectoryStatErrorInSecondPass(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	pngData := []byte{
+		0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
+		0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+		0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+		0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53, 0xDE,
+		0x00, 0x00, 0x00, 0x0C, 0x49, 0x44, 0x41, 0x54,
+		0x08, 0xD7, 0x63, 0xF8, 0xFF, 0xFF, 0x3F, 0x00,
+		0x05, 0xFE, 0x02, 0xFE, 0xDC, 0xCC, 0x59, 0xE7,
+		0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44,
+		0xAE, 0x42, 0x60, 0x82,
+	}
+
+	pngPath := filepath.Join(tmpDir, "vanish.png")
+	if err := os.WriteFile(pngPath, pngData, 0644); err != nil {
+		t.Fatalf("Failed to write PNG: %v", err)
+	}
+
+	opts := ConvertOptions{
+		Quality: 80,
+		Quiet:   true,
+	}
+
+	if _, lookErr := exec.LookPath("cwebp"); lookErr != nil {
+		t.Skip("cwebp not available")
+	}
+
+	_ = os.Remove(pngPath)
+
+	converted, _, err := ConvertDirectory(tmpDir, opts)
+	if err != nil {
+		t.Skipf("cwebp not available: %v", err)
+	}
+
+	if converted != 0 {
+		t.Errorf("Expected 0 conversions when file vanishes, got %d", converted)
 	}
 }

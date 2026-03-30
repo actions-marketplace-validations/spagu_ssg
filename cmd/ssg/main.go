@@ -614,7 +614,7 @@ func build(genCfg generator.Config, cfg *config.Config) error {
 		}
 
 		if !cfg.Quiet {
-			if info, err := os.Stat(zipFileName); err == nil {
+			if info, err := os.Stat(zipFileName); err == nil { // #nosec G703 -- CLI tool checks user's output
 				sizeMB := float64(info.Size()) / (1024 * 1024)
 				fmt.Printf("📦 Created deployment package: %s (%.1f MB)\n", zipFileName, sizeMB)
 				if sizeMB > 25 {
@@ -629,7 +629,7 @@ func build(genCfg generator.Config, cfg *config.Config) error {
 func hasChanges(dirs []string, lastBuild time.Time) bool {
 	changed := false
 	for _, dir := range dirs {
-		_ = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		_ = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error { // #nosec G703 -- CLI tool scans user's content dirs
 			if err != nil {
 				return nil
 			}
@@ -649,7 +649,7 @@ func hasChanges(dirs []string, lastBuild time.Time) bool {
 }
 
 func createZip(sourceDir, zipFileName string) error {
-	zipFile, err := os.Create(zipFileName) // #nosec G304 -- CLI tool creates user's output file
+	zipFile, err := os.Create(zipFileName) // #nosec G304,G703 -- CLI tool creates user's output file
 	if err != nil {
 		return fmt.Errorf("creating zip file: %w", err)
 	}
@@ -658,7 +658,7 @@ func createZip(sourceDir, zipFileName string) error {
 	zipWriter := zip.NewWriter(zipFile)
 	defer func() { _ = zipWriter.Close() }()
 
-	err = filepath.Walk(sourceDir, func(path string, info os.FileInfo, err error) error {
+	err = filepath.Walk(sourceDir, func(path string, info os.FileInfo, err error) error { // #nosec G703 -- CLI tool walks user's output dir
 		if err != nil {
 			return err
 		}
@@ -693,7 +693,7 @@ func createZip(sourceDir, zipFileName string) error {
 			return fmt.Errorf("creating zip entry: %w", err)
 		}
 
-		file, err := os.Open(path) // #nosec G304 -- CLI tool reads user's output files
+		file, err := os.Open(path) // #nosec G304,G122 -- CLI tool reads user's output files
 		if err != nil {
 			return fmt.Errorf("opening file: %w", err)
 		}
