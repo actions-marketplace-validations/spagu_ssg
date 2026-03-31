@@ -995,15 +995,8 @@ func (g *Generator) generatePage(page models.Page) error {
 		return nil
 	}
 
-	data := struct {
-		Site   *models.SiteData
-		Page   models.Page
-		Domain string
-	}{
-		Site:   g.siteData,
-		Page:   page,
-		Domain: g.config.Domain,
-	}
+	// Convert page to flat map with Extra fields at top level
+	data := g.pageToTemplateData(page, false)
 
 	outputPaths := g.getOutputPaths(outputSubPath)
 	for _, outputPath := range outputPaths {
@@ -1045,15 +1038,8 @@ func (g *Generator) generatePage(page models.Page) error {
 
 // generatePost generates a single post
 func (g *Generator) generatePost(post models.Page) error {
-	data := struct {
-		Site   *models.SiteData
-		Post   models.Page
-		Domain string
-	}{
-		Site:   g.siteData,
-		Post:   post,
-		Domain: g.config.Domain,
-	}
+	// Convert post to flat map with Extra fields at top level
+	data := g.pageToTemplateData(post, true)
 
 	outputPaths := g.getOutputPaths(post.GetOutputPath())
 	for _, outputPath := range outputPaths {
@@ -1129,6 +1115,62 @@ func (g *Generator) renderTemplate(templateName, outputPath string, data interfa
 	defer func() { _ = file.Close() }()
 
 	return g.tmpl.ExecuteTemplate(file, templateName, data)
+}
+
+// pageToTemplateData converts a Page to a map for templates, flattening Extra fields to top level
+// This allows templates to use {{.dupa}} instead of {{.Page.Extra.dupa}}
+func (g *Generator) pageToTemplateData(page models.Page, isPost bool) map[string]interface{} {
+	data := map[string]interface{}{
+		"Site":   g.siteData,
+		"Domain": g.config.Domain,
+		// Standard Page fields
+		"ID":            page.ID,
+		"Title":         page.Title,
+		"Slug":          page.Slug,
+		"Date":          page.Date,
+		"Modified":      page.Modified,
+		"Status":        page.Status,
+		"Type":          page.Type,
+		"Link":          page.Link,
+		"Author":        page.Author,
+		"Categories":    page.Categories,
+		"Excerpt":       page.Excerpt,
+		"Content":       template.HTML(page.Content),
+		"URLFormat":     page.URLFormat,
+		"PageFormat":    page.PageFormat,
+		"SourceDir":     page.SourceDir,
+		"Description":   page.Description,
+		"Keywords":      page.Keywords,
+		"Lang":          page.Lang,
+		"Canonical":     page.Canonical,
+		"Robots":        page.Robots,
+		"FeaturedImage": page.FeaturedImage,
+		"Tags":          page.Tags,
+		"Category":      page.Category,
+		"Layout":        page.Layout,
+		"Template":      page.Template,
+		// URL helpers
+		"URL":          page.GetURL(),
+		"CanonicalURL": page.GetCanonical(g.config.Domain),
+		"OutputPath":   page.GetOutputPath(),
+	}
+
+	// Keep backward compatibility - include Page/Post struct
+	if isPost {
+		data["Post"] = page
+	} else {
+		data["Page"] = page
+	}
+
+	// Flatten Extra fields to top level for direct access like {{.dupa}}
+	for key, value := range page.Extra {
+		// Don't overwrite standard fields
+		if _, exists := data[key]; !exists {
+			data[key] = value
+		}
+	}
+
+	return data
 }
 
 // copyAssets copies static assets (CSS, JS, images) to output
