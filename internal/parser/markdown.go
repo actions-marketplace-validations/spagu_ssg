@@ -101,11 +101,43 @@ func (p *markdownParser) buildPage() (*models.Page, error) {
 		return nil, err
 	}
 
+	// Parse all frontmatter into a map for Extra fields
+	var allFields map[string]interface{}
+	if err := yaml.Unmarshal([]byte(p.frontmatter.String()), &allFields); err != nil {
+		return nil, err
+	}
+
 	page := pf.ToPage()
 	page.Excerpt = strings.TrimSpace(p.excerpt.String())
 	page.Content = strings.TrimSpace(p.content.String())
 
+	// Copy extra fields (those not in the struct)
+	page.Extra = extractExtraFields(allFields)
+
 	return page, nil
+}
+
+// knownFields lists all fields that are handled by PageFrontmatter struct
+var knownFields = map[string]bool{
+	"id": true, "title": true, "slug": true, "date": true, "modified": true,
+	"status": true, "type": true, "link": true, "author": true, "categories": true,
+	"description": true, "keywords": true, "lang": true, "canonical": true,
+	"robots": true, "featured_image": true, "tags": true, "category": true,
+	"layout": true, "template": true,
+}
+
+// extractExtraFields returns fields not in knownFields
+func extractExtraFields(allFields map[string]interface{}) map[string]interface{} {
+	extra := make(map[string]interface{})
+	for k, v := range allFields {
+		if !knownFields[k] {
+			extra[k] = v
+		}
+	}
+	if len(extra) == 0 {
+		return nil
+	}
+	return extra
 }
 
 // PageFrontmatter is a temporary struct for parsing frontmatter with string dates

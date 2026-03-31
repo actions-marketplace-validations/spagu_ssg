@@ -79,6 +79,61 @@ func (d *Document) ToPage() (*models.Page, error) {
 		}
 	}
 
+	// SEO and additional standard fields
+	if desc, ok := d.Metadata["description"].(string); ok {
+		page.Description = desc
+	}
+	if keywords, ok := d.Metadata["keywords"].(string); ok {
+		page.Keywords = keywords
+	}
+	if lang, ok := d.Metadata["lang"].(string); ok {
+		page.Lang = lang
+	}
+	if canonical, ok := d.Metadata["canonical"].(string); ok {
+		page.Canonical = canonical
+	}
+	if robots, ok := d.Metadata["robots"].(string); ok {
+		page.Robots = robots
+	}
+	if featuredImage, ok := d.Metadata["featured_image"].(string); ok {
+		page.FeaturedImage = featuredImage
+	}
+	if category, ok := d.Metadata["category"].(string); ok {
+		page.Category = category
+	}
+	if layout, ok := d.Metadata["layout"].(string); ok {
+		page.Layout = layout
+	}
+	if template, ok := d.Metadata["template"].(string); ok {
+		page.Template = template
+	}
+
+	// Parse tags
+	if tags, ok := d.Metadata["tags"].([]interface{}); ok {
+		for _, tag := range tags {
+			if tagStr, ok := tag.(string); ok {
+				page.Tags = append(page.Tags, tagStr)
+			}
+		}
+	}
+
+	// Copy ALL remaining metadata fields to Extra for dynamic template access
+	// This allows templates to use any custom field like {{.Extra.dupa}}
+	knownFields := map[string]bool{
+		"id": true, "title": true, "slug": true, "status": true, "type": true,
+		"link": true, "author": true, "excerpt": true, "date": true, "modified": true,
+		"categories": true, "description": true, "keywords": true, "lang": true,
+		"canonical": true, "robots": true, "featured_image": true, "tags": true,
+		"category": true, "layout": true, "template": true,
+	}
+
+	page.Extra = make(map[string]interface{})
+	for key, value := range d.Metadata {
+		if !knownFields[key] {
+			page.Extra[key] = value
+		}
+	}
+
 	return page, nil
 }
 

@@ -539,3 +539,122 @@ func TestExtractAuthor(t *testing.T) {
 		t.Errorf("author.Name = %v, want 'John Doe'", author.Name)
 	}
 }
+
+func TestDocument_ToPage_ExtraFields(t *testing.T) {
+	doc := Document{
+		Key: "custom-page",
+		Metadata: map[string]any{
+			"title":        "Custom Page",
+			"status":       "publish",
+			"dupa":         "custom value",
+			"defaultVideo": "https://youtube.com/xyz",
+			"playlist":     []interface{}{"a", "b", "c"},
+			"rating":       float64(4.5),
+			"featured":     true,
+		},
+	}
+
+	page, err := doc.ToPage()
+	if err != nil {
+		t.Fatalf("ToPage() error = %v", err)
+	}
+
+	// Standard fields should NOT be in Extra
+	if _, ok := page.Extra["title"]; ok {
+		t.Error("title should not be in Extra")
+	}
+	if _, ok := page.Extra["status"]; ok {
+		t.Error("status should not be in Extra")
+	}
+
+	// Custom fields should be in Extra
+	if page.Extra["dupa"] != "custom value" {
+		t.Errorf("Extra[dupa] = %v, want 'custom value'", page.Extra["dupa"])
+	}
+
+	if page.Extra["defaultVideo"] != "https://youtube.com/xyz" {
+		t.Errorf("Extra[defaultVideo] = %v, want 'https://youtube.com/xyz'", page.Extra["defaultVideo"])
+	}
+
+	if page.Extra["rating"] != float64(4.5) {
+		t.Errorf("Extra[rating] = %v, want 4.5", page.Extra["rating"])
+	}
+
+	if page.Extra["featured"] != true {
+		t.Errorf("Extra[featured] = %v, want true", page.Extra["featured"])
+	}
+
+	// Check array
+	playlist, ok := page.Extra["playlist"].([]interface{})
+	if !ok {
+		t.Fatalf("Extra[playlist] is not []interface{}")
+	}
+	if len(playlist) != 3 {
+		t.Errorf("Extra[playlist] length = %v, want 3", len(playlist))
+	}
+}
+
+func TestDocument_ToPage_SEOFields(t *testing.T) {
+	doc := Document{
+		Key: "seo-page",
+		Metadata: map[string]any{
+			"title":          "SEO Page",
+			"status":         "publish",
+			"description":    "Page description for SEO",
+			"keywords":       "ssg, static, generator",
+			"lang":           "en_US",
+			"canonical":      "https://example.com/seo-page/",
+			"robots":         "index, follow",
+			"featured_image": "https://example.com/image.jpg",
+			"layout":         "landing",
+			"template":       "special",
+			"category":       "Technology",
+			"tags":           []interface{}{"go", "ssg", "static"},
+		},
+	}
+
+	page, err := doc.ToPage()
+	if err != nil {
+		t.Fatalf("ToPage() error = %v", err)
+	}
+
+	if page.Description != "Page description for SEO" {
+		t.Errorf("Description = %v, want 'Page description for SEO'", page.Description)
+	}
+
+	if page.Keywords != "ssg, static, generator" {
+		t.Errorf("Keywords = %v, want 'ssg, static, generator'", page.Keywords)
+	}
+
+	if page.Lang != "en_US" {
+		t.Errorf("Lang = %v, want 'en_US'", page.Lang)
+	}
+
+	if page.Canonical != "https://example.com/seo-page/" {
+		t.Errorf("Canonical = %v", page.Canonical)
+	}
+
+	if page.Robots != "index, follow" {
+		t.Errorf("Robots = %v", page.Robots)
+	}
+
+	if page.FeaturedImage != "https://example.com/image.jpg" {
+		t.Errorf("FeaturedImage = %v", page.FeaturedImage)
+	}
+
+	if page.Layout != "landing" {
+		t.Errorf("Layout = %v, want 'landing'", page.Layout)
+	}
+
+	if page.Template != "special" {
+		t.Errorf("Template = %v, want 'special'", page.Template)
+	}
+
+	if page.Category != "Technology" {
+		t.Errorf("Category = %v, want 'Technology'", page.Category)
+	}
+
+	if len(page.Tags) != 3 || page.Tags[0] != "go" {
+		t.Errorf("Tags = %v, want [go ssg static]", page.Tags)
+	}
+}

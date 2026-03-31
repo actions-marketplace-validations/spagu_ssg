@@ -71,6 +71,10 @@ type Page struct {
 	// Template selection
 	Layout   string `yaml:"layout"`   // Custom layout template (e.g., "blog-hub", "landing")
 	Template string `yaml:"template"` // Custom template name
+
+	// Extra holds any additional frontmatter fields not explicitly defined
+	// This allows templates to access custom fields like defaultVideo, playlist, etc.
+	Extra map[string]interface{} `yaml:"-"`
 }
 
 // GetURL returns the URL path for this page/post
