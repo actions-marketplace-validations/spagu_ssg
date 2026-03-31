@@ -15,6 +15,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Works for both pages and posts
   - Config file option: `page_format: "flat"`
 
+### Documentation
+- 📖 Updated README.md with complete MDDB gRPC and watch mode documentation
+- 📖 Updated man page with all MDDB options (protocol, watch, batch-size)
+- 📖 Updated docs/INSTALL.md to require Go 1.26
+
 ## [1.7.1] - 2026-03-30
 
 ### Added

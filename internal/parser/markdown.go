@@ -120,6 +120,20 @@ type PageFrontmatter struct {
 	Link       string `yaml:"link"`
 	Author     int    `yaml:"author"`
 	Categories []int  `yaml:"categories,omitempty"`
+
+	// SEO and metadata fields
+	Description   string   `yaml:"description"`
+	Keywords      string   `yaml:"keywords"`
+	Lang          string   `yaml:"lang"`
+	Canonical     string   `yaml:"canonical"`
+	Robots        string   `yaml:"robots"`
+	FeaturedImage string   `yaml:"featured_image"`
+	Tags          []string `yaml:"tags,omitempty"`
+	Category      string   `yaml:"category"`
+
+	// Template selection
+	Layout   string `yaml:"layout"`
+	Template string `yaml:"template"`
 }
 
 // parseFlexibleDate parses dates in multiple formats
@@ -164,5 +178,17 @@ func (pf *PageFrontmatter) ToPage() *models.Page {
 		Link:       pf.Link,
 		Author:     pf.Author,
 		Categories: pf.Categories,
+		// SEO and metadata fields
+		Description:   pf.Description,
+		Keywords:      pf.Keywords,
+		Lang:          pf.Lang,
+		Canonical:     pf.Canonical,
+		Robots:        pf.Robots,
+		FeaturedImage: pf.FeaturedImage,
+		Tags:          pf.Tags,
+		Category:      pf.Category,
+		// Template selection
+		Layout:   pf.Layout,
+		Template: pf.Template,
 	}
 }

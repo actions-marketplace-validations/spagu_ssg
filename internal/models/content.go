@@ -57,6 +57,20 @@ type Page struct {
 	URLFormat  string    `yaml:"-"` // URL format: "date" or "slug" (set by generator)
 	PageFormat string    `yaml:"-"` // Page output format: "directory", "flat", or "both" (set by generator)
 	SourceDir  string    `yaml:"-"` // Source directory path (for co-located asset copying)
+
+	// SEO and metadata fields
+	Description   string   `yaml:"description"`
+	Keywords      string   `yaml:"keywords"`
+	Lang          string   `yaml:"lang"`
+	Canonical     string   `yaml:"canonical"`
+	Robots        string   `yaml:"robots"`
+	FeaturedImage string   `yaml:"featured_image"`
+	Tags          []string `yaml:"tags,omitempty"`
+	Category      string   `yaml:"category"`
+
+	// Template selection
+	Layout   string `yaml:"layout"`   // Custom layout template (e.g., "blog-hub", "landing")
+	Template string `yaml:"template"` // Custom template name
 }
 
 // GetURL returns the URL path for this page/post

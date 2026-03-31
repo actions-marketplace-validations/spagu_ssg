@@ -224,11 +224,16 @@ domain: "example.com"
 # MDDB content source (replaces local files)
 mddb:
   enabled: true
-  url: "http://localhost:8080"
+  url: "http://localhost:11023"  # HTTP port
+  # url: "localhost:11024"       # gRPC port (faster)
+  protocol: "http"               # "http" (default) or "grpc"
   collection: "blog"
   lang: "en_US"
-  api_key: ""  # optional
+  api_key: ""                    # optional
   timeout: 30
+  batch_size: 1000
+  watch: true                    # auto-rebuild on content changes
+  watch_interval: 30             # polling interval in seconds
 
 minify_all: true
 ```
@@ -300,11 +305,15 @@ See [.ssg.yaml.example](.ssg.yaml.example) for all options.
 
 | Option | Description |
 |--------|-------------|
-| `--mddb-url=URL` | MDDB server URL (enables mddb mode) |
+| `--mddb-url=URL` | MDDB server URL (enables mddb mode). HTTP: `http://localhost:11023`, gRPC: `localhost:11024` |
+| `--mddb-protocol=PROTO` | Connection protocol: `http` (default) or `grpc` |
 | `--mddb-collection=NAME` | Collection name for pages/posts |
 | `--mddb-key=KEY` | API key for authentication (optional) |
 | `--mddb-lang=LANG` | Language filter (e.g., `en_US`, `pl_PL`) |
 | `--mddb-timeout=SEC` | Request timeout in seconds (default: `30`) |
+| `--mddb-batch-size=N` | Batch size for pagination (default: `1000`) |
+| `--mddb-watch` | Watch MDDB for changes and rebuild automatically |
+| `--mddb-watch-interval=SEC` | Polling interval for watch mode (default: `30`) |
 
 **Other:**
 
@@ -384,12 +393,19 @@ make generate-simple # simple template
 make serve           # generate and run local server
 make deploy          # generate with WebP + ZIP for Cloudflare Pages
 
-# Fetch content from MDDB server (single and bulk)
-./build/ssg --mddb-url=http://localhost:8080 --mddb-collection=blog krowy example.com
+# Fetch content from MDDB server (HTTP)
+./build/ssg --mddb-url=http://localhost:11023 --mddb-collection=blog krowy example.com
+
+# Use gRPC connection (faster)
+./build/ssg --mddb-url=localhost:11024 --mddb-protocol=grpc --mddb-collection=blog krowy example.com
 
 # MDDB with language filter and API key
 ./build/ssg --mddb-url=https://mddb.example.com --mddb-collection=site \
   --mddb-lang=en_US --mddb-key=secret krowy example.com --minify-all
+
+# Watch MDDB for changes and auto-rebuild
+./build/ssg --mddb-url=http://localhost:11023 --mddb-collection=blog \
+  --mddb-watch --mddb-watch-interval=15 krowy example.com --http
 ```
 
 ### Output

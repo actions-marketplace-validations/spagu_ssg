@@ -591,6 +591,15 @@ func (g *Generator) loadTemplates() error {
 		return fmt.Errorf("parsing templates: %w", err)
 	}
 
+	// Also load templates from layouts subdirectory if it exists
+	layoutsPath := filepath.Join(templatePath, "layouts", "*.html")
+	if files, _ := filepath.Glob(layoutsPath); len(files) > 0 {
+		tmpl, err = tmpl.ParseGlob(layoutsPath)
+		if err != nil {
+			return fmt.Errorf("parsing layout templates: %w", err)
+		}
+	}
+
 	g.tmpl = tmpl
 	return nil
 }
@@ -627,7 +636,33 @@ func (g *Generator) buildTemplateFuncs(pageLinks map[string]string) template.Fun
 		"stripShortcodes":      tmplStripShortcodes,
 		"stripHTML":            tmplStripHTML,
 		"recentPosts":          g.tmplRecentPosts,
+		"default":              tmplDefault,
+		"dict":                 tmplDict,
 	}
+}
+
+// tmplDefault returns the default value if the given value is empty
+func tmplDefault(defaultVal, val interface{}) interface{} {
+	if val == nil || val == "" || val == 0 {
+		return defaultVal
+	}
+	return val
+}
+
+// tmplDict creates a map from key-value pairs for template use
+func tmplDict(values ...interface{}) (map[string]interface{}, error) {
+	if len(values)%2 != 0 {
+		return nil, fmt.Errorf("dict requires even number of arguments")
+	}
+	dict := make(map[string]interface{}, len(values)/2)
+	for i := 0; i < len(values); i += 2 {
+		key, ok := values[i].(string)
+		if !ok {
+			return nil, fmt.Errorf("dict keys must be strings")
+		}
+		dict[key] = values[i+1]
+	}
+	return dict, nil
 }
 
 // tmplSafeHTML returns the safeHTML template function
@@ -979,8 +1014,23 @@ func (g *Generator) generatePage(page models.Page) error {
 			}
 		}
 
-		if err := g.renderTemplate("page.html", outputPath, data); err != nil {
-			return err
+		// Use custom layout/template if specified, otherwise default to page.html
+		templateName := "page.html"
+		if page.Layout != "" {
+			templateName = "layouts/" + page.Layout + ".html"
+		} else if page.Template != "" {
+			templateName = page.Template + ".html"
+		}
+
+		if err := g.renderTemplate(templateName, outputPath, data); err != nil {
+			// Fallback to page.html if custom template not found
+			if strings.Contains(err.Error(), "no such template") {
+				if err := g.renderTemplate("page.html", outputPath, data); err != nil {
+					return err
+				}
+			} else {
+				return err
+			}
 		}
 	}
 
