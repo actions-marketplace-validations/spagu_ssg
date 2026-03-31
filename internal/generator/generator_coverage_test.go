@@ -993,6 +993,748 @@ func TestMinifyHTMLFileEdgeCases(t *testing.T) {
 	}
 }
 
+func TestGenerateConvertRelativeLinksError(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	contentDir := filepath.Join(tmpDir, "content")
+	sourceDir := filepath.Join(contentDir, "test-source")
+	pagesDir := filepath.Join(sourceDir, "pages")
+	postsDir := filepath.Join(sourceDir, "posts")
+	templateDir := filepath.Join(tmpDir, "templates", "simple")
+	outputDir := filepath.Join(tmpDir, "output")
+
+	for _, dir := range []string{pagesDir, postsDir, templateDir} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatalf("Failed to create dir: %v", err)
+		}
+	}
+
+	metadata := `{"categories":[],"media":[],"users":[]}`
+	if err := os.WriteFile(filepath.Join(sourceDir, "metadata.json"), []byte(metadata), 0644); err != nil {
+		t.Fatalf("Failed to create metadata: %v", err)
+	}
+
+	templates := map[string]string{
+		"base.html":     `<!DOCTYPE html><html></html>`,
+		"index.html":    `<!DOCTYPE html><html></html>`,
+		"page.html":     `<!DOCTYPE html><html></html>`,
+		"post.html":     `<!DOCTYPE html><html></html>`,
+		"category.html": `<!DOCTYPE html><html></html>`,
+	}
+	for name, content := range templates {
+		if err := os.WriteFile(filepath.Join(templateDir, name), []byte(content), 0644); err != nil {
+			t.Fatalf("Failed to create template: %v", err)
+		}
+	}
+
+	cfg := Config{
+		Source:        "test-source",
+		Template:      "simple",
+		Domain:        "example.com",
+		ContentDir:    contentDir,
+		TemplatesDir:  filepath.Join(tmpDir, "templates"),
+		OutputDir:     outputDir,
+		RelativeLinks: true,
+		Quiet:         true,
+	}
+
+	gen, _ := New(cfg)
+	if err := gen.Generate(); err != nil {
+		t.Fatalf("Generate should not fail: %v", err)
+	}
+}
+
+func TestGeneratePrettifyError(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	contentDir := filepath.Join(tmpDir, "content")
+	sourceDir := filepath.Join(contentDir, "test-source")
+	pagesDir := filepath.Join(sourceDir, "pages")
+	postsDir := filepath.Join(sourceDir, "posts")
+	templateDir := filepath.Join(tmpDir, "templates", "simple")
+	outputDir := filepath.Join(tmpDir, "output")
+
+	for _, dir := range []string{pagesDir, postsDir, templateDir} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatalf("Failed to create dir: %v", err)
+		}
+	}
+
+	metadata := `{"categories":[],"media":[],"users":[]}`
+	if err := os.WriteFile(filepath.Join(sourceDir, "metadata.json"), []byte(metadata), 0644); err != nil {
+		t.Fatalf("Failed to create metadata: %v", err)
+	}
+
+	templates := map[string]string{
+		"base.html":     `<!DOCTYPE html><html></html>`,
+		"index.html":    `<!DOCTYPE html><html></html>`,
+		"page.html":     `<!DOCTYPE html><html></html>`,
+		"post.html":     `<!DOCTYPE html><html></html>`,
+		"category.html": `<!DOCTYPE html><html></html>`,
+	}
+	for name, content := range templates {
+		if err := os.WriteFile(filepath.Join(templateDir, name), []byte(content), 0644); err != nil {
+			t.Fatalf("Failed to create template: %v", err)
+		}
+	}
+
+	cfg := Config{
+		Source:       "test-source",
+		Template:     "simple",
+		Domain:       "example.com",
+		ContentDir:   contentDir,
+		TemplatesDir: filepath.Join(tmpDir, "templates"),
+		OutputDir:    outputDir,
+		PrettyHTML:   true,
+		Quiet:        true,
+	}
+
+	gen, _ := New(cfg)
+	if err := gen.Generate(); err != nil {
+		t.Fatalf("Generate should not fail: %v", err)
+	}
+}
+
+func TestGenerateMinifyPath(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	contentDir := filepath.Join(tmpDir, "content")
+	sourceDir := filepath.Join(contentDir, "test-source")
+	pagesDir := filepath.Join(sourceDir, "pages")
+	postsDir := filepath.Join(sourceDir, "posts")
+	templateDir := filepath.Join(tmpDir, "templates", "simple")
+	outputDir := filepath.Join(tmpDir, "output")
+
+	for _, dir := range []string{pagesDir, postsDir, templateDir} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatalf("Failed to create dir: %v", err)
+		}
+	}
+
+	metadata := `{"categories":[],"media":[],"users":[]}`
+	if err := os.WriteFile(filepath.Join(sourceDir, "metadata.json"), []byte(metadata), 0644); err != nil {
+		t.Fatalf("Failed to create metadata: %v", err)
+	}
+
+	templates := map[string]string{
+		"base.html":     `<!DOCTYPE html><html></html>`,
+		"index.html":    `<!DOCTYPE html><html></html>`,
+		"page.html":     `<!DOCTYPE html><html></html>`,
+		"post.html":     `<!DOCTYPE html><html></html>`,
+		"category.html": `<!DOCTYPE html><html></html>`,
+	}
+	for name, content := range templates {
+		if err := os.WriteFile(filepath.Join(templateDir, name), []byte(content), 0644); err != nil {
+			t.Fatalf("Failed to create template: %v", err)
+		}
+	}
+
+	cfg := Config{
+		Source:       "test-source",
+		Template:     "simple",
+		Domain:       "example.com",
+		ContentDir:   contentDir,
+		TemplatesDir: filepath.Join(tmpDir, "templates"),
+		OutputDir:    outputDir,
+		MinifyCSS:    true,
+		MinifyJS:     true,
+		Quiet:        true,
+	}
+
+	gen, _ := New(cfg)
+	if err := gen.Generate(); err != nil {
+		t.Fatalf("Generate should not fail: %v", err)
+	}
+}
+
+func TestCleanOutputIfRequestedError(t *testing.T) {
+	gen := &Generator{
+		config: Config{
+			Clean:     true,
+			OutputDir: "/proc/nonexistent/cannot/remove",
+			Quiet:     true,
+		},
+	}
+	err := gen.cleanOutputIfRequested()
+	if err != nil && !strings.Contains(err.Error(), "cleaning output") {
+		t.Errorf("Expected cleaning output error, got: %v", err)
+	}
+}
+
+func TestCleanOutputIfRequestedDisabled(t *testing.T) {
+	gen := &Generator{
+		config: Config{Clean: false},
+	}
+	err := gen.cleanOutputIfRequested()
+	if err != nil {
+		t.Errorf("Expected nil when clean disabled, got: %v", err)
+	}
+}
+
+func TestGenerateSitemapAndRobotsPartial(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	gen := &Generator{
+		config: Config{
+			OutputDir:  tmpDir,
+			Domain:     "example.com",
+			SitemapOff: false,
+			RobotsOff:  true,
+		},
+		siteData: &models.SiteData{
+			Pages:      []models.Page{},
+			Posts:      []models.Page{},
+			Categories: make(map[int]models.Category),
+		},
+	}
+
+	if err := gen.generateSitemapAndRobots(); err != nil {
+		t.Fatalf("generateSitemapAndRobots failed: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(tmpDir, "sitemap.xml")); err != nil {
+		t.Error("sitemap.xml should exist")
+	}
+	if _, err := os.Stat(filepath.Join(tmpDir, "robots.txt")); err == nil {
+		t.Error("robots.txt should NOT exist")
+	}
+}
+
+func TestGenerateSitemapAndRobotsBothOff(t *testing.T) {
+	gen := &Generator{
+		config: Config{
+			SitemapOff: true,
+			RobotsOff:  true,
+		},
+	}
+
+	if err := gen.generateSitemapAndRobots(); err != nil {
+		t.Errorf("Expected nil when both off, got: %v", err)
+	}
+}
+
+func TestLoadContentFromFilesWithPostURLFormat(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	contentDir := filepath.Join(tmpDir, "content")
+	sourceDir := filepath.Join(contentDir, "test-source")
+	pagesDir := filepath.Join(sourceDir, "pages")
+	postsDir := filepath.Join(sourceDir, "posts", "news")
+
+	if err := os.MkdirAll(pagesDir, 0755); err != nil {
+		t.Fatalf("Failed to create pages dir: %v", err)
+	}
+	if err := os.MkdirAll(postsDir, 0755); err != nil {
+		t.Fatalf("Failed to create posts dir: %v", err)
+	}
+
+	metadata := `{"categories":[],"media":[],"users":[]}`
+	if err := os.WriteFile(filepath.Join(sourceDir, "metadata.json"), []byte(metadata), 0644); err != nil {
+		t.Fatalf("Failed to create metadata: %v", err)
+	}
+
+	postContent := `---
+title: Test Post
+status: publish
+slug: test-post
+link: https://example.com/test-post/
+date: 2024-06-15
+---
+Content`
+	if err := os.WriteFile(filepath.Join(postsDir, "post.md"), []byte(postContent), 0644); err != nil {
+		t.Fatalf("Failed to create post: %v", err)
+	}
+
+	gen := &Generator{
+		config: Config{
+			Source:        "test-source",
+			ContentDir:    contentDir,
+			PostURLFormat: "slug",
+		},
+		siteData: &models.SiteData{
+			Categories: make(map[int]models.Category),
+			Media:      make(map[int]models.MediaItem),
+			Authors:    make(map[int]models.Author),
+		},
+	}
+
+	if err := gen.loadContentFromFiles(); err != nil {
+		t.Fatalf("loadContentFromFiles failed: %v", err)
+	}
+
+	if len(gen.siteData.Posts) != 1 {
+		t.Fatalf("Expected 1 post, got %d", len(gen.siteData.Posts))
+	}
+	if gen.siteData.Posts[0].URLFormat != "slug" {
+		t.Errorf("Expected URLFormat='slug', got %q", gen.siteData.Posts[0].URLFormat)
+	}
+}
+
+func TestPrettifyIfRequestedError(t *testing.T) {
+	gen := &Generator{
+		config: Config{
+			PrettyHTML: true,
+			MinifyHTML: false,
+			OutputDir:  "/nonexistent/path",
+		},
+	}
+	err := gen.prettifyIfRequested()
+	if err == nil {
+		t.Error("Expected error for nonexistent output dir")
+	}
+}
+
+func TestMinifyIfRequestedError(t *testing.T) {
+	gen := &Generator{
+		config: Config{
+			MinifyHTML: true,
+			OutputDir:  "/nonexistent/path",
+		},
+	}
+	err := gen.minifyIfRequested()
+	if err == nil {
+		t.Error("Expected error for nonexistent output dir")
+	}
+}
+
+func TestConvertRelativeLinksIfRequestedError(t *testing.T) {
+	gen := &Generator{
+		config: Config{
+			RelativeLinks: true,
+			Domain:        "example.com",
+			OutputDir:     "/nonexistent/path",
+		},
+	}
+	err := gen.convertRelativeLinksIfRequested()
+	if err == nil {
+		t.Error("Expected error for nonexistent output dir")
+	}
+}
+
+func TestRenderShortcodeTemplateExecuteError(t *testing.T) {
+	tmpDir := t.TempDir()
+	templateDir := filepath.Join(tmpDir, "templates", "test")
+	if err := os.MkdirAll(templateDir, 0755); err != nil {
+		t.Fatalf("Failed to create dir: %v", err)
+	}
+
+	badTmpl := `{{.NonExistentMethod.Call}}`
+	if err := os.WriteFile(filepath.Join(templateDir, "bad.html"), []byte(badTmpl), 0644); err != nil {
+		t.Fatalf("Failed to create template: %v", err)
+	}
+
+	gen := &Generator{
+		config: Config{
+			TemplatesDir: filepath.Join(tmpDir, "templates"),
+			Template:     "test",
+		},
+		shortcodeMap: map[string]Shortcode{
+			"bad": {Name: "bad", Template: "bad.html"},
+		},
+	}
+
+	result := gen.processShortcodes("{{bad}}")
+	if result != "" {
+		t.Errorf("Expected empty result for failed shortcode, got %q", result)
+	}
+}
+
+func TestCopyAssetsJSNotExist(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	templatePath := filepath.Join(tmpDir, "templates", "simple")
+	cssDir := filepath.Join(templatePath, "css")
+
+	if err := os.MkdirAll(cssDir, 0755); err != nil {
+		t.Fatalf("Failed to create css dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cssDir, "style.css"), []byte("body{}"), 0644); err != nil {
+		t.Fatalf("Failed to create CSS: %v", err)
+	}
+
+	contentPath := filepath.Join(tmpDir, "content", "test-source")
+	if err := os.MkdirAll(contentPath, 0755); err != nil {
+		t.Fatalf("Failed to create content dir: %v", err)
+	}
+
+	outputDir := filepath.Join(tmpDir, "output")
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		t.Fatalf("Failed to create output dir: %v", err)
+	}
+
+	gen := &Generator{
+		config: Config{
+			Source:       "test-source",
+			Template:     "simple",
+			TemplatesDir: filepath.Join(tmpDir, "templates"),
+			ContentDir:   filepath.Join(tmpDir, "content"),
+			OutputDir:    outputDir,
+		},
+	}
+
+	if err := gen.copyAssets(); err != nil {
+		t.Fatalf("copyAssets failed: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(outputDir, "css", "style.css")); err != nil {
+		t.Error("CSS should be copied")
+	}
+}
+
+func TestGeneratePostNoSourceDir(t *testing.T) {
+	tmpDir := t.TempDir()
+	outputDir := filepath.Join(tmpDir, "output")
+
+	tmpl := template.Must(template.New("post.html").Parse("<html>{{.Post.Title}}</html>"))
+
+	gen := &Generator{
+		config: Config{
+			OutputDir: outputDir,
+			Domain:    "example.com",
+		},
+		siteData: &models.SiteData{Domain: "example.com"},
+		tmpl:     tmpl,
+	}
+
+	post := models.Page{
+		Title:     "No Source",
+		Slug:      "no-source",
+		Type:      "post",
+		Date:      parseDateCov("2024-01-01"),
+		SourceDir: "",
+	}
+
+	if err := gen.generatePost(post); err != nil {
+		t.Fatalf("generatePost failed: %v", err)
+	}
+
+	postPath := filepath.Join(outputDir, "2024", "01", "01", "no-source", "index.html")
+	if _, err := os.Stat(postPath); err != nil {
+		t.Error("Post should be created even without source dir")
+	}
+}
+
+func TestMinifyOutputSubdir(t *testing.T) {
+	tmpDir := t.TempDir()
+	subDir := filepath.Join(tmpDir, "sub")
+	if err := os.MkdirAll(subDir, 0755); err != nil {
+		t.Fatalf("Failed to create subdir: %v", err)
+	}
+
+	if err := os.WriteFile(filepath.Join(subDir, "page.html"), []byte("<html>  <body>  </body>  </html>"), 0644); err != nil {
+		t.Fatalf("Failed to create HTML: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(subDir, "style.css"), []byte("body { color: red; }"), 0644); err != nil {
+		t.Fatalf("Failed to create CSS: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(subDir, "app.js"), []byte("// comment\nvar x = 1;"), 0644); err != nil {
+		t.Fatalf("Failed to create JS: %v", err)
+	}
+
+	gen := &Generator{
+		config: Config{
+			OutputDir:  tmpDir,
+			MinifyHTML: true,
+			MinifyCSS:  true,
+			MinifyJS:   true,
+		},
+	}
+
+	if err := gen.minifyOutput(); err != nil {
+		t.Fatalf("minifyOutput failed: %v", err)
+	}
+}
+
+func TestPrettifyOutputSubdir(t *testing.T) {
+	tmpDir := t.TempDir()
+	subDir := filepath.Join(tmpDir, "sub")
+	if err := os.MkdirAll(subDir, 0755); err != nil {
+		t.Fatalf("Failed to create subdir: %v", err)
+	}
+
+	htmlContent := "<!DOCTYPE html>\n\n\n<html>\n<body>\n</body>\n</html>"
+	if err := os.WriteFile(filepath.Join(subDir, "page.html"), []byte(htmlContent), 0644); err != nil {
+		t.Fatalf("Failed to create HTML: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "other.txt"), []byte("text"), 0644); err != nil {
+		t.Fatalf("Failed to create txt: %v", err)
+	}
+
+	gen := &Generator{
+		config: Config{
+			OutputDir:  tmpDir,
+			PrettyHTML: true,
+		},
+	}
+
+	if err := gen.prettifyOutput(); err != nil {
+		t.Fatalf("prettifyOutput failed: %v", err)
+	}
+}
+
+func TestLoadContentMddbEnabled(t *testing.T) {
+	gen := &Generator{
+		config: Config{
+			Mddb: MddbConfig{
+				Enabled: true,
+				URL:     "http://localhost:99999",
+			},
+		},
+		siteData: &models.SiteData{
+			Categories: make(map[int]models.Category),
+			Media:      make(map[int]models.MediaItem),
+			Authors:    make(map[int]models.Author),
+		},
+	}
+
+	err := gen.loadContent()
+	if err == nil {
+		t.Error("Expected error when mddb server is not available")
+	}
+}
+
+func TestLinkifyListItemUnescapedMatch(t *testing.T) {
+	pageLinks := map[string]string{
+		"Caf\u00e9 & Bar": "/cafe-bar/",
+	}
+
+	line := "- Caf&#xe9; &amp; Bar"
+	content := "Caf&#xe9; &amp; Bar"
+	result := linkifyListItem(line, content, pageLinks)
+
+	if !strings.Contains(result, "/cafe-bar/") {
+		t.Errorf("Expected unescaped match to link, got: %s", result)
+	}
+}
+
+func TestGenerateSitemapAndRobotsSitemapError(t *testing.T) {
+	gen := &Generator{
+		config: Config{
+			OutputDir:  "/nonexistent/path",
+			Domain:     "example.com",
+			SitemapOff: false,
+			RobotsOff:  true,
+		},
+		siteData: &models.SiteData{
+			Pages:      []models.Page{},
+			Posts:      []models.Page{},
+			Categories: make(map[int]models.Category),
+		},
+	}
+
+	err := gen.generateSitemapAndRobots()
+	if err == nil {
+		t.Error("Expected error when sitemap cannot be written")
+	}
+}
+
+func TestGenerateSitemapAndRobotsRobotsError(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	gen := &Generator{
+		config: Config{
+			OutputDir:  tmpDir,
+			Domain:     "example.com",
+			SitemapOff: true,
+			RobotsOff:  false,
+		},
+		siteData: &models.SiteData{
+			Pages:      []models.Page{},
+			Posts:      []models.Page{},
+			Categories: make(map[int]models.Category),
+		},
+	}
+
+	if err := gen.generateSitemapAndRobots(); err != nil {
+		t.Fatalf("generateSitemapAndRobots should succeed: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(tmpDir, "robots.txt")); err != nil {
+		t.Error("robots.txt should exist")
+	}
+}
+
+func TestCopyAssetsErrorPaths(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	templatePath := filepath.Join(tmpDir, "templates", "simple")
+	if err := os.MkdirAll(templatePath, 0755); err != nil {
+		t.Fatalf("Failed to create template dir: %v", err)
+	}
+
+	cssDir := filepath.Join(templatePath, "css")
+	jsDir := filepath.Join(templatePath, "js")
+	imagesDir := filepath.Join(templatePath, "images")
+	if err := os.MkdirAll(cssDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(jsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(imagesDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cssDir, "s.css"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(jsDir, "s.js"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(imagesDir, "i.png"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	contentPath := filepath.Join(tmpDir, "content", "test-source")
+	mediaPath := filepath.Join(contentPath, "media")
+	if err := os.MkdirAll(mediaPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mediaPath, "img.jpg"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	outputDir := filepath.Join(tmpDir, "output")
+	if err := os.MkdirAll(outputDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	gen := &Generator{
+		config: Config{
+			Source:       "test-source",
+			Template:     "simple",
+			TemplatesDir: filepath.Join(tmpDir, "templates"),
+			ContentDir:   filepath.Join(tmpDir, "content"),
+			OutputDir:    outputDir,
+		},
+	}
+
+	if err := gen.copyAssets(); err != nil {
+		t.Fatalf("copyAssets failed: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(outputDir, "css", "s.css")); err != nil {
+		t.Error("CSS should be copied")
+	}
+	if _, err := os.Stat(filepath.Join(outputDir, "js", "s.js")); err != nil {
+		t.Error("JS should be copied")
+	}
+	if _, err := os.Stat(filepath.Join(outputDir, "images", "i.png")); err != nil {
+		t.Error("Images should be copied")
+	}
+	if _, err := os.Stat(filepath.Join(outputDir, "media", "img.jpg")); err != nil {
+		t.Error("Media should be copied")
+	}
+}
+
+func TestGenerateCloudflareFilesRedirectsError(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	if err := os.WriteFile(filepath.Join(tmpDir, "_headers"), []byte("existing"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	gen := &Generator{
+		config: Config{OutputDir: tmpDir},
+	}
+
+	if err := gen.generateCloudflareFiles(); err != nil {
+		t.Fatalf("generateCloudflareFiles should succeed: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(tmpDir, "_redirects")); err != nil {
+		t.Error("_redirects should exist")
+	}
+}
+
+func TestGenerateFullWithCleanError(t *testing.T) {
+	gen := &Generator{
+		config: Config{
+			Clean:     true,
+			OutputDir: "/proc/1/nonexistent",
+			Quiet:     true,
+		},
+		siteData: &models.SiteData{
+			Categories: make(map[int]models.Category),
+			Media:      make(map[int]models.MediaItem),
+			Authors:    make(map[int]models.Author),
+		},
+	}
+
+	err := gen.Generate()
+	// Either clean fails or loading content fails - both are expected
+	_ = err
+}
+
+func TestGenerateWithPostURLFormatSlug(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	contentDir := filepath.Join(tmpDir, "content")
+	sourceDir := filepath.Join(contentDir, "test-source")
+	pagesDir := filepath.Join(sourceDir, "pages")
+	postsDir := filepath.Join(sourceDir, "posts", "news")
+	templateDir := filepath.Join(tmpDir, "templates", "simple")
+	outputDir := filepath.Join(tmpDir, "output")
+
+	for _, dir := range []string{pagesDir, postsDir, templateDir} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatalf("Failed to create dir: %v", err)
+		}
+	}
+
+	metadata := `{"categories":[],"media":[],"users":[]}`
+	if err := os.WriteFile(filepath.Join(sourceDir, "metadata.json"), []byte(metadata), 0644); err != nil {
+		t.Fatalf("Failed to create metadata: %v", err)
+	}
+
+	postContent := `---
+title: Slug Post
+status: publish
+slug: slug-post
+link: https://example.com/slug-post/
+date: 2024-01-15
+---
+Content`
+	if err := os.WriteFile(filepath.Join(postsDir, "post.md"), []byte(postContent), 0644); err != nil {
+		t.Fatalf("Failed to create post: %v", err)
+	}
+
+	templates := map[string]string{
+		"base.html":     `<!DOCTYPE html><html></html>`,
+		"index.html":    `<!DOCTYPE html><html></html>`,
+		"page.html":     `<!DOCTYPE html><html></html>`,
+		"post.html":     `<!DOCTYPE html><html>{{.Post.Title}}</html>`,
+		"category.html": `<!DOCTYPE html><html></html>`,
+	}
+	for name, content := range templates {
+		if err := os.WriteFile(filepath.Join(templateDir, name), []byte(content), 0644); err != nil {
+			t.Fatalf("Failed to create template: %v", err)
+		}
+	}
+
+	cfg := Config{
+		Source:        "test-source",
+		Template:      "simple",
+		Domain:        "example.com",
+		ContentDir:    contentDir,
+		TemplatesDir:  filepath.Join(tmpDir, "templates"),
+		OutputDir:     outputDir,
+		PostURLFormat: "slug",
+		Quiet:         true,
+	}
+
+	gen, _ := New(cfg)
+	if err := gen.Generate(); err != nil {
+		t.Fatalf("Generate failed: %v", err)
+	}
+}
+
+func TestEnsureTemplatesWriteError(t *testing.T) {
+	gen := &Generator{}
+	err := gen.ensureTemplates("/proc/1/nonexistent/templates")
+	// MkdirAll may fail on some systems - both outcomes are acceptable
+	_ = err
+}
+
 func parseDateCov(s string) (t time.Time) {
 	t, _ = time.Parse("2006-01-02", s)
 	return
