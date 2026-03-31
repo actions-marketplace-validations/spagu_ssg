@@ -1260,6 +1260,9 @@ func TestStartServer(t *testing.T) {
 }
 
 func TestBuildWithWebP(t *testing.T) {
+	if _, err := exec.LookPath("cwebp"); err != nil {
+		t.Skip("cwebp not available")
+	}
 	tmpDir := t.TempDir()
 
 	contentDir := filepath.Join(tmpDir, "content")
@@ -1571,6 +1574,9 @@ func TestStartServerVerbose(t *testing.T) {
 }
 
 func TestBuildWithWebPVerbose(t *testing.T) {
+	if _, err := exec.LookPath("cwebp"); err != nil {
+		t.Skip("cwebp not available")
+	}
 	tmpDir := t.TempDir()
 
 	contentDir := filepath.Join(tmpDir, "content")
@@ -1878,6 +1884,9 @@ func TestValidateRequiredFieldsSkipsFlags(t *testing.T) {
 }
 
 func TestBuildWithWebPAndImages(t *testing.T) {
+	if _, err := exec.LookPath("cwebp"); err != nil {
+		t.Skip("cwebp not available")
+	}
 	tmpDir := t.TempDir()
 
 	contentDir := filepath.Join(tmpDir, "content")
