@@ -155,11 +155,14 @@ sudo make install
 ### Docker
 
 ```bash
-# Pull image from GitHub Container Registry
+# Pull from Docker Hub
+docker pull tradik/ssg:latest
+
+# Or from GitHub Container Registry
 docker pull ghcr.io/spagu/ssg:latest
 
 # Run SSG in container
-docker run --rm -v $(pwd):/site ghcr.io/spagu/ssg:latest \
+docker run --rm -v $(pwd):/site tradik/ssg:latest \
     my-content krowy example.com --webp
 
 # Or use docker-compose
