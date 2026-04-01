@@ -734,6 +734,62 @@ Natural light theme inspired by krowy.net:
 
 Detailed style documentation: [docs/STYLES.md](docs/STYLES.md)
 
+## 📝 Content Format
+
+SSG supports two markdown content formats:
+
+### Standard Format (with section markers)
+
+```markdown
+---
+title: "My Post"
+slug: "my-post"
+status: publish
+type: post
+date: 2026-04-01
+---
+
+## Excerpt
+Short description for listings and meta tags.
+
+## Content
+Full markdown content goes here...
+```
+
+### Simple Format (without markers)
+
+```markdown
+---
+title: "My Post"
+slug: "my-post"
+status: publish
+type: page
+---
+
+All content after frontmatter becomes the page content.
+No `## Excerpt` or `## Content` markers needed.
+
+This is simpler for pages that don't need excerpts.
+```
+
+### Template Variables
+
+All fields are available at template root level:
+
+| Variable | Description |
+|----------|-------------|
+| `{{.Title}}` | Page/post title |
+| `{{.Slug}}` | URL slug |
+| `{{.Content}}` | Rendered HTML content |
+| `{{.Excerpt}}` | Content excerpt |
+| `{{.Date}}` | Publication date |
+| `{{.URL}}` | Page URL path |
+| `{{.CanonicalURL}}` | Full canonical URL |
+| `{{.Description}}` | SEO meta description |
+| `{{.customField}}` | Any custom frontmatter field |
+
+For backward compatibility, `{{.Page.Title}}` and `{{.Post.Title}}` also work.
+
 ## 🏗️ Architecture
 
 ```mermaid

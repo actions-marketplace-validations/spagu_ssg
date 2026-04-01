@@ -73,6 +73,7 @@ func (p *markdownParser) handleFrontmatterDelimiter(line string) bool {
 }
 
 // processContentLine handles lines after frontmatter
+// If no ## Excerpt or ## Content markers are found, all content goes to content
 func (p *markdownParser) processContentLine(line string) {
 	if strings.HasPrefix(line, "## Excerpt") {
 		p.inExcerpt = true
@@ -90,6 +91,9 @@ func (p *markdownParser) processContentLine(line string) {
 	if p.inExcerpt && line != "" {
 		p.excerpt.WriteString(line + "\n")
 	} else if p.inContent {
+		p.content.WriteString(line + "\n")
+	} else if !p.inExcerpt && !p.inContent {
+		// No markers found - treat all content as content (fallback mode)
 		p.content.WriteString(line + "\n")
 	}
 }
