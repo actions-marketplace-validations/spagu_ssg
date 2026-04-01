@@ -625,6 +625,30 @@ func TestMinifyHTMLFile(t *testing.T) {
 			input:    "<p>Hello    World</p>",
 			expected: "<p>Hello World</p>",
 		},
+		{
+			name: "preserve htmlmin:ignore blocks",
+			input: `<html><body><!-- htmlmin:ignore --><pre class="mermaid">
+flowchart TD
+    A --> B
+    B --> C
+</pre><!-- /htmlmin:ignore --></body></html>`,
+			expected: `<html><body><pre class="mermaid">
+flowchart TD
+    A --> B
+    B --> C
+</pre></body></html>`,
+		},
+		{
+			name: "multiple htmlmin:ignore blocks",
+			input: `<div>  <p>minified</p>  </div><!-- htmlmin:ignore --><code>
+preserved
+whitespace
+</code><!-- /htmlmin:ignore --><div>  <p>also minified</p>  </div>`,
+			expected: `<div><p>minified</p></div><code>
+preserved
+whitespace
+</code><div><p>also minified</p></div>`,
+		},
 	}
 
 	for _, tt := range tests {

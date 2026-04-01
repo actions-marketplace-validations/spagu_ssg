@@ -276,6 +276,20 @@ See [.ssg.yaml.example](.ssg.yaml.example) for all options.
 | `--minify-js` | Minify JS output |
 | `--sourcemap` | Include source maps in output |
 
+**Skip Minification:**
+
+Use HTML comments to preserve whitespace in specific sections (e.g., Mermaid diagrams):
+
+```html
+<!-- htmlmin:ignore -->
+<pre class="mermaid">
+flowchart TD
+    A --> B
+    B --> C
+</pre>
+<!-- /htmlmin:ignore -->
+```
+
 **Image Processing (Native Go - no external tools needed):**
 
 | Option | Description |

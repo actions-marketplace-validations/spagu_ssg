@@ -1582,6 +1582,7 @@ func (g *Generator) minifyOutput() error {
 }
 
 // minifyHTMLFile removes unnecessary whitespace from HTML
+// Supports <!-- htmlmin:ignore --> ... <!-- /htmlmin:ignore --> to skip minification
 func minifyHTMLFile(path string) error {
 	content, err := os.ReadFile(path) // #nosec G304 -- CLI tool reads user's output files
 	if err != nil {
@@ -1589,6 +1590,23 @@ func minifyHTMLFile(path string) error {
 	}
 
 	s := string(content)
+
+	// Extract and preserve htmlmin:ignore blocks
+	reIgnore := regexp.MustCompile(`(?s)<!--\s*htmlmin:ignore\s*-->(.*?)<!--\s*/htmlmin:ignore\s*-->`)
+	preservedBlocks := make(map[string]string)
+	blockIndex := 0
+	s = reIgnore.ReplaceAllStringFunc(s, func(match string) string {
+		// Extract content between ignore tags
+		inner := reIgnore.FindStringSubmatch(match)
+		if len(inner) > 1 {
+			placeholder := fmt.Sprintf("__HTMLMIN_PRESERVE_%d__", blockIndex)
+			preservedBlocks[placeholder] = inner[1]
+			blockIndex++
+			return placeholder
+		}
+		return match
+	})
+
 	// Remove HTML comments (except conditionals)
 	reComment := regexp.MustCompile(`<!--[\s\S]*?-->`)
 	s = reComment.ReplaceAllStringFunc(s, func(match string) string {
@@ -1605,6 +1623,11 @@ func minifyHTMLFile(path string) error {
 	s = reMultiSpace.ReplaceAllString(s, " ")
 	// Trim lines
 	s = strings.TrimSpace(s)
+
+	// Restore preserved blocks
+	for placeholder, content := range preservedBlocks {
+		s = strings.ReplaceAll(s, placeholder, content)
+	}
 
 	// #nosec G306,G703 -- Web content files need to be world-readable, CLI tool writes user's output
 	return os.WriteFile(path, []byte(s), 0644)
