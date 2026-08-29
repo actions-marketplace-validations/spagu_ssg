@@ -5,6 +5,3678 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- 🧭 **`webmcp: true` — the built site declares its own tools to a browser agent**
+  (#224). A static site already knows its index, its taxonomy and its canonical
+  URLs at build time, and until now threw that away: an agent opening the
+  published site had to infer all of it from HTML. With this on, every rendered
+  document — posts, pages, archives, taxonomy listings, the home page and
+  `404.html` — registers four tools through the browser's `navigator.modelContext`
+  API: `searchPosts`, `listByTag`, `getDocument` and `navigate`. `navigate`
+  refuses any URL the site did not publish, so an agent can move a reader around
+  this site and nowhere else. The tools answer from `search-index.json`, so the
+  switch turns `search_index` on rather than shipping four tools that throw on
+  first call; with `i18n` on, each page reads the index in its own language.
+  **This is not `ssg mcp`** — that serves the author's assistant and writes
+  files, this is a property of the output serving the visitor's agent.
+  WebMCP is a W3C Community Group Draft, so the feature is off by default, the
+  script feature-detects and does nothing where the API is absent, the index is
+  fetched on first tool call rather than at page load, and a theme shipping its
+  own registration keeps it. A site that does not ask for it is unchanged byte
+  for byte. `--webmcp`, documented in [docs/AI-AGENTS.md](docs/AI-AGENTS.md).
+
+### Fixed
+- 📝 **The comment on `protocolVersion` described a server that no longer exists.**
+  It still claimed `2026-07-28` was deliberately unimplemented and pointed at
+  #174 as open work; #174 shipped in 1.8.45 and the server has spoken both eras
+  since. The constant is unchanged and correct — it is the initialize-era
+  fallback for a client that names no version — but the reasoning around it now
+  says so, and points at `supportedVersions` in `modern.go` for the full list.
+
+## [1.8.52] - 2026-08-27
+
+### Added
+- 🚦 **`ssg new worker rate-limit` — a request budget for the deployed Functions**
+  (#220). Every template that writes something — `contact-form` sends email,
+  `comments` accepts writes, `cookie-consent` logs — is a public,
+  unauthenticated endpoint, and nothing bounded how often it could be called.
+  Turnstile raises the cost of abuse without capping it: a solved token can be
+  replayed inside its validity window, and Turnstile is optional anyway.
+  `rate_limit` in `.ssg.yaml` only ever covered the built-in preview server.
+
+  It ships as `functions/_middleware.ts`, so it wraps whatever else is in the
+  project, including routes added later, without either side knowing about the
+  other. The default backend is the Workers Rate Limiting binding — exact, free,
+  nothing to provision. KV is a documented fallback rather than an equal option:
+  it is eventually consistent, so a burst arriving at several points of presence
+  at once can overshoot the cap, which is precisely the shape a spam run takes.
+
+  Three decisions the report asked to have pinned down, and each is now asserted
+  by a test rather than left to be rediscovered:
+
+  - **Fail open by default.** Losing a real enquiry costs more than letting one
+    extra message through — but that is wrong for anything moving money, so
+    `RATE_LIMIT_FAIL = "closed"` exists and the choice is per project.
+  - **A rejected request is not counted.** Otherwise a bot locks a real visitor
+    out of a shared address indefinitely, and `cf-connecting-ip` buckets a whole
+    office or CGNAT together, so shared addresses are the normal case.
+  - **The `429` carries `Retry-After` and `Cache-Control: no-store`** — the first
+    so a well-behaved client backs off, the second because a cached 429 would
+    answer somebody else's request.
+
+  With no backend bound it is a no-op: an unconfigured project behaves exactly as
+  it did, because a limiter that turns visitors away for want of configuration is
+  worse than no limiter.
+
+### Fixed
+- 🎨 **`minify_css` no longer changes what a selector means** (#222). It stripped
+  whitespace on both sides of every `:`, and a space *before* a colon is the
+  descendant combinator: `.prose :where(p)` — a paragraph inside `.prose` —
+  became `.prose:where(p)`, an element that is both, which is nothing.
+
+  The rules still parsed, so nothing errored and nothing warned; the styling was
+  simply gone. A Tailwind stylesheet using `@tailwindcss/typography` emits its
+  whole ruleset as `.prose :where(…)`, so after minification `prose` styled
+  nothing at all and the page rendered as unstyled running text — which is why
+  it took a while to notice. `.panel :hover` had it worse than most: it silently
+  became `.panel:hover`, styling the panel instead of its descendants.
+
+  Only the space *after* a colon is removed now, which is where the compression
+  was anyway — declarations are written `color: red`, not `color :red`. The
+  source-map path was never affected: it only collapses runs of whitespace.
+- 🗂️ **The media tools can see a migrated site's pictures** (#218). They shipped
+  knowing one root, `static/` — the theme's own, and usually near-empty on the
+  sites they were built for. Everything an export brings across lives under the
+  content source and is published at `/media/…`, so on a migrated site
+  `media_list` said "nothing" while the site served hundreds of images, and
+  `media_replace /media/images/team.jpg` said "not there" — the one call that
+  answers "change the picture on the about page" without touching content.
+
+  Media are now addressed **the way the site serves them**, across every root the
+  build publishes verbatim: the static directory, each `static_sources` entry,
+  and the content source's `media/`. The owner does not know a picture is stored
+  under a content source; they know it is `/media/images/team.jpg`.
+
+  A new file goes to the root serving the prefix it was addressed under, so an
+  upload to `/media/…` lands beside the site's other pictures instead of starting
+  a second media tree in `static/`. The longest prefix wins, because every root
+  is under `/` and a first-match search would send every `/media/` upload to the
+  theme's directory. Project-relative paths still work; a path under no
+  publishing root is refused and told where media live, rather than being
+  silently resolved into the first root that could hold it.
+
+  The reference check that guards `media_delete` used to derive the served path
+  by chopping the first segment — right for `static/`, wrong for a content
+  source, so a `/media/` picture three pages used looked unreferenced. It now
+  asks the root that holds the file.
+- 🗺️ **A front page is listed once in `sitemap.xml`** (#219). A document claiming
+  the root with `link: "/"` appeared twice — once as the generated front-page
+  entry at `priority 1.0`, once as an ordinary page at `0.8` — so the sitemap
+  contradicted itself about the site's most important URL. The guard against this
+  keyed on the page's *slug*, which is why `link: "/"` walked past it; it now
+  keys on the address, which covers every way a document can come to be the front
+  page. The `sitemap: "no"` workaround is no longer needed, and still means what
+  it says.
+
+## [1.8.51] - 2026-08-25
+
+### Added
+- 🖼️ **`media_*` — the pictures a site serves, changeable over MCP** (#214).
+  "Change the picture on the about page" is the most ordinary request after "fix
+  this text", and the answer was that the assistant could not: the content tools
+  handle Markdown, `designer_write` is text, and nothing touched a file. A hosted
+  setup putting `ssg mcp` behind a token had no way to add uploads without a side
+  channel, which would break the property that every change goes through the same
+  audited tools.
+
+  `media_list`, `media_upload`, `media_replace` and `media_delete`, from base64
+  bytes or a URL the server downloads. Both roles get them, because a photograph
+  is neither purely presentation nor purely content. `media_replace` keeps the
+  path, so every page using an image changes at once with no content edits.
+
+  Three rules, each of them a mistake already made once here:
+
+  - **The bytes decide, not the name.** A shell script called `photo.png` is
+    refused. That is SEC-013, which the AVIF pass forgot a release later (#198).
+  - **A URL is fetched through the guard external sources use**, which resolves
+    the host itself and refuses private and loopback addresses, so DNS changing
+    between check and connection cannot reach one either. A server that downloads
+    whatever it is told to is a proxy into the network it runs on.
+    `mcp.media_allow_private` opts in, off by default.
+  - **A referenced file cannot be deleted**, and the refusal names the pages that
+    point at it. A broken image is worse than an unused file.
+
+  JPEG, PNG, GIF and WebP only — the formats the image pipeline can process, so
+  an upload is a file the build can resize, convert and check. SVG is
+  deliberately outside that set: it is XML that can carry script, served from the
+  site's own origin, and "it is an image" is the reasoning that makes it
+  dangerous.
+- 🏷️ **The site's name and description are settable over MCP** (#212).
+  `designer_config_read` listed only rendering switches, so asking an assistant
+  to change the site title dead-ended: the only MCP-reachable answer was
+  hardcoding the string into every template, duplicating it across four files.
+
+  `title` and `description` join the writable set. The boundary is unchanged and
+  the test for it is not "is this about rendering" but: does the key carry a
+  secret, move the deployment, change what the server does, or change what a URL
+  is? The site's own name fails all four. `language` and `author` were suggested
+  alongside and are deliberately absent — neither exists as a top-level key, and
+  `default_language`, which does, drives i18n and URL prefixes, so the same rule
+  refuses it.
+
+  **The scaffold theme now reads `.Site.Title`.** Making a key settable achieves
+  nothing if no default theme reads it: before this, `title` wrote cleanly into
+  the config and changed nothing on the page — the same trap as the `base.html`
+  of #208, which looked authoritative and did nothing. The `<title>`, meta
+  description, hero heading and logo are the site's name; the canonical URL and
+  the copyright line keep the host, because that is what they are. With no
+  `title` configured the domain stands in, so an existing site is unchanged.
+
+  The bundled `simple` theme had the same gap and is fixed with it (#213). That
+  was filed as a separate job on the assumption it would move the golden
+  baseline — the corpora build with `simple` — but they configure no site name,
+  so the fallback renders the domain and all four corpora are byte-identical.
+  Checking beat assuming.
+
+### Changed
+- 🧱 **`simple` stopped repeating its whole document four times** (#216). Each of
+  the four page templates carried a complete `<!DOCTYPE>`…`</html>` — the same
+  head, header, nav and footer — so changing the footer meant changing it in
+  four files, and changing three of them was a silent inconsistency. The same
+  shape as the scaffold's orphaned `base.html` in #208, minus the file that
+  looked authoritative.
+
+  The skeleton now lives once in `partials.html` as `site-open` / `site-close`,
+  and each page template wraps its own `<main>` in it. Go templates cannot
+  dispatch `{{template}}` on a computed name, so this is a skeleton the pages
+  wrap themselves in rather than a base they extend — which is why the original
+  `base.html` could never have worked.
+
+  **The output is byte-identical.** Not "the tests still pass": the corpus was
+  built before and after and compared file by file, and the one difference the
+  first attempt produced — a stray blank line at a seam — was fixed rather than
+  recorded as a new baseline. A restructure that changes no output is the only
+  kind that needs no argument.
+
+  311 lines became 237, and the duplication SonarCloud was failing the gate on
+  is gone rather than excluded from measurement.
+
+  The scaffold theme had the same shape and gets the same treatment: it now
+  writes a `partials.html` holding the skeleton, which also answers what #208
+  left open. That issue removed a `base.html` nothing included, on the grounds
+  that making the four templates extend it would be a different theme — the
+  pattern that actually works in Go templates, a skeleton pages wrap themselves
+  in, is what was missing then.
+
+### Fixed
+- 🔗 **The scaffold's post canonical pointed at a URL that does not exist**
+  (#217). It built the link by hand — `https://{{.Domain}}/{{.Post.Slug}}/` —
+  while a post renders wherever `post_url_format` says, and the default is
+  dated. So a scaffolded site published `output/2024/01/02/post/index.html`
+  declaring its canonical to be `https://example.com/post/`: every post telling
+  search engines the authoritative copy of itself lives at a 404. Worse than no
+  canonical, which at least leaves the crawler with the URL it fetched.
+
+  It survived because `page.html` had the same hand-built shape and happens to
+  agree with how pages are addressed — it was wrong in one of the two places,
+  and the wrong one is the one with dates in it. Both now call
+  `GetCanonical`, which is what the bundled theme has always used, and an
+  explicit `.Canonical` still wins.
+
+  Found by diffing the rendered output before and after the restructure above,
+  not by reading the templates.
+- 🇬🇧 **`simple`, the theme `ssg init` writes, is in English** (#213). It shipped
+  Polish copy — `Strona główna`, `Witamy na stronie`, `Najnowsze wpisy`,
+  `Czytaj więcej` — and declared `<html lang="pl">` outright, so a fresh
+  `ssg init` anywhere produced a site that greeted visitors in Polish and told
+  screen readers it was Polish, whatever language it was actually in. It is
+  presented as the neutral default; now it reads as one.
+
+  The language attribute follows the document, as the scaffold's has since #208,
+  rather than being hardcoded in the other direction.
+
+  **This moves the golden baseline**, because the strings are in the output —
+  the only such change in this release. The recorded manifests are updated in
+  the same commit, and the diff was read before it was recorded: every line of
+  it is one of the seven translated phrases or the language attribute, across
+  nine files and nothing else.
+
+## [1.8.50] - 2026-08-25
+
+### Added
+- 📂 **`flat_posts`, and a build that names what it skips** (#211). A Markdown
+  file directly in `posts/` is not loaded — documented in
+  [CONTENT.md](docs/CONTENT.md), and true since forever — but the build said
+  nothing about it, so a skipped post was indistinguishable from a frontmatter
+  problem. Pages at the top level of `pages/` load fine, which is what makes it
+  look like one: the reporter bisected `id`, `link`, date quoting and category
+  shapes before finding the folder depth was the whole difference.
+
+  Worse, **`ssg init` scaffolded its example post exactly there**, so every
+  fresh site began with a post its own build ignored, and a hosted "create a
+  site" flow built on `ssg init` produced sites whose blog was empty.
+
+  Two halves, both fixed. `flat_posts: true` loads them where they are — off by
+  default, because those files have always been skipped and loading one unasked
+  would publish a page nobody asked to publish, which is worse than the bug.
+  With it off the build names the files and both remedies. And `ssg init` now
+  writes the key into the config it scaffolds, so a fresh site builds with the
+  post it was given.
+
+  The switch changes where the loader looks, not what it publishes: the
+  `status: publish` gate is unchanged, so the only files that can appear are
+  ones that already asked to be published.
+- 🧭 **`designer_find` uses the vectors it was given** (#207). The MDDB backend
+  only ever asked `/v1/fts`, so a collection carrying embeddings was searched
+  lexically anyway: "how the navigation looks on phones" found nothing unless
+  those words appeared in the code — which is the one class of question the
+  backend gets configured for, since identifiers and colours are already
+  answered by the local scan. The vectors were computed and never consulted.
+
+  It now asks `/v1/hybrid-search` for **which** documents matter and `/v1/fts`
+  for **where**. Two calls per query, deliberately: hybrid results carry no
+  highlights and no line ranges at all, so switching to them alone would have
+  undone #203 one release later — every hit back to a real file beside no
+  location, with nothing for an anchored edit to anchor to.
+
+  A document the vectors ranked but the keywords did not match is reported with
+  its line marked unknown rather than guessed. A collection without embeddings
+  declines once, is remembered, and behaves exactly as before. If the keyword
+  half fails while hybrid succeeded, the ranking is still returned without
+  positions; only both halves failing is an error.
+
+### Fixed
+- 🚦 **The generated 404 speaks the site's language** (#209). It always said
+  `404 — page not found` under `lang="en"`, so a Polish site served an English
+  404 to real visitors — and on a static host that page answers every dead URL,
+  which after a migration is what every old link produces.
+
+  The attribute was never the bug: `lang` describes the language of the content,
+  and the content was English, so printing `pl` over it would have made a screen
+  reader switch voice for words that had not changed. The copy is what was
+  wrong, so it now comes from the i18n catalog (`not_found.title`,
+  `not_found.body` with a `{{site}}` placeholder, `not_found.home`) and the page
+  is labelled with whichever language it actually used.
+
+  All three keys or none: a page with two translated lines, one English one and
+  `lang="pl"` is worse than a wholly English page, because the mislabelled part
+  is exactly the part a screen reader gets wrong. A site with no catalog is
+  unchanged and says nothing about it — a warning per string, on every build,
+  about copy the author never wrote would be noise.
+- 🌍 **The scaffold theme declares the document's own language** (#208). It
+  hardcoded `<html lang="en">` in five places, so a migrated Polish site told
+  browsers, screen readers and search engines it was English — however clearly
+  its own export said otherwise, with `lang: pl` on every document. It now
+  prints the page's language, falling back to the site default and to `en` only
+  when nothing says otherwise.
+
+  The front page needed a fix of its own: it renders from an anonymous struct
+  rather than the page map, so `{{.Lang}}` there is not an empty value but
+  `can't evaluate field Lang` — a hard error on the most linked document the
+  site has. Same surface as #186, a week apart. The regression test is a full
+  Polish build that checks every rendered document, and it fails with exactly
+  that error without the fix.
+
+  The generated `404.html` is deliberately left in English and tracked as #209:
+  its copy is English, so declaring another language over it would mislead a
+  screen reader rather than help it. That one needs translated strings, not an
+  attribute.
+- 🪤 **The scaffold no longer writes a `base.html` nothing includes** (#208).
+  `page.html`, `post.html`, `index.html` and `category.html` each carry their
+  own `<!DOCTYPE>`…`</html>`, and nothing referenced `base.html` — its
+  `{{template "content"}}` named blocks none of them define, so it could not
+  have rendered even on purpose. What it did do was read as *the layout*: an
+  editor changes the footer there, nothing happens, and the real footer is in
+  four other files. An MCP agent edited it twice before anyone noticed.
+
+  Removed rather than repaired: making the four extend it would be a different
+  theme, and the scaffold's job is to be replaced. A file that cannot work and
+  looks authoritative is worse than a missing one.
+
+## [1.8.49] - 2026-08-24
+
+### Fixed
+- ✂️ **A line is no longer treated as a unit of size** (#204, #205). `designer_find`
+  and `designer_edit` reported context by line — the matched lines, the changed
+  line, a few either side. On a minified stylesheet a line *is* the file, so
+  three colour changes across two minified files cost 40–50k tokens: the exact
+  cost the anchored edit was built to remove, back through a side door. Migrated
+  themes are where this lands, since many WordPress sites ship their CSS and JS
+  already minified and a migration keeps what it fetched.
+
+  A match on a line longer than 400 characters now comes back as a window of
+  ±160 characters with a column range — `static/css/site.css:1:9834-9859` — so a
+  one-line file yields a one-line answer of a few hundred bytes and an anchored
+  edit still has an exact target. Whatever is omitted is stated, and every
+  fragment is capped whatever produced it. Lines stay the right unit for source
+  that has lines: the switch keys on the length of the line in hand, not on the
+  file's name, so a hand-written stylesheet with one enormous selector list is
+  treated the same and a minified file with short lines is not punished for what
+  it is called.
+
+  The window snaps to rune boundaries in both directions. Slicing UTF-8 at an
+  offset that is not a boundary is how a tool corrupts text instead of trimming
+  it — the same mistake as #199, one week apart, in unrelated code.
+- 🔑 **The MDDB API key goes in the header MDDB reads it from** (#202). ssg sent
+  it as `Authorization: Bearer`, and MDDB's HTTP middleware takes whatever
+  follows `Bearer ` and validates it as a JWT — the `X-API-Key` path is reached
+  only when there is no bearer value at all. So a correct key was parsed as a
+  token, refused, and came back as `401 invalid token`, which sends the reader
+  off to check a key that was right all along.
+
+  Every request from `ssg mddb push-theme` and from `designer_find`'s MDDB
+  backend failed this way. The feature could not work with an API key at all.
+  A credential shaped like a JWT still travels as a bearer token, so the
+  long-lived-JWT workaround people reached for keeps working.
+
+  The test that should have caught this asserted `Bearer test-api-key` — the bug
+  written down as a requirement — against a fake that ignored auth entirely. The
+  fake now refuses what MDDB refuses, so a credential in the wrong header fails a
+  test the way it fails a deployment.
+- 📍 **`designer_find`'s MDDB backend reports where the match is** (#203). It
+  printed lines 1–5 of the document: a real file beside a made-up location, which
+  is worse than the local scan it was meant to improve on, because the agent's
+  next step is an anchored edit and there was nothing to anchor to. It now asks
+  for highlights and reports each one's own line range, so a document matching in
+  two places gives two loci. Against a server predating MDDB 2.12.0's line ranges
+  it says the line is unknown rather than inventing one.
+
+### Added
+- 🔓 **`mddb.allow_http` / `mcp.search.mddb_allow_http`** (#201). An API key was
+  refused over plaintext `http://` to anything but loopback — right on the
+  internet, blind on a private network, where `http://mddb:11023` is the same
+  trust boundary as loopback spelled with a service name. The only escape was a
+  private CA mounted into every container that runs ssg, plus `SSL_CERT_FILE` in
+  each environment: an hour of certificate ceremony to encrypt a link between two
+  processes on one host. The same opt-in `external_sources` already take, off by
+  default, and the refusal now names the setting that would change it.
+
+## [1.8.48] - 2026-08-24
+
+### Added
+- 🔔 **`ssg self-update-check`, and a build that says what built it** (#193).
+
+  Two gaps that compounded. A build's first line was `🔄 Loading content...` and
+  nothing in the output named the version, so a CI log from last month gave no
+  way to tell whether the binary changed or the site did. And there was no way
+  to learn a newer release existed short of visiting the releases page — across
+  six install methods, so "am I current?" had six different answers and you had
+  to know which one was yours.
+
+  Every build now opens with `🧱 ssg 1.8.48` (silent under `--quiet`), and:
+
+  ```
+  $ ssg self-update-check
+  🧱 ssg 1.8.30 (installed via snap)
+  🆕 A newer release is out: 1.8.48 (you have 1.8.30)
+     https://github.com/spagu/ssg/releases/tag/v1.8.48
+
+     Upgrade with:
+       sudo snap refresh static-site-generator
+  ```
+
+  The command is the one for *your* install, worked out from where the running
+  executable actually sits rather than from the operating system: a Homebrew ssg
+  on Linux is still Homebrew's, a snap is detected by the executable living under
+  `$SNAP` (the variable alone proves nothing — it is exported to every process a
+  snap starts), and a binary copied into `/usr/bin` by hand is nobody's to
+  upgrade, so that one is sent to the releases page rather than handed an `apt`
+  command that would not move it.
+
+  What it deliberately does not do: **it never updates anything** — rewriting
+  your own binary asks for more trust than a static site generator should — and
+  **it never runs on its own**. A build makes no network request; a generator
+  that phones home on every run is slow, breaks air-gapped and CI environments,
+  and reports on something nobody asked about. Exit 0 whether or not an update
+  exists, so it is safe in a script; exit 1 only when the check could not be made.
+
+  A version that does not parse — `dev`, a source build — compares as older than
+  any release, so such a build is told what the newest release is rather than
+  being declared current. A version *ahead* of the newest release is told so and
+  left alone.
+- 🧪 **Fuzz targets for the parsers that read bytes ssg did not write** —
+  `orientationFromTIFF`, `stripJPEG`, `sanitizeHTML` and `verbatimSpans`. All
+  four run over content a migration pulled from someone else's server, so
+  malformed input is the normal case rather than a hypothetical, and a panic in
+  a build is a build that stops on a file the operator cannot easily remove from
+  somebody else's export. The image parsers survived ~105 million executions
+  between them without a finding; the sanitiser did not — see below. CI runs a
+  short fuzz pass on every push so the corpus keeps growing.
+- ✅ **`ssg mddb push-theme` validates before it writes** (#192). The render side
+  already recognises a Go-stringified structure and names the document and the
+  field; the producer side was silent, so a bad value was stored successfully and
+  surfaced at the *next* render — another machine, possibly weeks later, naming a
+  document whose author had moved on. MDDB 2.12.0 added the same lint to
+  `/v1/validate`, and ssg now asks before storing. A warning is reported, never
+  fatal — MDDB does not fail validation on one either, because
+  `map[answer:… question:…]` is a valid string. `mcp.search.mddb_validate: false` or
+  `--no-validate` opts a large batch out of the extra round trip, and a server
+  older than 2.12.0 is detected once and skipped silently rather than complained
+  about per document.
+
+### Security
+- 🔤 **The sanitiser no longer rewrites bytes it has no opinion about** (#199),
+  found by its own new fuzz target in under a second. A file that is not valid
+  UTF-8 — a Latin-1 export, a truncated sequence, a byte a scraper mangled — came
+  out with every offending byte replaced by U+FFFD, **while reporting zero
+  removals**: `caf\xe9` became `caf` plus a replacement character, and the build
+  said it had cleaned nothing. Ranging a string yields `RuneError` for each
+  invalid byte, and writing that rune back substitutes three bytes for one.
+  Encoding belongs to `output_encoding`; this function removes invisible
+  characters and nothing else, so an invalid byte now passes through untouched.
+
+  The same root caused a worse defect in `verbatimSpans`, which lowercased the
+  document with `strings.ToLower` to find tags — also substituting U+FFFD, so
+  every offset it found was computed in a string of a different length from the
+  one those offsets are used against. `<pre \x88</pre>` (12 bytes) produced a
+  protected span of `[0,14)`, past the end of the document. Folding ASCII only is
+  length-preserving by construction and loses nothing, since tag names are ASCII.
+
+  Worth recording that the first fix was incomplete — it guarded one path and not
+  the protected-`<code>` branch beside it — and the fuzz target found the gap
+  immediately, on the fixed code. That is the argument for keeping these in CI
+  rather than running them once.
+- 🖼️ **The AVIF pass no longer trusts a file extension** (#198). ssg closed this
+  hole deliberately once: `image.Decode` dispatches on magic bytes, not on the
+  name, and importing `github.com/disintegration/imaging` registers the BMP and
+  TIFF decoders too — so a crafted TIFF called `photo.png` decodes, and then
+  panics in imaging's scanner (CVE-2023-36308, **no fixed release upstream**).
+  `internal/images` therefore checks the *decoded* format against an allowlist
+  before any transform touches the pixels (SEC-013).
+
+  The AVIF pass added in 1.8.46 selected its sources by extension and handed
+  them straight to `imaging.Open`, so it skipped that check entirely. The
+  allowlist is now exported and used by both packages — a second copy of the
+  list is a second thing to forget — and a source whose real format is outside
+  it is refused before imaging sees it. The regression test writes a real TIFF
+  named `.png` and fails without the guard.
+
+  Impact was a crashed build rather than anything worse, but `ssg migrate` pulls
+  media from a site the operator does not control, which is the case the
+  original mitigation was written for.
+
+### Changed
+- 📌 **Docker base images pinned by digest, with Dependabot to keep them
+  current.** A tag is a moving target — `golang:1.27.0-alpine` is not the same
+  bytes this week as last — so a digest is what makes the build reproducible.
+  A digest nobody updates is worse than a tag, though: the image stops receiving
+  security patches and nothing says so. The pin and the new
+  `.github/dependabot.yml` (docker, gomod, github-actions) are one decision, not
+  two. Digests verified against the registry, not copied from a suggestion.
+- Edited four MCP, migration and preview articles for direct, natural prose;
+  checked their technical claims against the implementation, tests and platform
+  documentation; and aligned their filenames with the existing lowercase
+  kebab-case blog convention. Their published slugs remain unchanged.
+
+### Fixed
+- 🔇 **`--quiet` is quiet** (#194). `--help` promised "only exit codes" and a
+  quiet build still printed four lines to stdout — the content-loading counts,
+  the one function in the build that had no `Quiet` guard while all its siblings
+  did. It made the flag unusable for what it exists for: a build inside a script
+  that captures stdout, a cron job whose output becomes an email, a `ssg daemon`
+  project whose logs are aggregated. Found while adding the startup version line
+  above, which obeys `--quiet` and made the four sitting under it obvious.
+
+
+## [1.8.47] - 2026-08-21
+
+### Added
+- 🔎 **`designer_find` / `content_find` — where something lives, without reading
+  the files** (#190). The MCP toolset was list / read / write, so answering
+  "where is the page background set?" meant listing the theme and reading files
+  until the line turned up. Measured on a migrated site that was ~10k tokens for
+  a one-line CSS change, most of it spent locating the line.
+
+  ```jsonc
+  designer_find { "query": "background" }
+  → static/css/style.css:4-8
+      body {
+        background: #ffffff;
+        color: var(--ink);
+      }
+  ```
+
+  The returned range is the anchor `designer_edit` needs, so find → edit is two
+  calls with no read between them. The query is a case-insensitive regular
+  expression when it is valid syntax and a literal otherwise, so pasting a CSS
+  fragment with an unbalanced bracket returns an answer rather than a syntax
+  error. Overlapping context windows merge; files over 512 KB are skipped,
+  because a minified bundle matches everything and helps nobody. Each section
+  searches only its own directories — the find tools are not a way around the
+  confinement the read and write tools enforce.
+
+- 🗂️ **`ssg mddb push-theme`, and an MDDB-backed search behind the find tools**
+  (#190). A local scan matches text; it cannot answer a question phrased as a
+  sentence, because that is a search problem. `mcp.search.mddb_*` points the
+  find tools at an MDDB collection's full-text search, and `ssg mddb push-theme`
+  is what fills it: every template and asset upserted under its project-relative
+  path, with `kind`, `size` and a SHA-256 checksum as metadata, and any document
+  whose file has vanished deleted. It reconciles rather than appends, so running
+  it twice changes nothing the second time.
+
+  The index is consulted **first and never required**: on an error or an empty
+  answer the local scan still runs. A search backend that is down degrades the
+  answer, it does not take the ability to edit the site down with it. The client
+  gained `Add`, `Delete` and `FTS` for this — it could only read before, which
+  is why nothing could keep a collection in step with a theme.
+
+- ✂️ **`designer_edit` / `content_edit` — anchored partial edits** (#187). The
+  write contract was full-file replacement. Safe, but it priced an edit by the
+  size of the *file*: changing one CSS value on a real migrated site meant
+  reading 4 812 bytes, writing 4 812 back, and reading them again to check —
+  ~4 300 tokens of file traffic for one line.
+
+  ```jsonc
+  designer_edit { "path": "static/css/style.css",
+                  "old": "  background: #fff;", "new": "  background: #0b1220;" }
+  ```
+
+  `old` is matched byte for byte, indentation included, and must appear
+  **exactly once**: zero matches or several is a refusal that names the count,
+  so nothing fuzzy lands and nothing half-applies. The reply carries the changed
+  lines with their neighbours and line numbers, which **is** the verification —
+  there is no re-read. An empty `new` deletes. Arguments are no longer trimmed
+  on this path, or an indented anchor could not match the text it names. The
+  full writes remain for new files and real rewrites.
+
+- 🕰️ **`.BuildTime` in templates** (#186). There was no way to render the build
+  date — most visibly the current year — so `© 2007-2026` went stale the night
+  the year turned, on every site at once. The alternatives were a hand-edit each
+  January or a client-side script for one number on an otherwise static page.
+
+  ```gotemplate
+  © 2007-{{ .BuildTime.Year }} {{ .Domain }}
+  ```
+
+  It is a value read **once per build**, not a function that reads the clock on
+  every call: two pages of one build can never straddle midnight and disagree.
+  It honours **`SOURCE_DATE_EPOCH`**, so a CI job or a distribution package that
+  pins it still gets a build that is a pure function of its input, while a plain
+  build gets the real clock. A malformed value is ignored rather than fatal —
+  the variable is usually set by a surrounding toolchain the site owner does not
+  control, and someone else's typo should not break their deploy.
+- 🌍 **`language_sections` — a language for a content section, not for every
+  page** (#182). A page could declare its own `lang:` and `languages:` /
+  `default_language:` said what the site had; there was no way to say
+  "everything under this directory is German" in one place.
+
+  Migrated sites are where that bites. A bilingual WordPress site keeps its
+  languages in `/de/` and `/fr/` and says so nowhere a page carries — the
+  language was a plugin's property of the *section*, not a field on the post — so
+  an export produces a few hundred documents with no `lang` at all. The
+  alternatives were writing it into every file, which the next export overwrites,
+  or hand-editing after every build. A migration is not a one-off: it is run
+  again whenever the source changes.
+
+  ```yaml
+  language_sections:
+    de: de
+    fr/blog: fr
+    home: en
+  ```
+
+  The spelling is the one the configuration already uses for
+  `output_encoding_sections` and `schema_defaults`: keyed by content directory,
+  longest prefix wins, `home` for the site root — one prefix convention in the
+  project rather than three, and the resolver is now literally shared between all
+  three rather than copied a third time. Precedence is a page's own `lang:`, then
+  its section, then `default_language`. A section naming a language `languages:`
+  does not declare warns **once for the section**, not once per file beneath it.
+
+  The assignment happens before translation grouping, `LangPrefix` and hreflang,
+  so everything downstream sees it — and a page that already carries an explicit
+  `link:` keeps that URL whole, so an export that wrote `link: /de/impressum/`
+  does not become `/de/de/impressum/`.
+- 🔀 **The built-in server serves the `_redirects` and `_headers` it generates**
+  (#181). `ssg` writes both files on every build and the documentation is clear
+  that Cloudflare Pages and Netlify serve them as they stand — the preview read
+  neither. So a site carrying fifty redirects from an old CMS, which is the
+  normal case after a migration since every one of them is a URL somebody else
+  published, served all fifty as 404s locally, and the first anyone knew about
+  whether the rules were right was production. Redirects are the part of a
+  migration whose absence is invisible from the inside: the new site looks
+  perfect and everybody arriving from the old one gets a 404.
+
+  It also split the preview from the deployment in a way nothing else here does.
+  `endpoints:` went deliberately the other way — the built-in server runs the
+  same declaration the platform compiles — and that is exactly what makes them
+  testable. Nothing new is declared to close this; serving the file is reading
+  what is there.
+
+  **Cloudflare Pages semantics, named rather than averaged**: redirect rules are
+  evaluated before static assets, so a rule shadows a file at the same path;
+  order is honoured and the first match wins. Exact paths, `/old/*` splats with
+  `:splat`, `:placeholder` segments, `301`/`302`/`303`/`307`/`308`, and `410`
+  answered with no `Location`. A `!` force marker parses and is inert here. A
+  malformed line is skipped with one warning naming it and the rest of the file
+  stays live — a file the build wrote must never be one the server refuses to
+  start over.
+
+  `_headers` had the same gap and is fixed with it: a matching pattern's headers
+  are applied, first matching value winning per name, and **the file wins over
+  the server's own security headers** because that is what the deployed site
+  serves. One consequence stated plainly: the default `_headers` caches `/` and
+  `/*.html` for an hour, so the preview now does too — pages carrying the
+  live-reload script are exempted, since a reload served from the cache would
+  show the previous build.
+
+  Both tables are re-read after every rebuild, not only on a config reload, and
+  swapped whole on the same atomic-pointer pattern as the endpoint routes
+  (#180): a request sees the rules from before the rebuild or the ones from
+  after it, never a half-parsed file.
+- 🔁 **One process for preview, MCP and the filesystem** (#184) —
+  `ssg mcp --http --watch --listen=7823` now serves the preview, serves the MCP
+  endpoint, and rebuilds on both kinds of change: a mutation arriving through
+  MCP, and a file edited by anything else. `--watch` was already accepted here
+  and read by nothing: parseFlags put it in the config and the mcp path never
+  looked, so an edit from a human editor open beside the agent, an `rsync` or a
+  CMS export left the preview stale indefinitely.
+
+  It is the same watch, not a second one: the same polling loop, the same
+  per-file signature cache, the same content-signature gate that skips
+  touch-only events. An edited config file is reloaded and its `endpoints:`
+  republished onto the running preview (#180) without dropping the port.
+
+  The workaround it replaces — `--watch-runner="ssg mcp --listen=…"` — is one
+  command line but still two processes, and two independent builders over one
+  output directory with nothing serialising them.
+
+### Fixed
+- 🧹 **A watcher no longer outlives the command that started it** (#191).
+  `ssg migrate --watch` started the watch loop with `go runWatchLoop(…)` and
+  never stopped it. In normal use the process parks until Ctrl+C so nothing
+  showed; under test the caller returns, and the goroutine kept rebuilding for
+  the rest of the process — into whatever working directory the process had by
+  then. Under `go test -shuffle=on` that was the repository itself: a full
+  generated site appearing in `cmd/ssg/`, roughly one run in sixteen.
+
+  The watcher's lifetime is now its owner's lifetime. The deeper problem was a
+  test whose isolation came from *another* test's `t.Chdir`; that passes for a
+  reason unrelated to what it asserts, so CI now also runs `go test -shuffle=on`
+  and an ordering dependency cannot come back quietly.
+- 🏁 **The command has one diagnostic sink, and the tests stop assigning
+  `os.Stderr`** (#188). Every warning went to `fmt.Fprintf(os.Stderr, …)`, and
+  the tests asserting on those messages captured them by assigning `os.Stderr` —
+  a standard-library package variable that the goroutines this command leaves
+  running (the HTTP/3 listener, the autocert helper, the watch loop, a server
+  reporting a dead listener) read to write diagnostics of their own. A data
+  race, and `-race` caught it about one CI run in ten, always in whichever test
+  happened to be running when an earlier test's goroutine finally spoke. It
+  failed this release's own PR.
+
+  The 90-odd writers now go through `errf`/`errln`, reading a sink under a lock
+  — the seam `serverErrf` already established for server errors, applied to the
+  command as a whole — and the capture helper swaps that sink instead. Nobody
+  writes `os.Stderr` any more, so the race has no subject. Twenty shuffled
+  `-race` rounds, which failed twice before, now pass. `cmd.Stderr = os.Stderr`
+  still hands a child process the real file. No message changed.
+- 🧊 **A preview no longer caches anything** (#185). `--watch` refreshed the page
+  and kept the previous build's stylesheet: HTML was served `no-cache`, but
+  everything else got `public, max-age=3600` — and since the preview began
+  honouring the generated `_headers` earlier in this release, `/css/*` and
+  `/js/*` were served `public, max-age=31536000, immutable`, which a browser
+  will not revalidate at all. Content edits appeared, style edits did not.
+
+  `--watch --http` and `ssg mcp --http` now stamp every response `no-cache` and
+  strip the browser's `If-None-Match` / `If-Modified-Since`, so a rebuilt asset
+  is on screen after a reload. The rewrite happens as the response is committed
+  rather than before it, because the file server and the `_headers` rules both
+  write `Cache-Control` after any outer middleware has run — the last word is
+  the only one that counts. `Expires` and `Pragma` go with it, since either
+  outranks `Cache-Control` in an HTTP/1.0 cache. Endpoints keep their stricter
+  `no-store`, and a server for published output is untouched.
+- 🔁 **The live-reload hub is installed atomically.** It was a plain package
+  variable: whichever command is starting up writes it — a build, `ssg migrate`,
+  `ssg mcp` — while `buildServerHandler` reads it on another goroutine. A data
+  race the `-race` suite caught intermittently, and one no amount of ordering
+  inside a single command could fix, because the goroutine doing the reading
+  belongs to a different one.
+- 🔒 **Two rebuilds can no longer run at once**, which was true before any
+  watcher existed. The Streamable HTTP transport gives every request its own
+  goroutine, so two concurrent `tools/call` already rebuilt the same output tree
+  at the same time — and the stdout capture that keeps build noise out of the
+  JSON-RPC channel swaps a process-wide `os.Stdout` while doing it. Every
+  rebuild in `ssg mcp` now passes through one mutex, whichever source triggered
+  it. Asserted under `-race` with eight goroutines and a high-water counter that
+  must never read 2.
+
+### Changed
+- 📦 **Dependencies upgraded**: pongo2/v6 v6.0.0 → v6.1.0, jlaffaye/ftp v0.2.1 →
+  v0.2.2, pkg/sftp v1.13.10 → v1.13.11, quic-go v0.60.0 → v0.61.0, ulikunitz/xz
+  v0.5.15 → v0.5.16, goldmark v1.8.2 → v1.8.5, golang.org/x/crypto v0.54.0 →
+  v0.55.0, golang.org/x/net v0.57.0 → v0.58.0, grpc v1.82.1 → v1.83.1, protobuf
+  v1.36.11 → v1.36.12, modernc.org/sqlite v1.53.0 → v1.57.0 (four minors, with
+  modernc.org/libc v1.73.4 → v1.74.4 behind it).
+
+  **goldmark renders the site's Markdown, so its bump is the one that had to be
+  proved rather than assumed**: all four golden corpora — 67 files across the
+  taxonomy, dynamic, multilingual and external fixtures — are byte-identical
+  after it, as is the 917-file determinism stress corpus. `govulncheck` reports
+  no vulnerability this code calls; the single module-level finding is
+  GO-2026-5932 (`golang.org/x/crypto/openpgp` is unmaintained), which has no fix
+  and which nothing here imports.
+
+### Security
+- 🔑 **Every `ssg mcp --listen` endpoint gets a bearer token, and the token can
+  come from the environment** (#183). Two gaps that met in the worst place: the
+  deployment the documentation itself recommends.
+
+  Minting used to be conditional on the listener being **off** loopback — but
+  `docs/MCP_TRANSPORTS.md` tells you to bind loopback and let a reverse proxy own
+  the public address, with `--token="$SSG_MCP_TOKEN"`. An unset variable expands
+  to an empty argument; the address is loopback; nothing was minted; and the
+  startup line read *"No token — loopback only"* about a server that writes files
+  and runs git and was, at that moment, reachable from the internet. Nothing
+  failed, and the reassuring message was the wrong one. A token now costs nothing
+  on a listener nobody proxies — the client is being configured anyway — so there
+  is no longer a configuration without one.
+
+  The token also resolves from **`$SSG_MCP_TOKEN`** when `--token` is absent, the
+  flag winning when both are set. A command line is in `ps`, in the shell
+  history, in every container inspection and in the supervisor's own log; `ssg`
+  already takes that position for `mcp.git.token`, whose documentation says to
+  always use `$ENV`. The variable name is the one the docs were already using.
+
+  A minted token now says so — *"Minted for this run — set SSG_MCP_TOKEN to keep
+  it stable across restarts"* — which is the line to alert on in a supervised
+  deployment: it means the secret you thought you passed did not arrive. A
+  machine that cannot mint refuses to serve rather than serving openly.
+- 🧪 **The stderr capture used by 19 tests no longer truncates or hangs.** It
+  read once into a 4096-byte buffer *after* the code under test had returned:
+  a longer message came back silently truncated, so an assertion on its tail
+  passed or failed for the wrong reason — and a message past a pipe's ~64 KB
+  blocked the writer on something nobody was draining, hanging the test rather
+  than failing it. It now drains on a goroutine, which is what `captureStdout`
+  in the MCP path already did. The remaining hazard — swapping a process-global
+  while other goroutines write to it — needs injected writers and is tracked in
+  #188.
+- 🧹 **The golden and determinism scripts say what they actually run.** The
+  corpus build read `--source/--template/--domain`, which ssg does not accept:
+  it warned three times per run, declined to consume the values, and the three
+  orphans landed as positionals in exactly the right order. It worked by
+  accident and described an interface that does not exist. The invocation is
+  unchanged — only its spelling — and the corpora stay byte-identical.
+
+
+## [1.8.46] - 2026-08-19
+
+### Changed
+- 🐹 **Built with and targeting Go 1.27.0** (from 1.26.6), with golangci-lint
+  pinned to v2.13.1 — the first release built on 1.27, and the reason the
+  language directive could move at all: the linter refuses to analyse a target
+  newer than the Go it was built with.
+
+  **Measured rather than assumed**: on a 2,000-post corpus the median and
+  minimum build times are identical between 1.26.7 and 1.27.0. Go 1.27's headline
+  gains — up to 30% on sub-80-byte allocations, faster `compress/flate`, faster
+  JSON unmarshal — are real, but a profile of that build is **68% syscalls**, so
+  a ~1% CPU improvement is below the measurement noise here. The bump is taken
+  for the security and stdlib currency it brings, not for a speedup this
+  workload can show.
+- 🔀 **The endpoint proxy uses `ReverseProxy.Rewrite`** instead of the
+  `Director` field Go deprecated. Not cosmetic: `Director` sees only the
+  outbound request, so a proxy built on it forwards whatever `X-Forwarded-*`
+  headers the client sent; `Rewrite` receives both requests and strips them,
+  which is the reason the replacement exists. Surfaced by targeting 1.27.
+
+### Added
+- 🖼️ **`image_formats` — a site-level way to ask for AVIF** (#178). AVIF has been
+  reachable since #43, but only from a template helper, per call: a site could
+  not simply ask for it, so a hosted builder exposing ssg's settings had no key
+  to write, and a migrated WordPress site full of camera JPEGs kept paying for
+  them. `image_formats: [avif, webp]` publishes a derivative per format at every
+  `image_sizes` width and wraps the `<img>` in a `<picture>` offering AVIF
+  first — the `<img>` itself is never modified, so a browser that understands
+  neither source gets exactly what it always got.
+
+  Measured on this pipeline with a 1600×1000 photograph: **271 KB WebP → 123 KB
+  AVIF, 55% smaller**, matching what the report saw on its own image. The cost
+  is real too and is stated rather than glossed: encoding is roughly **four
+  times** slower (0.27 s → 1.03 s for one image and its two responsive widths),
+  which is exactly why WebP stays the default and this is opt-in. `avif_quality`
+  (45) sits below `webp_quality` because AVIF holds detail where WebP softens.
+
+  Also `--image-formats` / `--avif-quality` on the CLI, and an `image-formats`
+  input on the GitHub Action which **installs the AVIF encoder only when asked
+  for it** — `libavif-bin` pulls a set of codecs, and a workflow that did not
+  request AVIF should not pay for either the download or the encode time.
+
+  **A format whose encoder is missing is skipped with a warning and the build
+  carries on** — the rule the AVIF helper already followed. A build that failed
+  here would make the format unusable on exactly the machines least likely to
+  have the tool.
+
+### Fixed
+- 🔌 **A running server follows its config file** (#180) — `--watch` reloaded
+  `.ssg.yaml` and rebuilt the site, but the HTTP server was wired once at
+  startup and kept the endpoint list it read then. Adding an `endpoints:` route
+  to a running preview rebuilt the site and still answered 404, and the only
+  ways out were restarting the process or, under `ssg daemon`, restarting a
+  project whose entry had not changed — which takes its port down with it.
+
+  The report came from the daemon, but the defect was the server's: a plain
+  `ssg --watch --http` had it too, so the fix is where the routes are wired and
+  both are cured at once. The swap is a pointer store, not a restart: the
+  listener, the connections and the port are untouched, and a request sees the
+  old routing table or the new one, never a half-built one.
+- ⚡ **Output directories are created once per build, not once per page**
+  — every page called `os.MkdirAll` on its parent, and `MkdirAll` walks
+  the path statting each component whether or not it exists. A site with 2,000
+  posts under one tree repeated that for every one of them. The generator now
+  remembers what it created, including ancestors, so a sibling written next
+  costs nothing. Worth about 2.5% of the median build; the remaining `mkdirat`
+  cost is inherent — the default `page_format: directory` genuinely needs one
+  directory per page, and that is a layout choice rather than a defect.
+
+## [1.8.45] - 2026-08-19
+
+### Added
+- 🧹 **`sanitize_output` — invisible characters no longer reach published HTML**
+  (#176), **on by default**. Content arrives from a CMS export, a word
+  processor, a chat window or a clipboard carrying characters that render as
+  nothing and break things: a zero-width space splits a word for `Ctrl+F`, for
+  the site's own search index and for a screen reader, so a visitor searching a
+  page for a word plainly on it finds nothing; a bidi override makes text render
+  in a different order than it is stored, which can make a link's visible text
+  disagree with where it goes. None of it is authored on purpose and all of it
+  survives a migration. The build removes it and says what it took.
+
+  Default on because the failure is invisible in every sense — nothing renders,
+  nothing warns, and the symptom is never traced back to the cause. **The
+  restraint is the design**: never inside `<pre>`, `<code>`, `<script>`,
+  `<style>` or `<textarea>`, because a page documenting these characters is
+  exactly the one a careless pass would ruin; a *leading* BOM is a BOM; and a
+  single non-breaking space is typography between a number and its unit, so only
+  a run of them is collapsed. `warn` reports without changing; `off` does
+  neither.
+- 🧼 **`image_metadata` — EXIF, IPTC and XMP are stripped from published
+  images** (#176), **on by default**. A photo straight from a phone carries GPS
+  coordinates, a serial number and often the owner's name; a migration copies a
+  whole media library across, so a site could publish an author's home address
+  without anyone choosing to. Derivatives never carried it — the encoders write
+  only pixels — but originals were published byte for byte. The colour profile
+  and JFIF density are kept (dropping the first shifts every colour), and a file
+  that cannot be parsed is published exactly as it arrived, because a corrupted
+  image is worse than one carrying a location. `image_metadata: keep` for a
+  portfolio that shows camera settings on purpose.
+- 🔌 **MCP speaks the 2026-07-28 shape as well as the initialize-based one**
+  (#174) — `server/discover` advertising the supported revisions, per-request
+  `_meta` carrying the protocol version and client identity, `resultType` on
+  every result, `ttlMs`/`cacheScope` on `tools/list` so a client can cache
+  instead of poll, and `UnsupportedProtocolVersionError` (`-32022`) listing what
+  is supported. Over HTTP, the mirrored `Mcp-Method`/`Mcp-Name` headers are
+  validated against the body — an intermediary routing on the header while the
+  server executes on the body is how a request ends up somewhere it was not
+  authorised for — rejected with `HeaderMismatch` (`-32020`), with the
+  `=?base64?…?=` sentinel decoded first so a non-ASCII tool name does not look
+  like an attack.
+
+  **Both eras run side by side.** That revision changed the protocol rather than
+  extending it, and a server that adopts it by abandoning the older shape
+  strands every client that has not moved: a request declaring a version in
+  `_meta` is answered in the new shape, one that does not is answered exactly as
+  before — verified by a test asserting the older result grows no new fields.
+
+## [1.8.44] - 2026-08-18
+
+### Added
+- 🌐 **`ssg mcp --listen` — the MCP server over Streamable HTTP** (#173) —
+  `ssg mcp` spoke stdio only, which is a local contract: the client launches the
+  process and owns its standard streams. It could not serve an assistant running
+  anywhere else. The endpoint is `/mcp`, one POST per JSON-RPC message, and it
+  runs **alongside** stdio — protocol semantics are identical on either, because
+  a transport is a binding rather than a dialect. Streamable HTTP is the current
+  network transport; the HTTP+SSE transport of `2024-11-05` is deprecated in the
+  specification and is not implemented.
+
+  The specification's security rules are enforced rather than offered, because
+  this server writes files and runs git: **`Origin` is validated** (`403`
+  otherwise — without it any page the operator visits can drive a local MCP
+  server by DNS rebinding, while a request with no `Origin` is a non-browser
+  client and is allowed), **binding is localhost by default** (a bare
+  `--listen=7823` means `127.0.0.1`), and **a bearer token is minted and printed
+  automatically** whenever the listener is not on loopback. `--no-stdio` serves
+  the endpoint alone; `GET` and `DELETE` answer `405`, being the session and
+  standalone-stream mechanics of earlier revisions. See
+  [docs/MCP_TRANSPORTS.md](docs/MCP_TRANSPORTS.md).
+- 🔧 **`--user-agent`, `--rate-limit` and `--engine-arg` on `ssg migrate`**
+  (#171) — a site behind bot protection came back empty, and the engine
+  diagnosed it exactly, naming `--user-agent` and `--rate-limit`. That advice was
+  printed inside a run `ssg migrate` had no way to act on: the operator was told
+  to try a flag by a tool they were not running, and the tool they were running
+  could not pass it on. Both flags now reach the engine, and **`--engine-arg`**
+  is the general form — repeatable, verbatim, applied after everything ssg
+  derives, so the next engine flag does not need a release of ssg to become
+  reachable.
+
+### Fixed
+- 🎨 **The scaffolded theme ships the stylesheet and script it links** (#172) —
+  every scaffolded template carried `/css/style.css` and `/js/main.js`, and
+  nothing wrote either. The site built, the pages were right, the links worked,
+  and a browser rendered unstyled HTML with two 404s in its console while the
+  build reported success — nothing caught it, because the link checker walks
+  internal links and a missing stylesheet is not one. This is the ordinary
+  outcome whenever a migration's theme step is skipped or fails, so the operator's
+  first thought was that the migration lost the site's design rather than that the
+  scaffold never had one. Both files are now written beside the templates that
+  ask for them: self-contained, system fonts only, WCAG-AA contrast in light and
+  dark, and a nav toggle that reports its state. An asset already on disk is
+  never overwritten. (The reporter named the stylesheet; the script had the same
+  defect.)
+
+### Changed
+- 🔌 **`ssg mcp` declares protocol version `2025-06-18`** instead of
+  `2024-11-05` — the newest revision whose semantics it actually speaks, and the
+  one that introduced the `MCP-Protocol-Version` header the HTTP transport
+  carries. It deliberately does not claim `2026-07-28`, the current revision:
+  that one removed the `initialize` handshake outright, made `server/discover`
+  mandatory and requires a `resultType` on every result, and declaring a shape a
+  server does not implement is a lie a client acts on. Adopting it is tracked in
+  #174. A client's requested version is still echoed back.
+
+## [1.8.43] - 2026-08-17
+
+### Added
+- 🛠️ **`ssg daemon` — several projects watched by one process** (#169) —
+  `ssg --watch` serves one project, so four sites meant four terminals, four
+  scrollbacks and four things to remember to restart. `.ssg_projects` declares
+  them once, each with its own directory, config, port and flags, and
+  `ssg daemon` keeps them all running.
+
+  **Editing the projects file reloads the fleet in place.** A project whose
+  settings did not change keeps running and keeps its port; only what actually
+  changed is restarted, and a newly added project does not interrupt the others
+  — otherwise "reload" would be a restart wearing a different word. `SIGHUP`
+  reloads on demand; a projects file that no longer parses leaves everything
+  running rather than stopping four sites over a typo. A project that exits by
+  itself is restarted, one that will not start is named and skipped so the rest
+  come up, and stopping signals a project's whole process group so a
+  `watch_runner` child releases the port too. `--once` prints what would run and
+  exits, which checks a projects file in CI. Each project is an ordinary
+  `ssg --watch` in its own directory — the daemon adds supervision, not a second
+  way to build a site. See [docs/DAEMON.md](docs/DAEMON.md).
+
+### Fixed
+- 🗂️ **Markdown the build never read is now reported** (#168) — a build reads
+  `pages/` and `posts/` and nothing else, so a `products/` directory an export
+  left behind was not skipped so much as never looked at. A shop reported 282
+  product documents on disk against a log reading "Loaded 71 pages, 4 posts",
+  with no output and no word. The build now names each unread directory, its file
+  count, and the `content_sources:` block that loads it — which builds each
+  document at the address its `link:` names. Worth saying plainly: **the `type:`
+  front matter was not the cause**, as the report reasonably assumed. A document
+  with any unknown type inside `pages/` builds normally; the directory was the
+  whole story, and acting on the wrong cause means editing 282 files for nothing.
+
+### Changed
+- ⚙️ **Every workflow forces Node 24, and every pinned action is current** —
+  `actions/checkout` and `actions/upload-artifact` were still on the v4 line,
+  which targets the deprecated Node 20 runtime, and four of the seven workflows
+  carried no `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24`. Both are fixed: all pins move
+  to their current releases (checkout v7.0.1, upload-artifact v7.0.1, setup-go
+  v7.0.0, codecov v7.0.0, scorecard v2.4.4, gh-release v3.0.2 — itself the Node
+  24 move — login-action v4.6.0, codeql-bundle v2.26.3), and every workflow now
+  carries the env, not only the ones that build a release: a scheduled security
+  scan failing quietly when Node 20 is removed is the worst place to find out.
+
+## [1.8.42] - 2026-08-17
+
+### Added
+- 🗂️ **`type_archives` — a custom post type's own section** (#165) — a migration
+  brings a WordPress custom post type across as a folder of documents, each at
+  the address the source served. What it cannot bring across is the type's
+  archive: `/realizacje/` is not a document anywhere, it is a listing WordPress
+  renders from `has_archive`. So the entries built, the site's own menu linked to
+  the section, and the section answered 404. `type_archives: {realizacje: true}`
+  builds it with `category.html`, `Kind: "type"` and `.ContentType`, paginated by
+  `paginate` like a category archive.
+
+  It cannot be inferred from the content, and that is not caution: on the site
+  that reported this, one custom type serves its section and **the source 404s at
+  the other**, so a folder of documents is evidence of nothing. An export that
+  records `has_archive` in `metadata.json` therefore answers for itself and needs
+  no configuration — `custom_types[].has_archive` is read, `false` is honoured,
+  and a `false` in `type_archives` overrules the export. `custom_types[].archive_link`
+  moves the listing when the source did not serve it at the type's own slug:
+  WordPress lets `has_archive` **be** a slug, so a type called `realizacje` can
+  publish its archive at `/nasze-prace/`, and building it at `/realizacje/` would
+  put the section where nothing links while the real address stayed a 404.
+  **wpexporter 1.8.15 writes both fields** (tradik/wpexporter#64), so a migrated
+  project gets its sections with no configuration at all. Empty
+  (the default) builds nothing, so no existing site changes. A hand-written page
+  that owns the URL keeps it.
+
+### Fixed
+- 🧱 **`ssg repair` finds fenced markup, not only indented markup** (#166) —
+  `repair` reported a site clean while its front page carried a grey code box a
+  screen and a half tall, full of `</div>` and `<section class="elementor-section
+  …">`. The cause is the other way Markdown swallows markup: one code fence the
+  exporter emitted around a plugin's `<template>`, mid-`<div>`, after which the
+  document renders as source. `repair` looked only for four-column indentation
+  and walked past it. Both are now found and both are fixed — the indented blocks
+  dedented, the swallowing fence markers removed — and `check_markup` names which
+  of the two it saw on every build.
+
+  A fence an author meant is never touched. Only two shapes are reported: one
+  that never closes before the end of the document whose content carries markup,
+  and a fence with **no language** holding markup in a document that carries raw
+  markup outside it as well. A deliberate ```` ```html ```` sample, and a bare
+  fence in a prose document, both come back byte-identical.
+
+## [1.8.41] - 2026-08-16
+
+### Fixed
+- 🌐 **A `domain` carrying a scheme no longer publishes `https://https://…`**
+  (#162) — `domain` is the host alone and the canonical builder prepends
+  `https://` unconditionally, so `domain: "https://example.com"` reached the
+  canonical tag, `og:url`, the sitemap, the JSON-LD `@id` and the feed as
+  `https://https://example.com/…` — every address whose entire purpose is being
+  a correct absolute URL, and every one of them unread by a human after a build.
+  Nothing warned. It is an easy mistake: `ssg migrate wordpress
+  https://example.com` takes a full URL one line away in the same docs, and that
+  URL is the site being migrated. A scheme and trailing slashes are now stripped
+  and the correction is reported once, naming both values:
+
+  ```
+  ⚠️  domain "https://example.com" is not a bare host — using "example.com".
+  ```
+
+  Stripping rather than failing keeps every existing site building; `--quiet`
+  suppresses the message and never the fix. A port (`example.com:8080`) and a
+  subdirectory deploy (`example.com/blog`) are left exactly as configured — the
+  first is part of the host and the second is deliberate.
+
+## [1.8.40] - 2026-08-16
+
+### Added
+- 🧩 **`.Schema` — the structured data SSG would inject, available to templates**
+  (#158) — SEO injection is gated on what the theme emitted: **one hand-written
+  `application/ld+json` block turns auto-injection off for the whole page**. A
+  theme with an `FAQPage` partial therefore lost whatever `schema_defaults`
+  declared for that section, and the only way to keep both was to reimplement
+  the precedence merge (site-wide < derived < section < frontmatter) in the
+  theme. `.Schema` is that merged object; `{{ toJSON .Schema }}` emits it beside
+  a hand-written block, or inside an `@graph` with it.
+
+### Fixed
+- 🔎 **`check_schema` reports a type a section promised and never emitted**
+  (#158) — it validated the JSON-LD a page emitted and said nothing about the
+  JSON-LD a page failed to emit. A recipe site shipped **zero** `Recipe` markup
+  for three days while `check_schema: warn` reported "structured data carries
+  every required property" — truthfully, because the theme's own complete
+  `FAQPage` block was all it could see, and that block was what suppressed the
+  Recipe in the first place. The check now asks the question one level up: when
+  `schema_defaults` declares an `@type` for a section, a page in that section
+  that carries it nowhere is reported, with the cause and both ways out named.
+  Sibling blocks, a top-level array and an `@graph` all satisfy it — the shapes
+  Google's own guidance produces. A section whose `@type` is a list promises
+  nothing specific and is not checked; a site without `schema_defaults` sees no
+  change.
+
+## [1.8.39] - 2026-08-16
+
+### Fixed
+- 📌 **A pinned post now leads the front page too** (#155, reopened) — 1.8.38 put
+  the fix in `sortPostsByDate`, whose own comment calls it "the single sort used
+  by every collection/archive renderer". It was not: the front page renders
+  `g.siteData.Posts` directly, and that slice was ordered once at load time by a
+  separate date-only comparator. So a pinned post led every archive and stood
+  **sixth of ten** on the front page of the same site. The load-time sort is now
+  that one sort, which fixes the front page, `.Site.Posts` — the slice a theme's
+  "recent posts" block ranges over, and which had the same bug — and every
+  listing built from either. A site that pins nothing is byte-identical.
+- 📅 **`date_archives: true` actually generates the archives** (#159) — the key
+  was accepted, documented and covered by tests, and nothing in the build called
+  the function that writes them: `generateDateArchives` had no caller outside the
+  test files, so `/YYYY/` and `/YYYY/MM/` were never written in any released
+  build. The key being recognised meant there was no "unknown configuration key"
+  warning either, so the build looked like it had honoured the setting. Opt-in
+  and unchanged for everyone else; a page that already owns such a URL still
+  keeps it.
+
+### Changed
+- 🔧 **`ssg migrate` runs the newest wpexporter it can reach** (#160) — it used
+  to take the first one on `PATH`, which inside the snap is always the bundled
+  copy, so an engine the operator installed was never used and every engine fix
+  waited for the next snap rebuild. Now: **`--engine PATH`** (or
+  `SSG_WPEXPORTER`) chooses one outright — and a named binary that cannot be run
+  is an error naming it, never a silent fall back to a different engine —
+  otherwise ssg takes the highest version among `PATH` and, inside the snap, the
+  bundled copy together with `~/go/bin`, `~/.local/bin` and `~/bin`. Strict
+  confinement turns out to permit executing a real binary under the user's home
+  directory, so `go install …/cmd/wpexporter@latest` is picked up immediately;
+  the *wpexporter snap* still cannot be run from a snap-installed ssg (a snap
+  cannot execute another snap) and is now reported as skipped instead of
+  silently ignored. The bundled engine remains a floor: an older host copy never
+  displaces it.
+- 🔎 **A foreign `$SNAP` is no longer mistaken for ours** — `$SNAP` is set for
+  every snap process, including the Go snap that builds ssg, so a non-snap ssg
+  launched from such a shell believed it was confined. Confinement is now decided
+  by whether the running executable actually lives under `$SNAP`.
+- 📰 **Feeds are chronological again** — pinning reaching `/feed/` was an
+  unintended side effect of 1.8.38. WordPress applies stickiness to the blog
+  query and not to feeds, and a pinned older post at the top of an Atom feed
+  resurfaces in subscribers' readers as though it were new. Listings pin; feeds
+  report what was published when.
+
+## [1.8.38] - 2026-08-16
+
+### Added
+- 🔢 **`.Pager.Pages` — numbered pagination** (#156) — a pager carried only its
+  neighbours, which draws "← →" and not the control most themes have: a reader
+  on page six reached page two by stepping back four times. Every page now
+  arrives with its number, address and whether it is current, so a theme renders
+  the source site's own `.page-numbers` markup. **`.Pager.Window N`** returns the
+  windowed form — first, last, N either side of the current page, with an
+  ellipsis entry per gap — which is what WordPress draws. A template could not
+  build these itself: `PrevURL`/`NextURL` are opaque, and deriving `/page/4/`
+  from them means guessing a URL shape that `posts_page` and language prefixes
+  already change. `Current`, `Total`, `PerPage`, `PrevURL` and `NextURL` are
+  untouched.
+
+### Changed
+- ⚙️ **`ssg migrate` requires wpexporter 1.8.11 or newer** — every export it asks
+  for depends on that engine: the SSG section markers, the media scope, custom
+  post types, comments, and the fixes to ordered lists, term slugs, post-loop
+  pages and shortcode expansion released through 1.8.11. An older one is refused
+  **before anything is written** — not after the project is scaffolded and, in
+  live mode, the server is up — naming the version found and the two ways
+  forward. A version banner ssg cannot parse is reported and the run continues:
+  a wrapper or a fork printing something else is not proof of an old engine, and
+  blocking a working setup over a formatting difference would be worse than the
+  risk. The per-flag gate that this replaces (comments, 1.8.5) is gone with it.
+
+### Fixed
+- 🔍 **A `<title>` inside a `<script>` block is named** (#152) — Go's
+  html/template escapes by *context*: a `<script …>` start tag opens a
+  JavaScript context that runs to its end tag, and every value interpolated
+  inside it is escaped as a JS value, which for text means a `"quoted"` string.
+  A scraped theme whose inline analytics block lost its end tag therefore
+  rendered `<title>"Artisans of Taste" - "…"</title>` while the same expression
+  in the body came out clean — with byte-clean config, byte-clean metadata and a
+  template that looks right in isolation. Finding that cost a full day. The build
+  now says it, with the lines: *`<title>` on line 3 is inside a `<script>` block
+  (opened line 2, closed line 4) — html/template escapes values there as
+  JavaScript, so they render quoted.* The escaping itself is correct and
+  unchanged: in a real script context those quotes are what keep a value from
+  breaking out of its string.
+- 📌 **A pinned post leads the listing** (#155) — WordPress lets an editor pin a
+  post to the top of the blog and the export carries `sticky: true`, but the
+  generator never read the field, so listings sorted by date alone and the
+  pinned post landed wherever its date put it: sixth of ten on the site that
+  reported it, while the source showed it first. Pinned posts now come first —
+  in their own date order among themselves — on the index, the posts page and
+  term archives, which is what the source CMS does. The flag also reaches
+  templates as **`.Sticky`**, so a theme can mark that post the way WordPress
+  marks it with a `sticky` class. A site that pins nothing keeps the order it
+  has always had.
+
+
+## [1.8.37] - 2026-08-16
+
+### Fixed
+- ⚓ **Heading anchors come from the heading's text, not its markup** (#153) — a
+  heading wrapped in `<strong>` or a coloured `<span>` got
+  `id="span-stylecolor-ffff00strongwhy-baby-swimmingstrong"`, because goldmark
+  derives auto-ids from the raw source line. The anchor a reader, a table of
+  contents or an inbound link expects is `#why-baby-swimming`. Headings holding
+  markup are ordinary in CMS content — 15 to 37 on the front page alone of each
+  of six migrated sites. Plain headings keep their existing ids bit-for-bit, so
+  anchors on existing sites stay valid; the rule now covers inline HTML the way
+  it already covered links and images (#26).
+- 🚩 **An option ssg does not accept is named rather than ignored** (#152) —
+  `--output=public` reads like it should work (the config key is `output_dir`),
+  and the build wrote to `output/` and said nothing, which looks like the flag
+  was honoured and the site landed elsewhere. Unknown options now warn and, when
+  there is an obvious neighbour, suggest it: *Unknown option --output — ignored
+  (did you mean --output-dir?)*. It warns rather than fails, so a script passing
+  an option a future ssg will understand keeps working. The check reads the
+  parsers' own tables, so a new flag cannot drift out of it.
+- 🧱 **Structured frontmatter survives the MDDB content source** (#154,
+  tradik/mddb#187) — MDDB stores meta as a flat `key → []string` by design, so a
+  `faq:` list of objects or a `schema:` object can only travel as a string.
+  Neither end worked: a producer that JSON-encoded correctly still handed the
+  theme a JSON *string*, and one that stringified a Go map stored
+  `map[answer:… question:…]`, which made **every post** fail with
+  `can't evaluate field question in type interface {}` — an error pointing at
+  the theme rather than at the field. ssg now decodes JSON-shaped meta values
+  into the shape a template can range over, and names the document and field
+  when a value is a printed Go map, which cannot be recovered. A value that is
+  neither arrives exactly as before.
+- 📚 **`paginate` now applies to category archives** (#149) — it paginated the
+  index and left every category whole, so a migrated site's `/category/blog/`
+  shipped 205 articles in one file while `/category/blog/page/2/` did not exist.
+  Category archives are chunked exactly like every other term archive, each page
+  carrying its own pager. A site without `paginate` still gets one file per
+  archive, unchanged.
+- 📰 **`posts_page` wins over a page of the same address, and says so** (#150) —
+  WordPress's "Posts page" *is* a page: the admin assigns an existing one and
+  WordPress renders the loop in its place. An export carries both faithfully, and
+  ssg wrote the page at `/blog/` while writing the listing's *second* page to
+  `/blog/page/2/` — so page one of a listing served an empty document and page
+  two served the listing. Two of six sites in one batch hit it. The setting now
+  wins, matching the source CMS and what the operator asked for, and the build
+  names both documents instead of silently choosing.
+- 📦 **The snap's bundled exporter can no longer go stale unnoticed** (#148) —
+  it is built from the exporter's latest release *at build time*, so a fix
+  released downstream reached nobody until ssg was rebuilt. The Snap workflow now
+  also runs weekly, which puts a ceiling on how far behind the bundled engine can
+  drift; the migration report already names the engine and where it came from.
+
+
+## [1.8.36] - 2026-08-16
+
+### Fixed
+- 🧩 **An archive no longer vanishes over one missing field** (#145) — every
+  archive view (category, tag, author, series, custom taxonomy) now arrives with
+  the same set of keys, passed as a map. A template reading a field this kind
+  does not fill gets nil instead of a hard error, so `{{if .Pager}}` is
+  expressible and one theme file can legitimately render four kinds of archive.
+  Six migrated sites had lost **every** category, tag and author archive to a
+  single `.Pager` reference, with only a warning per term in a long log.
+- 📄 **Archives carry their `Pager`** (#145) — it was computed per chunk and
+  simply never handed to the template, so a paginated archive could only ever
+  show its first page. Unpaginated archives get a truthful one-page pager rather
+  than a zero value that renders as "page 0 of 0".
+- 🕳️ **A missing page looks missing in the dev server** (#146) — a directory
+  with no `index.html` used to answer **200** with a `<pre>` list of file names;
+  posts with dated permalinks live in `/2014/05/`, so a missing date archive
+  looked like a working page serving 776 bytes of filenames. It now answers
+  **404**, the way every host this project deploys to does.
+
+### Tests
+- 🧪 **The approve-then-PR flow is tested end to end** — `openGitHubPR` had no
+  coverage at all: it hardcoded the API host, so the request, the auth header
+  and every failure path could only be exercised by opening a real pull request.
+  A base-URL seam makes all of it testable against a local server. Also covered:
+  the date-archive guards, `loadMetadata`'s failure paths, `ssg migrate`'s own
+  flag forms and the tar writer's entry kinds.
+- 📊 **Coverage now measures the code this project writes** — `codecov.yml`
+  excludes `internal/mddb/proto`, 2,760 statements of protoc output that nobody
+  maintains and nobody should test. Counting it put the reported number ~16
+  points below the truth and made the metric move when the schema changed rather
+  than when the code did. Hand-written code sits at **96.4%**.
+
+### Added
+- 📅 **Date archives** (#146) — `date_archives: true` generates `/YYYY/`,
+  `/YYYY/MM/` (and `/YYYY/MM/DD/` where the permalink structure carries the day)
+  from the posts already loaded, rendered by `category.html` with `Kind: "date"`
+  and a label a theme can title the page with ("May 2014"). WordPress publishes
+  these and links to them from every byline, widget and sitemap — on one migrated
+  site they were 60 of 477 sitemap URLs. **Opt-in**: a site that never had these
+  URLs does not grow them because it upgraded, and real content that already owns
+  such a path keeps it. `ssg migrate` turns the key on, because a migrated site's
+  own content links to them.
+
+
+## [1.8.35] - 2026-08-15
+
+### Added
+- 💬 **Migrated comments are rendered** (#142) — `comments.json` reached the
+  project and stopped there: counted in the report, then ignored. The generator
+  now loads it and hands each page its own thread as **`.Comments`**, nested by
+  parent and in the order the comments were written. Matching is a lookup on the
+  URL the export recorded, not a heuristic. The bundled `simple` theme renders
+  the thread on posts. They are rendered statically because that is what they
+  are — historical and closed; accepting NEW comments stays the comments
+  worker's job.
+- 🏠 **`.IsFrontPage`** (#141) — a theme could not tell it was rendering the
+  front page, so the site's most-linked document came out titled "Home - Site"
+  while the source served the site's own name and tagline. The generator already
+  knew; now the template data says so, instead of a theme comparing `.Link`
+  against `"/"` and hoping no language prefix is in play.
+- 🧭 **The bundled themes render the site's navigation** — deferred from 1.8.34
+  on purpose: a theme file is read by whichever ssg the reader runs, so it may
+  only use fields the *previous* release already had. 1.8.34 shipped
+  `.Site.Menus`, so the themes can use it now.
+- ⚙️ **The migration report names the engine that ran** (#140) — including
+  `(bundled with the snap)`, the one line that explains why refreshing the
+  host's `wpexporter` changed nothing.
+
+### Fixed
+- 🗂️ **Category archives honour the address the source site serves them at**
+  (#143) — WordPress lets a site drop the `/category/` base, and many do. The
+  export records each term's real address in `link`; ssg ignored it and built
+  `/category/<term>/`, so every archive link in every post's meta line, in the
+  menu and in the breadcrumbs was a 404 on the migrated site. Archives now
+  render where the source serves them and **the built-in path becomes a 301**.
+  A site whose export carries no `link` keeps the layout it has always had.
+
+
+## [1.8.34] - 2026-08-14
+
+### Added
+- 🧭 **A migrated site keeps its navigation** (#132) — menus are the one part of
+  a site that cannot be derived from its content: nothing in a page records
+  which menu it belonged to, in what order, or under what label. WordPress
+  gates them behind `edit_theme_options`, so `ssg migrate` now takes
+  **`--auth-user`/`--auth-pass`** or **`--auth-token`** and forwards them to the
+  engine — never writing them into `.ssg.yaml`, which is a file people commit.
+  Menus reach templates as **`.Site.Menus.<location>`** (or `.<slug>`), with
+  `.Tree` giving the entries nested and ordered as the source site rendered
+  them; an item whose parent is missing is promoted rather than dropped, and a
+  tangled parent chain cannot hide entries. The bundled themes will render the
+  `primary` menu from **1.8.35**: a theme file on disk is also read by an OLDER
+  binary — the GitHub Action downloads a released ssg — and a field that binary
+  does not know is a hard template error, not a blank nav, so the theme can only
+  use a field the previous release already had.
+- 🗂️ **The theme's own post types are selectable** (#130) — `--custom-types
+  cpt_services,cpt_team` picks them, `--no-custom-types` skips them.
+
+### Fixed
+- 🗂️ **Nested categories render where the source site served them** (#138) —
+  WordPress nests categories and serves a child at
+  `/category/<parent>/<child>/`; ssg flattened it to `/category/<child>/`, so
+  every surviving link — a menu copied from the old theme, a bookmark, a search
+  result — hit a 404 while the content sat one path away. The nesting was
+  already in `metadata.json` and was being dropped at render time. Archives now
+  follow the parent chain, and **the old flat path becomes a 301** so nothing
+  that already points at it breaks. A taxonomy with no nesting is untouched: the
+  same URLs, no redirects.
+
+- 🚑 **`--content` no longer kills the migration on a current engine** (#137) —
+  1.8.33 made `comments` a selectable kind, so any `--content` list that did not
+  name it emitted `--no-comments`, a flag that arrives in **wpexporter 1.8.5**
+  (unreleased; 1.8.4 is current, including the copy bundled in the snap). Every
+  selective migration died with `unknown flag: --no-comments` **after** the
+  project was scaffolded and, in live mode, after the server was up. The engine's
+  version is now read once and the flag sent only to an engine that knows it;
+  otherwise the comments come along and the report says so. An unreadable version
+  banner counts as old: skipping a flag costs a line, sending an unknown one costs
+  the run.
+
+### Changed
+- 🔎 **A site that arrives without navigation says why** (#132) — an export with
+  no menus used to end in a clean-looking summary, leaving the operator to
+  discover the missing nav in the browser. The report now names the cause and
+  the fix, and distinguishes an anonymous run from one whose credentials were
+  accepted but returned nothing.
+
+
+## [1.8.33] - 2026-08-14
+
+What a migration was still leaving on the old site — the readers' comments —
+and the dev server giving up on a port instead of taking the next one.
+
+### Added
+- 💬 **Migrations carry the site's comments** (#134) — `--content …,comments`
+  was accepted and then reported as undeliverable, so every migration left the
+  one content a site owner did not write and cannot re-create behind. With
+  wpexporter 1.8.5+ the kind is real: comments land in
+  `content/<source>/comments.json`, addressed by **page URL** rather than by a
+  WordPress post ID that means nothing after a migration, sorted so a reply
+  never precedes the comment it answers — the shape the
+  [comments worker](docs/WORKERS.md)'s D1 table expects. The migration report
+  states how many arrived.
+- 🔌 **The dev server takes the next free port instead of giving up** (#135) —
+  `--port 8889` with something already on 8889 ended the run with `bind:
+  address already in use` *after* the site had been generated, which for
+  `ssg migrate --watch --http` meant migrating the whole site again. The port is
+  now a preference: the server walks forward (8889 → 8890 → …, up to 64 ports)
+  and announces where it landed. `--port=0` still means "any free port", and the
+  claim happens before the address is printed, so `ssg migrate` and `ssg mcp`
+  never announce a port they did not get. Failures a different port cannot fix —
+  an unusable `--host`, a privileged port — still stop immediately.
+- 🔧 **`ssg migrate` accepts `--host` and `--port`** (#135) — live mode *is* the
+  dev server, but `migrate` parses its own flags, so `--watch --http --port
+  8889` was rejected as an unknown flag after the project had already been
+  scaffolded. A port that is not a number is reported rather than quietly
+  falling back to 8888.
+
+### Changed
+- 🧭 **`--content` says what it costs** (#134) — the help and
+  [docs/MIGRATE.md](docs/MIGRATE.md) now state that naming `--content` at all
+  opts every *unlisted* kind out, which is how `--content pages,posts,media`
+  quietly left a theme's own post types and the readers' comments behind. And
+  passing wpexporter's own flags (`--no-custom-types`, `--no-comments`) to
+  `ssg migrate` is answered with the `--content` equivalent instead of a bare
+  "unknown flag".
+
+### Security
+- 🔐 **golang.org/x/image 0.45.0** (was 0.44.0) — GO-2026-6222; govulncheck
+  reports it reachable from this code, which decodes user images on every build
+  with `webp`/`avif` output or responsive variants. `golang.org/x/text` came
+  along to 0.41.0 as its dependency.
+
+### Tests
+- 🧪 `internal/migrate` back to **100%** — the port walk's fallbacks (a listener
+  whose address is not TCP, an unparseable one, an unchanged port) and the
+  "recognised but undeliverable kind" path, which went dormant when comments
+  gained a real export. It is exercised by declaring such a kind for the length
+  of a test, so the machinery that keeps the next one from being dropped in
+  silence stays honest instead of rotting until someone needs it.
+
+## [1.8.32] - 2026-08-14
+
+### Changed
+- 🖼️ **Migrations download only the media the content points at** (#130) — a
+  WordPress library keeps every crop of every image ever uploaded, plus whatever
+  a since-removed plugin left behind, so a migration that took all of it copied
+  gigabytes the new site never links to. Featured images and in-content media
+  still arrive (with their size variants); **`--all-media`** takes the whole
+  library, as before.
+
+### Fixed
+- 🧮 **An `analytics` block with unusual values no longer fails the build**
+  (#131) — a migrated site did not build *at all*: wpexporter reports every id
+  it finds per vendor, so `"analytics": {"google_tag_manager": ["GTM-…"]}` met a
+  `map[string]string`, and since metadata.json is read before anything else the
+  whole build died — no pages, no posts, no menu — over an optional block that
+  renders only when `analytics: true`. An export may report a vendor's id as a
+  list (the same container found in the head and again in a plugin's footer) or
+  as a number, so the block is now read leniently: the first usable id per
+  vendor wins, a value that cannot be read as an id is dropped, and only a
+  malformed block — one that is not an object — is an error. A tracking id the
+  generator does not understand is not worth a site that does not build.
+
+
+## [1.8.31] - 2026-08-13
+
+### Added
+- 🩹 **`ssg repair`** — finds source Markdown whose markup is indented four
+  columns or more, which CommonMark renders as a literal code block, and with
+  `--fix` rewrites it in place. This is what a WordPress page builder leaves
+  behind: Elementor indents its nested `<div>`s with tabs, the exporter turns
+  `</p>` into a blank line, the blank line ends the HTML block — and the visitor
+  reads `</div>` in monospace down the middle of the page while the build reports
+  success. Dry run by default (exit 1 on findings, so CI can gate on it); front
+  matter, fenced code blocks and list continuations are never touched.
+- 🔎 **`check_markup`** reports the same defect on every build, naming the source
+  file and line. It is the one check that is **on by default** (`warn`): the
+  others weigh a judgement call, while this one reports content that provably
+  does not render as written. Silent when there is nothing to report. Turn it off
+  with `check_markup: ""` or `--no-check-markup`; `strict` fails the build.
+- 🪪 **`title`, `description` and `colors` configuration keys**, reaching
+  templates as `.Site.Title`, `.Site.Description` and `.Site.Colors.<role>`. The
+  palette is also emitted as CSS custom properties (`--ssg-color-primary`, …) on
+  `:root`, and stands in for `<meta name="theme-color">` when neither the theme
+  nor the export declared one. Values crawled from another site are validated
+  before they reach the stylesheet.
+- 🚚 **`ssg migrate` completes the config from the export.** After the fetch it
+  reads `metadata.json` and fills in `title`, `description`, `timezone` and
+  `colors` — what the source site says about itself, which the migration already
+  collected and then dropped on the floor. It only ever fills in keys the config
+  does not have, so an author's decision is never overwritten, and the file is
+  edited as a YAML document, so comments and key order survive. The first build
+  of a migrated site now carries its own name and palette. Needs wpexporter
+  1.8.2+ for the palette; earlier exports simply have no colours to read.
+
+- 📦 **`ssg migrate` stopped hauling the whole media library (#130).** It now
+  passes `--relevant-media-only`, so a migration takes the files the content
+  actually references: on one real site 359 files / 12 MB instead of 5,255 /
+  197 MB, of which only 74 were ever referenced — and ssg generates its own
+  responsive variants anyway. `--all-media` opts back into everything.
+- 🧩 **`--content custom`** selects the post types a theme or plugin registered
+  (Services, Portfolio, Team — wpexporter 1.8.2+). They are content, so a
+  `--content` list that does not name them turns them off like any other kind
+  (#130).
+
+### Security
+- 🔐 **Go 1.26.6** (was 1.26.5) — govulncheck reports seven standard-library
+  advisories reachable from this code on 1.26.5, among them GO-2026-5972
+  (`encoding/asn1`, reached through `ssh.ParsePrivateKey` in the SFTP deploy)
+  and GO-2026-5026 (`net/http` punycode handling, reached by every outbound
+  request: MDDB, theme downloads, the proxy endpoint). All are fixed in 1.26.6.
+  Building from source now needs Go 1.26.6 or newer.
+
+### Fixed
+- 🔇 **A config that could not be completed said nothing** — when `ssg migrate`
+  found the site's title, description or palette but failed to write them back
+  (a read-only config, a full disk), it reported no keys applied and no reason,
+  leaving the operator to look for values the file never got. The failure is now
+  named on stderr; the migration itself still succeeds.
+- 📄 **Migrated pages that rendered their own markup as text.** The root cause is
+  in the exporter (fixed in wpexporter 1.8.2), but existing content is repaired
+  in place with `ssg repair --fix` rather than requiring a re-migration.
+
+
+## [1.8.30] - 2026-08-12
+
+### Fixed
+- 🧭 **`--content` no longer strips a migrated site of its navigation** —
+  `ssg migrate wordpress <url> --content pages,posts,media` used to disable
+  menus, tags and users too (anything not listed), so the site came up without
+  a menu, without category names and without authors. Site **metadata** (tags,
+  users, menus) now always ships; `--content` selects *content*. Drop it
+  explicitly with `no-menus` / `no-tags` / `no-users`.
+- 👁️ **`ssg mcp --http` actually serves the site** — the flag was parsed into
+  the config and then ignored, so an assistant reworked a theme nobody could
+  look at. The preview now starts with the MCP server, announces its address on
+  stderr (stdout belongs to JSON-RPC) and refreshes on every MCP rebuild —
+  including the build-error overlay.
+- 🔤 **HTML entities in titles, excerpts and descriptions** — a WordPress
+  export carries them legitimately (the REST API serves `title.rendered` as
+  HTML), so "Domowe Kino &#8211; Warszawa" reached `<title>`, meta
+  descriptions, og:title, feeds and JSON-LD verbatim. Plain-text frontmatter
+  fields are now entity-decoded at parse time. Body markup is untouched: there
+  the entities are the author's.
+
+### Added
+- 🎯 **The site's marketing wiring now survives a migration** — `metadata.json`
+  may carry `marketing` (favicon, apple-touch-icon, theme colour, `og:site_name`,
+  default `og:image`, `twitter:site`, social profiles, search-console and
+  business-manager verification tokens) and `analytics` (GTM, GA4, …), written
+  by wpexporter's crawl. ssg loads both, exposes them to templates as
+  `.Site.Marketing` / `.Site.Analytics`, and — with `seo: true` — injects the
+  icons, social defaults and verification tags the theme did not already
+  provide. Tracking snippets need the new **`analytics: true`** key: running
+  third-party JavaScript on every page is the site owner's decision, not a side
+  effect of migrating content. The build prints one line naming what it
+  inherited.
+
+### Changed
+- 🎯 **Migrations now ask wpexporter (≥ 1.8.1) for the SSG format** —
+  `--ssg-sections` emits the `## Excerpt` / `## Content` markers this parser
+  reads and drops the leading H1 that duplicated every page's title, and
+  `--assisted-crawl` fills `metadata.json`'s `marketing` and `analytics`
+  blocks (GTM/GA4 ids, verification tokens, social profiles, favicon,
+  og:image) — data a migration cannot reconstruct afterwards. Skip the extra
+  crawl with **`--no-crawl`**.
+- 🤖 **Migration and `ssg mcp` now print how to connect an assistant** — the
+  MCP server speaks stdio, so the client launches it; "run `ssg mcp`" left
+  people with a server nobody talked to. Both now print the registration line
+  (`claude mcp add ssg -- ssg mcp`) and a Claude Desktop JSON snippet carrying
+  the project directory.
+
+## [1.8.29] - 2026-08-12
+
+### Fixed
+- 📦 **`ssg migrate wordpress` in the snap** (#114) — the snap now bundles the
+  `wpexporter` engine, so migration works out of the box after
+  `snap refresh static-site-generator`. Previously it always failed with
+  "wpexporter not found in PATH" even when the tool was installed on the host:
+  strict confinement sees only the snap's own rootfs, and installing the
+  `wpexporter` snap cannot help either, because a snap may not execute another
+  snap (`cannot join mount namespace of pid 1`). Same treatment `cwebp` already
+  gets for WebP output.
+- 📝 **Wrong install command** — the missing-engine error and
+  [docs/MIGRATE.md](docs/MIGRATE.md) pointed at
+  `go install github.com/tradik/wpexporter@latest`, which cannot work: the
+  module root is not a main package. The correct path is
+  `github.com/tradik/wpexporter/cmd/wpexporter@latest`. Inside a snap the
+  message no longer suggests installing anything by hand — it says the engine
+  ships with the snap and the snap needs refreshing.
+
+## [1.8.28] - 2026-08-12
+
+### Added
+- 🚚 **`ssg migrate <provider> <url>`** (GO-100) — one command from a live site
+  to a working SSG project. The built-in `wordpress` provider orchestrates
+  [wpexporter](https://github.com/tradik/wpexporter) (discovered on `PATH`
+  like `cwebp`; a missing binary explains how to install it), scaffolds the
+  project when none exists (never overwriting files), pulls the selected
+  `--content` kinds (`pages,posts,media,tags,users,menus,products`) into the
+  native content model and builds. With **`--watch --http`** the migration
+  runs LIVE: the server starts first and prints its address, content lands
+  incrementally while auto-reload shows the site filling up in the browser,
+  and the final report points at `ssg mcp` for an AI-driven template rebuild.
+  Requested-but-unsupported kinds (`comments`) are reported as skipped, never
+  silently dropped. See [docs/MIGRATE.md](docs/MIGRATE.md).
+
+### Fixed
+- 🛡️ **`migrate` no longer falls through to positional arguments** — before,
+  `ssg migrate wordpress https://example.com` was silently parsed as
+  `<source> <template> <domain>`, pretended to build and started the server
+  on a nonexistent project. The verb is now fully claimed; a source directory
+  literally named `migrate` still builds via `--source=migrate`.
+
+### Tests
+- 📈 Project coverage raised from 76.8% to 79.9% (owner's orders: +2pp) —
+  branch-level tests across `cmd/ssg` (live-reload hub and SSE, server
+  access-control and TLS listener modes, form-endpoint delivery failures,
+  cache CLI error paths, archive error paths, bare `--check-*` flags),
+  `internal/generator`, `internal/fetch`, `internal/config`,
+  `internal/externalsource`, `internal/endpoints`, `internal/images` and
+  `internal/mcp`; new `internal/migrate` lands at 98.8%.
+
+## [1.8.27] - 2026-08-12
+
+### Added
+- 🗃️ **Unified build cache** (GO-091) — one engine (`internal/cache`) under every
+  disk cache, one root (`.ssg-cache/`), and a new CLI: **`ssg cache stats`**
+  (entries/size per namespace), **`ssg cache clean [--namespace=X]`** and
+  **`ssg cache gc [--dry]`** (reclaims expired external-source entries; image GC
+  stays with `--images-gc`, which owns the build manifest). External-source
+  cache writes are now atomic (temp+rename), so a crash mid-write can no longer
+  leave a torn payload. The AI cache moved from `.ai-cache/` to
+  `.ssg-cache/ai/` with a read-fallback and **migrate-by-copy** — existing AI
+  results are preserved byte-for-byte, never regenerated. Image cache keys are
+  golden-tested and unchanged: no reconversion storm on upgrade.
+
+## [1.8.26] - 2026-08-11
+
+### Fixed
+- 🔗 **markdown_publish flat URLs** (#116) — posts carrying a flat `link:
+  /slug.html` (typical of a WordPress export) now publish a `/slug.md` twin,
+  appear in `llms.txt`, and get a `<head>` alternate pointing at that file
+  instead of a non-existent `index.md`. No more self-reported "broken link →
+  index.md" warnings; the alternate is suppressed when no Markdown copy exists.
+- ✂️ **frontmatter `excerpt:`** (#115) — a frontmatter `excerpt:` now reaches
+  `page.Excerpt` (section `## Excerpt` still wins, then frontmatter, then
+  `auto_excerpt`), so migrated content stops shipping empty meta descriptions,
+  card summaries and feed summaries. `auto_excerpt` also derives a summary from
+  content that opens with a raw-HTML block (e.g. WordPress `<p class="wp-block…">`).
+- 🖼️ **root `.Content` renders** (#118) — in page/post templates `.Content` is
+  now the rendered HTML, so `{{ .Content }}` no longer ships raw Markdown; and
+  `safeHTML` accepts an already-rendered `template.HTML` value, so both
+  `{{ .Content | safeHTML }}` and `{{ .Post.Content | safeHTML }}` work.
+  Sanitisation (`--sanitize-html`) is preserved.
+- 📦 **snap: WebP under strict confinement** (#114) — the snap now bundles
+  `cwebp` (and `avifenc`) via `stage-packages`, so `webp: true` works without the
+  host's tools, which strict confinement hides. The missing-tool error explains
+  the snap case.
+
+- 🏷️ **GitHub Action `@v1` stale** (#120) — the release workflow now re-points the
+  floating major tag (`v1`) to each release's commit, so `spagu/ssg@v1` always
+  ships the current `action.yml`. Inputs added later (e.g. `config`) are no longer
+  silently dropped for `@v1` users.
+
+### Documentation
+- **Template helpers** (#117) — corrected `sortBy` → `sort` in the engine-support
+  table; documented that `sort` needs a slice or string-keyed map and pointed
+  int-keyed taxonomy maps (`.Site.Categories`) at `taxonomyTerms`; documented the
+  `search-index.json` schema.
+
+## [1.8.25] - 2026-08-11
+
+### Added
+- 🤖 **Markdown for agents** (`markdown_publish`, GO-085) — publishes a clean
+  Markdown copy of every page in both agent-friendly locations (`/page/index.md`
+  and the flat `/page.md`), links it from the page `<head>` as a `text/markdown`
+  alternate, and writes a root `llms.txt` index. SSG is Markdown-native, so the
+  published copy is the authored source, not an HTML round-trip — ideal for
+  language models and agents (including ChatGPT Search) that consume Markdown.
+- 🧹 **`clean_special_chars`** (GO-086) — normalises the "smart" Unicode AI tools
+  emit (curly quotes, en/em dashes, ellipsis, non-breaking and zero-width
+  spaces) to plain ASCII across all rendered content. Targets a fixed Western
+  allowlist only: **Chinese, Japanese, Korean and every other script — and CJK's
+  own full-width punctuation — pass through untouched.** Opt-in.
+- 🔤 **`output_encoding` / `output_encoding_sections`** (GO-087) — choose the
+  text-output encoding (`utf-8` default, `utf-16le`, `utf-16be` with BOM),
+  globally or per content section (longest-prefix, like `schema_defaults`). All
+  encodings are Unicode, so CJK round-trips losslessly.
+- 🗂️ **`home_pages_limit` / `home_posts_limit`** (GO-088) — cap the guide and
+  post cards on the home page (default 6) with a "see all" link, so the landing
+  page stays uncluttered.
+- 🕷️ **`robots_rules`** (GO-089) — explicit per-crawler `robots.txt` directives,
+  so a site can spell out its policy for AI and search crawlers (GPTBot,
+  OAI-SearchBot, Googlebot…). Empty keeps the allow-all default.
+
+## [1.8.24] - 2026-08-09
+
+### Added
+- 🧩 **`check_schema`** (#111) — validates the JSON-LD each page emits against the
+  properties search engines require, alongside the existing `check_*` validators
+  and with the same `warn`/`strict` modes. Incomplete structured data is
+  rejected silently from the author's side: the build succeeds, the page ships,
+  the rich result never appears, and the feedback arrives weeks later in Search
+  Console. Nested objects are checked too — an `Offer` missing `priceCurrency`
+  invalidates the `Product` around it. An unrecognised `@type` passes silently,
+  so the generality `schema:` exists for is not taken away, and only required
+  properties are checked, because warning about optional ones trains people to
+  ignore the warning.
+- 🏷️ **`schema_defaults`** (#110) — structured-data defaults per content section,
+  so a section carries its `@type` without every file repeating it. Site-wide
+  `schema:` cannot: it applies to every page, so a home-page
+  `SoftwareApplication` would stop each post being a `BlogPosting`. That left the
+  type to be written into each file — a hundred recipes meant a hundred copies.
+  Keys match the page's directory relative to the source folder by prefix,
+  longest first (the same rule as `link_rewrites`), with `home` reserved for the
+  site root. Precedence: `schema:` < derived < `schema_defaults` < frontmatter —
+  section defaults outrank the derived type because overriding it is the point,
+  while a page's own `schema:` still wins over its section.
+
+### Changed
+- 🧭 **The guide sidebar follows the reading path** — it listed pages in
+  `.Site.Pages` order, which is by title, so "SSG Installation Guide" landed in
+  the middle. Order now comes from `variables.docs_nav_order`; a guide missing
+  from that list still appears, after the ordered ones, so a new file is never
+  hidden by forgetting to add it.
+
+### Documentation
+- 🖼️ **Themes get a gallery** — `docs/TEMPLATES.md` is split into the themes you
+  can use as they are and how to write one. The four bundled themes are cards
+  with real screenshots, built and captured from this repository, and `imd` is
+  listed at all for the first time. Downloading a theme gets its own section,
+  including that an archive laid out under `layouts/` — the conventional Hugo
+  shape — is converted during extraction.
+- 🧭 **A sidebar on every guide** — landing on a guide from search left no way to
+  reach the others except returning to the home page: the header carries a
+  hand-picked few and the full set existed only in the index card grid. Built
+  from `.Site.Pages`, so a new file appears with no edit, and the current page
+  carries `aria-current`.
+- 🏷️ **Three flags reached `--help`** — `--strict`, `--route-manifest` and
+  `--notify` were accepted by the parser but absent from the help output, so the
+  only way to find them was the source. Errors in this CLI point at `--help`,
+  which makes an unlisted flag effectively absent. Found by auditing the parser
+  against the help text; the reverse direction and all 198 config keys, 66
+  template helpers and 5 subcommands came back clean.
+- 📄 **`toJSON` documented** — the helper `ssgtheme` uses to hand a config block
+  to a client script, and the one pattern the cookie-consent worker recommends.
+
+### Changed
+- 🧱 **Home page rewritten** — the H1 leads with the category and project name
+  rather than a tagline, since it is the page's one indexable heading; the
+  benefit line moves directly beneath it. A three-pillar section covers build
+  speed, direct database reads and build-time AI, each with a figure that is
+  checkable from this repository. `Install` joins the navigation in second
+  place — it is the first thing a new visitor does.
+
+### Documentation
+- 🤖 **`docs/MCP.md`** — a reference for the `ssg mcp` server aimed at AI agents:
+  both roles with every tool and its CAN/CANNOT contract, the presentation-key
+  allow-list, watch mode as the feedback loop, and the branch → commit → PR
+  write-back. MCP was previously described only inside the configuration
+  reference and a blog post, so an agent had no page to read before deciding
+  whether the server could do what it needed.
+
+### Fixed
+- 🏠 **The home page emitted no structured data** (#109) — `seo: true` injects
+  JSON-LD, OpenGraph and hreflang for posts and pages, but the render transform
+  applies the SEO block only when a page context exists and the index was
+  rendered without one. So the page a crawler reaches first, and the only
+  sensible home for site-level types, had nothing — and `derivedLD`'s `WebSite`
+  branch was unreachable, since the sole page that selects it never arrived.
+  Site-wide `schema:` defaults did not reach the home page either. The same
+  shape was fixed for feed autodiscovery in #86; this closes it for SEO. A
+  paginated `/page/2/` declares its own URL rather than being canonicalised onto
+  page one.
+
+## [1.8.23] - 2026-08-08
+
+### Fixed
+- 🧨 **`--minify-js` deleted code inside string literals** (#106) — comment
+  stripping was a pair of regexes, which cannot tell a comment from the same
+  characters in a string. `return "/*" + "x" + "*/"` minified to `return ""`:
+  the scan started at the `/*` in the first literal and ran to the `*/` in the
+  third, taking the closing quote with it. That example still parses, so the
+  build reported success and the behaviour changed silently; on a vendored
+  bundle whose CSS-comment parser holds `/*` in strings, the output had an
+  unterminated string and the browser refused the file — with minify,
+  fingerprint and every `check_*` validator passing. Replaced with a scanner
+  that tracks strings, template literals (including `${}`) and regex literals,
+  and that keeps a comment whenever it cannot be sure. CSS gets the same
+  treatment, since `content: "/*"` is legal there.
+- 🔗 **`rewrite_md_links` rewrote absolute external URLs** (#107) — any href
+  ending in `.md` was matched on its basename, so a link to a page's own history
+  on GitHub became a link to the page containing it. `check_links` passes, since
+  the target exists, so nothing reported it. Links with a scheme or a `//`
+  prefix are now left alone: an absolute URL to another host cannot be an
+  in-repository link.
+- 🧭 **`rewrite_md_links` and `check_orphans` ignored `pretty_urls`** (#107) —
+  the same gap #103 closed for canonicals. The rewriter emitted `.html` while
+  `check_redirects` correctly reported that link as one the host redirects, and
+  the author could not fix it in the Markdown without abandoning the feature.
+  `check_orphans` compared the pre-normalisation path, so with `pretty_urls:
+  strip` a nav linking `/validator` left every page reported as an orphan while
+  `check_links` resolved the very same links.
+
+## [1.8.22] - 2026-08-08
+
+### Fixed
+- 🔗 **`pretty_urls` did not reach what a page says about itself** (#103) — it
+  fed link checking only, so a site on a host that strips extensions published
+  canonical tags, `og:url`, JSON-LD and a sitemap naming URLs that `308` — the
+  one thing a canonical must not do. Invisible locally, because resolving
+  against the output directory is not how the host answers, and easy to miss
+  because `check_redirects` reported the links *between* pages while staying
+  silent about each page's own declared identity. It now also decides those.
+  Feed entry IDs deliberately keep the raw form: a reader keys an item on its
+  id, so rewriting them would re-deliver every post already read.
+- 🧭 **`pretty_urls` assumed a trailing slash** (#103) — Cloudflare Pages strips
+  `.html` and adds **no** slash, so the target `check_redirects` suggested was
+  itself a URL Pages would redirect. It is now a mode: `off`, `strip` (Pages) or
+  `strip-slash`. **`true` and `false` keep meaning exactly what they meant** —
+  `true` is `strip-slash` — so no existing config changes behaviour by being
+  re-read. Building with `deploy: cloudflare` and `strip-slash` warns, because
+  that pairing now publishes canonicals the host redirects.
+- 📅 **`formatDate` formatted nothing** (#98) — every non-string fell through to
+  `Sprintf("%v")`, and `Page.Date` is a `time.Time`, so themes rendered Go's
+  debug form (`2017-05-13 20:36:46 +0000 UTC`) — including inside `datetime`
+  attributes, where it is not valid HTML. `formatDatePL` took a `time.Time` and
+  formatted it properly, so a Polish theme looked right while an English one did
+  not, which is what kept it hidden. It now formats, takes an optional layout
+  (`{{ formatDate .Date "2006-01-02" }}`), and renders a zero time as empty
+  rather than `1 January 0001`. Strings are still passed through unchanged.
+- 🔗 **`related` was registered twice under one name** (#99) — two different
+  functions shared the key and the merge after the map literal silently won, so
+  the documented three-argument form was unreachable and every post failed to
+  render with an arity error, while the build still reported success and simply
+  had no post pages. `related` keeps the two-argument behaviour that actually
+  ran; the collection form is now `relatedIn`. Helper merges report a name that
+  is already taken, so this cannot recur silently.
+- 🚦 **`410` redirects are dropped by Cloudflare Pages** (#102) — `410` is a
+  Netlify extension; Pages honours 301/302/303/307/308 only and ignores the rest
+  without a word, so the path keeps answering `200` while the rule reads as
+  handled. Building with `deploy: cloudflare` now warns. `303` was also missing
+  from the accepted set, so a valid rule drew an "unsupported status" warning.
+  The docs said `301/302/307/308/410` for every platform; corrected.
+- 🔏 **`fingerprint` double-hashed assets when the output was not cleaned**
+  (#95) — the step reads the output directory, so a rebuild treated its own
+  previous output as fresh input: `style.<hash>.css` became
+  `style.<hash>.<hash>.css` while the original lingered, and the HTML was
+  rewritten to a name the pages no longer referenced. `--clean` hid it by
+  emptying the directory first, which is why it only showed on rebuilds — and
+  why `--watch`, whose rebuilds are in place, hit it on every save. The
+  previous build's `assets-manifest.json` now identifies its own output, which
+  is removed rather than hashed again; this also bounds a directory that
+  otherwise kept every historical hash of every asset forever. A name matching
+  `name.<hash8>.ext` with no manifest to confirm it is skipped but **not**
+  deleted, since a theme may legitimately ship such a name.
+
+### Added
+- ⚙️ **A `config` input for the GitHub Action** (#104) — the action exposed the
+  three positional arguments and a subset of flags, with no way to say "use the
+  `.ssg.yaml` I already have". Everything a real site keeps there — `redirects`,
+  `worker`, `variables`, the `check_*` validators — has no input equivalent, so
+  the action could not build a config-driven site at all, and the mismatch only
+  surfaced after writing a workflow that quietly ignored half the configuration
+  and deployed anyway. With `config` set, `source`/`template`/`domain` become
+  optional; flags are passed through so the CLI resolves precedence.
+- ✂️ **`trimPrefix` / `trimSuffix`** (#103) — a theme could test for an affix but
+  not remove one, so stripping `.html` was impossible inside a template.
+- 🚧 **A generated `404.html`** (#102) — static hosts answer an unmatched path
+  by falling back to `index.html` **with a `200`** unless the output has a
+  `404.html`, so every dead URL read to a crawler as another live copy of the
+  home page. That was the out-of-the-box behaviour for a first-class deploy
+  target, and a migration trap: `next export` generates one, so a site moving to
+  SSG lost proper 404s silently. A page slugged `404` still takes precedence;
+  `not_found_off: true` (or `--not-found-off`) suppresses it.
+- 🧩 **`append`** (#96) — add values to a list, so a theme can build a derived
+  collection. `slice` only ever made a literal, which left an ordinary
+  requirement — "list the sub-pages of this section" — with no direct
+  expression in a Go template. The collection may be the first or the last
+  argument, so both `append $kids .` and `$kids | append .` work; the input is
+  never mutated. Available in shortcode templates too.
+- 🔤 **`filter` gained `hasPrefix`, `hasSuffix` and `matches`** (#96) — these
+  existed as standalone helpers but could not be used as filter predicates, so
+  selecting pages under a path had to fall back to `contains`, which is
+  substring-wise and also matches `/not-special/`. Applied to a non-string
+  field they report the mistake instead of answering false.
+- 🏷️ **`variables.gtm_id`** (#101) — the Tag Manager container ID was hardcoded
+  in `ssgtheme`, which made it part of the theme rather than the site: lost on a
+  theme update, and impossible to differ between two sites sharing a theme. It
+  now mirrors `variables.gtag`. When `variables.cookie_consent` is also set the
+  loader ships as `type="text/plain" data-consent-category="analytics"` so the
+  consent worker starts it only after the visitor accepts — the container
+  request is itself a third-party call, so a site running a banner should not be
+  making it beforehand.
+
+### Documentation
+- 📚 **Four gaps that each required reading the Go source** (#100) — `.Author`
+  is an `int` and `.Categories` is `[]int` (metadata IDs) while `.Tags` is
+  `[]string` and `.Category` is a `string`, so the obvious template renders
+  `2 · 3, 4`; the types and the `getAuthorName`/`getCategoryName` resolvers are
+  now in the table. There is no `urlize`/`slugify`, and the taxonomy helpers
+  were absent from the helper reference — both now cross-referenced. The
+  built-in taxonomy names are `category`, `tag` and `series` (singular, not the
+  frontmatter field names), and an unknown name returns `""` rather than an
+  error. `variables.cookie_consent` is documented as the supported integration
+  point it already was.
+
+### Documentation
+- 📈 **`docs/UPGRADING.md`** — every version-to-version step in one page, with a
+  picker that narrows the list to what applies between your current version and
+  today. Organised by what changed rather than by release, because 53 of the 63
+  releases so far need no action and a section per version would bury the ten
+  that do. The picker is progressive enhancement: without JavaScript it stays
+  hidden and every step is shown.
+
+## [1.8.21] - 2026-08-07
+
+### Added
+- 🔗 **`feed_autodiscovery: false`** — keep publishing feeds but stop injecting
+  `<link rel="alternate">` into the HTML, for a theme that wants control over the
+  links' order, titles or which feeds are advertised. A theme emitting its own
+  feed link already suppressed injection; this is the explicit form, so the
+  behaviour no longer depends on SSG noticing what the theme happened to render.
+  Default `true` — existing sites are unaffected.
+- 🧩 **`feed` template helper, plus `concat` and `flatten`** (#91) — a site could
+  publish an aggregated feed but not *show* one. The merge, filters, dedupe,
+  ordering and provenance labels were all computed, but only the feed writer
+  could see them, and a template had no way to compose two collections
+  (`slice a b` builds a list *of* two lists and nothing unnests it) — so an HTML
+  page fell back to one section per source, the "two lists printed one after the
+  other" that is not a merge. `feed "<path-or-name>"` returns a declared feed's
+  items, so page and feed come from one computation and cannot drift; `concat`
+  and `flatten` are the general tools, useful well beyond feeds.
+
+### Fixed
+- 📚 **Declared feeds were undocumented, and the config table was corrupted** (#92).
+  `feeds:`, RSS output and the per-feed `title` appeared nowhere a reader would
+  look: the table described `feed` as Atom-only and `--help` agreed, so someone
+  reasonably concluded RSS was unsupported and wrote a converter instead. The
+  sections added in 1.8.20 also broke the table they were inserted into — the
+  `feed` row lost its description to the row below it — and **12 table rows across
+  the docs carried an unescaped `|` inside inline code**, which splits a cell and
+  shifts every column after it. Table repaired, pipes escaped, `--help` now points
+  at `feeds:`, and two things are stated explicitly: a declared feed can be
+  *named*, and SSG injects the autodiscovery tags itself so a theme must not
+  hand-write them.
+
+- 🐛 **`format: feed` rejected every feed fetched over HTTP** (#90) — the format
+  was added to the parser but not to the transport's content-type allowlist, so
+  `accepted[format]` was `nil` and a real feed was refused before parsing. It
+  blocked the headline feature of 1.8.20 outright: SSG could not read a feed it
+  had generated itself. `format: changelog` (1.8.18) had the same gap. Both now
+  list their content types — `feed` deliberately spanning Atom, RSS and JSON,
+  since the parser detects the format from the payload and the transport gate
+  must not be narrower than the parser. The tests covered the parser but used
+  `type: file`, which never touches this gate; there is now a check that **every**
+  supported format has an entry, so the class of bug cannot recur.
+
+## [1.8.20] - 2026-08-07
+
+### Added
+- ↪️ **`check_redirects` + `pretty_urls` — links that only resolve through a host
+  redirect** (#87). `check_links` resolves against the output directory, which is
+  not how a host answers, so a link can pass and still cost every visitor a round
+  trip; one `.html` link in a shared footer puts the whole site through one.
+  `pretty_urls` describes the host — it strips `.html` and appends a trailing
+  slash — and makes link checking agree in **both** directions: `check_links`
+  stops reporting `/docs/swagger` broken when the host serves it from
+  `swagger.html`, and `check_redirects` reports the reverse with the destination
+  named. Off for a plain object store, where the extensionless form is a genuine
+  404 rather than a redirect, and the check then skips with a message rather than
+  reporting shapes the host never rewrites.
+
+- 🌍 **Feeds can now be read as well as written — and merged** (#89). `format: feed`
+  on an external source accepts **Atom 1.0, RSS 2.0 or JSON Feed 1.1** and
+  normalizes all three into one shape, with dates parsed into real timestamps.
+  The format is detected from the payload rather than the declaration, since a
+  `.xml` URL may be either and a redirect can change what arrives. A declared feed
+  can then **aggregate** several inputs — other sites' feeds *and your own posts*
+  — into one published feed: sorted newest first, deduplicated by URL, each item
+  carrying a **provenance label** emitted as a category so an aggregate can be
+  grouped by where things came from. Filters run **per source first, then
+  feed-wide**, because what counts as noise depends on the feed it came from and
+  that context disappears once everything is merged; `words` match the title and
+  summary, `tags` match categories, and exclusion beats inclusion. `paginate:`
+  splits a large archive into RFC 5005 `rel="next"`/`"prev"` linked pages, with
+  page one keeping the declared path so a subscribed URL never moves.
+
+- 📰 **`feeds:` — as many syndication feeds as a site needs, each with its own
+  selection and format** (#86). `feed: true` publishes one Atom feed of every
+  post, plus one per language and per taxonomy term; that is all-or-nothing, so a
+  site with several content roots cannot offer "just the blog", and "the three
+  tags that mean *release*" needs three subscriptions. A declared feed chooses
+  **what goes in** (`source` folder, `categories`, `tags`, `type` — optional and
+  combined with AND), **where it is written** (`path`) and **in what format**:
+  **Atom 1.0**, **RSS 2.0** or **JSON Feed 1.1**, alongside per-feed `items` and
+  `full_content` overrides. `feed: true` behaviour is unchanged.
+
+### Fixed
+- 📚 **`external_sources` examples were missing the `sources:` level** — wording
+  introduced with `format: changelog` in 1.8.18. Sources live under
+  `external_sources.sources:`, so the documented example, copied literally,
+  produced `unknown configuration key` warnings and loaded nothing.
+
+- 🗺️ **Excluding a page no longer drops every URL it emitted** (#88) — a regression
+  from the 1.8.18 sitemap work. Exclusion was decided per **page** and read from a
+  single output file, so a source emitting more than one URL had all of them
+  judged by that one verdict. A page slugged `index` emits both `/` and `/index/`,
+  so a theme marking the duplicate `noindex` — or canonicalising it away under
+  `sitemap_prune_canonical` — silently removed **the site root** from
+  `sitemap.xml`, which is far worse than the duplicate it was fixing. Each `<loc>`
+  is now judged against the file actually served at that URL: `/` against the root
+  `index.html`, `/index/` against `index/index.html`. Before 1.8.18 a theme-set
+  `noindex` did not affect the sitemap at all, so this could not happen.
+
+- 🔗 **Feed autodiscovery now covers every feed, and every page** (#86). One
+  `<link rel="alternate">` per published feed, with its own MIME type and title —
+  a reader offering a choice reads exactly those links, so advertising four feeds
+  behind a single Atom link hid three of them. The links were also injected by
+  the SEO block, which only runs for pages carrying a page context, so the **site
+  homepage — the first place a reader or subscription tool looks — advertised no
+  feed at all**. A theme that provides its own link is still left alone.
+
+## [1.8.19] - 2026-08-06
+
+### Added
+- 🧩 **`raw` (alias `html`) template helper** (#83) — a plain `template.HTML` cast
+  for markup that comes from data: inline SVG, a pre-rendered snippet, an embedded
+  config blob. `safeHTML` is not interchangeable: in a page template it runs the
+  **Markdown pipeline** (right for `.Content`), while the shortcode func map
+  defines it as a bare cast — the same name meaning two things. Passing SVG
+  geometry through it wrapped the fragment in a `<p>`, which is invalid inside
+  `<svg>`, so the icon silently did not draw.
+- 📦 **`static_sources:`** (#84) — more than one verbatim passthrough root,
+  mirroring `content_sources:`. One `static_dir` forces either a committed
+  duplicate that drifts or a staging script every contributor has to know about,
+  which is untenable when the files a site publishes already live elsewhere in the
+  repository and are read there by tests and CI. Each entry keeps its own name so
+  existing public URLs keep resolving (`path: xml` serves `/xml/…`); `dest:` places
+  it elsewhere and `dest: "."` spreads a directory's contents at the output root,
+  the way `static_dir` behaves. Copied after `static_dir`; a later entry wins.
+
+### Fixed
+- 🔗 **`link:` no longer has `page_format` appended to it** (#81) — a page whose
+  frontmatter set `link: /validator.html` was written to `validator.html.html`
+  under `page_format: flat`, and to a directory literally named `validator.html/`
+  under `directory`, with the sitemap advertising `/validator.html/`. `link` is
+  documented as the highest-precedence URL source, so a path that already names a
+  file is now final: no second extension, no trailing slash. Links without an
+  extension are unchanged, and a dot that is not an extension (`/spec/v1.0`) is
+  still a directory.
+- 📚 **`bundles:` documentation named paths that cannot work** (#79) — the example
+  used bare filenames, but bundle names and sources resolve against the **output
+  root**. Following it literally reported every source missing and wrote an empty
+  bundle, which reads as a broken theme rather than a config mistake.
+- 📚 **The theme-vs-generator SEO precedence is now documented** (#80) — `seo` is
+  not all-or-nothing. A theme that emits its own Open Graph tags (to control
+  `og:image`) still gets JSON-LD generated from frontmatter. Undocumented, that
+  reads as "provide OG and you are on your own", so theme authors hand-write
+  structured data SSG would have produced.
+- 📚 **`TEMPLATES.md` implied the field table applies under `.Page`/`.Post`** (#82)
+  — wording introduced in 1.8.17. It does not: `.URL`, `.CanonicalURL`,
+  `.OutputPath`, `.TOC` and `.Hreflang` are computed for the template root and have
+  no struct field behind them, so `.Page.TOC` fails at render, the page is skipped
+  with a warning, and on a first build it looks like the content never loaded. The
+  guide now separates root-only from nested values, gives the method equivalents
+  (`.Page.GetCanonical .Domain`) and documents `.Extra` as the accessor for custom
+  frontmatter.
+
+## [1.8.18] - 2026-08-04
+
+### Fixed
+- 🔗 **`simple` theme: the canonical URL ignored the permalink scheme** — `post.html`
+  and `page.html` hardcoded `https://<domain>/<slug>/`, so every post on a
+  date-based permalink (the default) advertised a canonical pointing at a URL that
+  does not exist: `/test-post/` for a page served at `/2025/01/01/test-post/`.
+  Both now use the model's own `GetCanonical`, which follows the configured
+  permalink scheme, and still honour an explicit frontmatter `canonical:`. Found
+  while testing #78: pruning the sitemap on canonical mismatch silently dropped
+  real posts, and the theme — not the check — was wrong.
+
+### Added
+- 🔎 **Three build-time checks over the generated HTML**, in the same shape as
+  `check_links` (off / `warn` / `strict`, escalated by `strict: true`). Each
+  targets a failure that is invisible today because the generator did exactly what
+  it was told.
+  - **`--check-images` / `check_images`** (#75) reports images with **no `alt`
+    attribute**. It never generates alt text: an invented description reads as
+    authoritative while being wrong, which is worse for a screen-reader user than
+    silence. `alt=""` is the correct treatment for a decorative image and stays
+    silent; `strict-decorative` opts into reviewing those too.
+  - **`--check-meta` / `check_meta`** (#76) requires a non-empty `<title>` and meta
+    description on indexable pages, skipping `noindex`. Catches the whole-site
+    failure where a theme interpolates a field that is always empty and every page
+    ships a blank tag. Title and description **lengths** are advisory notes, never
+    build failures, and the ranges are configurable via **`meta_limits`** —
+    `title_min`/`title_max`/`description_min`/`description_max`, where unset means
+    the built-in default and an explicit `0` disables that bound.
+  - **`--check-orphans` / `check_orphans`** (#77) reports indexable pages nothing
+    links to. Only `<a href>` counts — every page links to itself through
+    `<link rel="canonical">`, so counting all references would make nothing an
+    orphan; self-links, `noindex` pages and the site root are ignored.
+- 🧹 **`content_exclude`** (#74) — globs for Markdown under `content_dir` that must
+  not be loaded as a page. Matched **before** parsing, so a data file whose front
+  matter is valid for its own purpose but unparseable as a page is skipped cleanly
+  instead of warning and being silently dropped. `status: draft` cannot help there,
+  because the failure happens while unmarshalling, before any status is read.
+  `**` crosses directory separators; the full path, the content-relative path and
+  the bare filename are all matched.
+
+### Changed
+- 🏷️ **`seo: true` now fills in a missing meta description** from the front-matter
+  `description:` (#76). Nothing is invented — the author already wrote it, it just
+  never reached the output. An existing but **empty** tag is rewritten in place
+  rather than joined by a second one, since two description tags with a blank first
+  is worse than the problem being fixed.
+- 🗺️ **`sitemap.xml` no longer lists pages whose rendered HTML says `noindex`**
+  (#78). The sitemap asks a crawler to index a URL the page itself declines, which
+  search consoles report as an error. No configuration needed: the sitemap is
+  written after rendering, so the answer is on disk wherever the `noindex` came
+  from — front matter or theme. Pages whose canonical points at a **different** URL
+  are kept by default and pruned only with **`sitemap_prune_canonical: true`**: a
+  canonical disagreeing with the permalink is far more often a theme bug than a
+  deliberate exclusion, and the shipped `simple` theme is itself an example, so
+  pruning on it by default would silently drop real posts.
+
+### Fixed
+- 🎲 **`TestRenderParallelDeterministic` was intermittently failing** — it built
+  its corpus twice, once per worker count, so the two builds read source files
+  with different mtimes. A post with no explicit `modified:` takes its feed
+  `<updated>` from that mtime, so whenever the two writes straddled a second
+  boundary the feeds differed and the test failed on a difference it was never
+  meant to measure. It blocked the 1.8.17 release tag. The corpus is now written
+  once and both builds read it, leaving the worker count as the only variable;
+  200 runs plus 60 under `-race` are clean (it previously failed roughly 1 run in
+  30 under `-race`).
+
+## [1.8.17] - 2026-08-04
+
+### Changed
+- ⚡ **Builds are up to 5.25x faster on large sites** (PERF-012 / PERF-013) — two
+  costs that only showed up at scale. `copyColocatedAssets` listed a post's
+  category directory **once per post**, so N posts sharing a directory did N
+  scans of an N-entry directory: on a 2000-post corpus that single `os.ReadDir`
+  was two thirds of the whole build. It is now read once per directory and shared
+  (mutex-guarded for parallel render). `ComputeReadingStats` then became the
+  largest cost at ~48%: it stripped markup with `regexp.ReplaceAllString` and
+  called `strings.Fields`, running the regex engine over every page and
+  allocating two throwaway strings per page just to count words. A single-pass
+  scanner does it **7.8x faster with zero allocations** (was 47KB / 15 allocs per
+  page), pinned to the original regex by a test over the awkward shapes plus 4000
+  random inputs. Measured best-of-3 on an M2: 2000 posts 2.96s → 0.95s, 5000
+  posts 12.07s → 2.30s, with the per-post cost now flat (~0.46ms) instead of
+  climbing. Output is unchanged — golden byte-identical on all four corpora.
+- 🎲 **`make determinism`** — builds every corpus sequentially and on a full
+  worker pool, then compares the output trees file by file, so shared render
+  state missing a lock or an ordering fails the build instead of surfacing as a
+  bug report months later. It carries its own stress corpus (300 aliased posts
+  with `link_rewrites`), because the shipped corpora are too small for the
+  scheduler to vary — verified by re-introducing the fixed bugs: the shipped
+  corpora alone caught none of them, the stress corpus catches the `_redirects`
+  ordering and the lost-alias regressions. It complements `go test -race` rather
+  than replacing it; the `link_rewrites` memo race is the reverse case, caught by
+  `-race` while the output survives. **`make golden` and `make determinism` now
+  both run in CI** — neither did before, which is how those bugs shipped.
+- ⏱️ **`make bench`** — a new `scripts/bench-build.sh` generates a fixed-seed
+  synthetic corpus (100/500/2000 posts by default, configurable) and reports build
+  time per page, so throughput claims are reproducible on your own hardware.
+
+### Fixed
+- 📄 **`dynamic-taxonomies` and `external-sources` examples shipped broken output**
+  — both post templates read `.Page.*`, but posts receive their model under
+  `.Post`, so every generated post had an empty `<title>`, an empty `<h1>` and
+  empty taxonomy footers. Both also printed `{{.Content}}`, which is the **raw
+  Markdown source** — `safeHTML` is the helper that converts it — so readers got
+  unrendered Markdown. Fixed in both examples, and the docs that let this happen
+  are clearer: `docs/TEMPLATES.md` now spells out `.Page` in `page.html` vs
+  `.Post` in `post.html` and warns that the mismatch fails silently, and
+  `docs/TEMPLATE_HELPERS.md` describes `safeHTML` as what renders a Markdown body
+  rather than merely an escaping escape hatch.
+- 🔒 **Two more parallel-render races, found by auditing the whole render tree**
+  after the alias bug below. `link_rewrites` memoized its sorted prefix list with
+  an unguarded check-then-write, and it runs on the worker pool (the `safeHTML`
+  template helper calls it during `ExecuteTemplate`), so concurrent pages raced on
+  the slice header and could rewrite links against a torn or empty prefix list —
+  intermittently masked depending on whether an earlier sequential render warmed
+  the memo. The shared image processor had the same unguarded lazy init, kept
+  correct only by a warm-up call placed before the pool. Both now build under a
+  `sync.Once`. Alias stub files also moved out of the pool: writing them during
+  rendering made the "alias collides with an existing page" check a race against a
+  half-written output tree, so the warning appeared or not depending on timing and
+  two pages claiming the same alias raced to write the same file. They are now
+  recorded during rendering and written afterwards in sorted order, once every
+  real page exists.
+- 🐛 **Frontmatter `aliases:` silently lost redirects, and `_redirects` was not
+  reproducible** — a regression from parallel rendering (1.8.15). Pages render on
+  a worker pool, and each one appended its aliases to a shared slice with no
+  synchronization: concurrent appends raced on the slice header and **dropped
+  entries** (a 200-alias reproduction recorded only 170), so a migrated site
+  could ship missing 301s without any warning. The arrival order was also
+  scheduler-dependent, so identical content produced a **different `_redirects`
+  file on every build** — 10 builds of the same site gave 9 distinct outputs.
+  The append is now mutex-guarded and the collected aliases are sorted before
+  emitting, so the file is byte-identical across builds and worker counts. The
+  existing corpora never caught this because none of them use aliases; a test now
+  drives the concurrent path directly and pins the ordering.
+- 🔖 **`make version-sync` now covers every file that states the version** — the
+  Docker image (build arg + OCI label), the man page, the install docs, the docs
+  site and the theme README were bumped by hand each release, so `man/ssg.1`
+  drifted a release behind and `--check` reported everything in sync. All five are
+  now synced and, because CI already runs the check, drift in any of them fails
+  the build. Patterns are anchored per line and require a semver, so a bump can
+  never wander into neighbouring keys (`docs-site.yaml`'s analytics
+  `version: "1"`) or into prose — a blog sentence naming the release that
+  introduced a feature is a historical fact, not a version to sync.
+- 📝 **Corrected a historical range in `snap/snapcraft.yaml`** — the note about
+  the Snap Store freeze said it ran "through 1.8.16"; it was extended by each
+  release's find-and-replace even though the fix landed in **1.8.13**. It now
+  reads 1.8.6 → 1.8.12, with both it and the equivalent note in `homebrew.yml`
+  marked as history that must not be bumped.
+
+## [1.8.16] - 2026-08-02
+
+### Added
+- 📋 **`format: changelog` — a `CHANGELOG.md` as structured data** (#69) — a local
+  file source with `format: changelog` parses the Keep-a-Changelog convention into
+  `.ExternalData.<name>.versions`, `.latest` (first released version) and
+  `.unreleased`, each with `version` / `date` / `released`, `sections` keyed by the
+  lowercased `###` heading (`added`, `fixed`, …) and a flat `entries` list. Every
+  entry is split into `title` (the leading bold run, rendered), `html` (the rest),
+  `full`, `marker` (leading emoji) and `text` (raw Markdown), so a "What's New"
+  panel is a `range` over the file you already edit at release time — no pre-build
+  script, nothing to go stale. Both `## [1.8.16] - 2026-08-02` and
+  `## 1.8.16 - 2026-08-02` headings parse; `-`/`*` bullets and wrapped entries are
+  handled.
+- 🔌 **`ssg mcp` — development MCP server (designer + content manager)** — a
+  Model Context Protocol server over stdio that lets an AI assistant work on the
+  site live during development, in two clearly-scoped roles: **designer**
+  (`designer_*` — templates, partials, CSS, theme assets; cannot touch content or
+  delete) and **content manager** (`content_*` — create/update/fix/delete
+  Markdown; cannot touch templates or write non-Markdown). Every tool description
+  states what the model can and cannot do, an always-present `help` tool restates
+  the whole contract, and by default each change **rebuilds the site** — errors
+  come back as the tool result so the assistant fixes its own mistakes.
+  `--role=designer|content` exposes one role; `--no-watch` disables rebuilds. With
+  `mcp.git` configured (account + `$ENV` token) the assistant also gets a safe
+  **git write-back flow**: `git_new_branch` → edit → `git_commit` → human reviews
+  → `git_open_pr` — edits never land on the base branch, only the
+  content/template directories are staged, and the PR is opened only after
+  explicit human approval. Without a token the `git_*` tools are not exposed.
+  The designer additionally owns the **presentation keys in the config file**
+  (`designer_config_read` / `designer_config_set`): a narrow allow-list — theme,
+  mermaid, syntax highlighting, math, TOC, minification, fingerprinting,
+  pagination, WebP — while every other key (secrets, deployment, server,
+  endpoints, hooks, content and URL structure) is refused by construction. Edits
+  preserve the file's comments and key order, and a change that leaves the
+  configuration invalid is rolled back automatically.
+- 🔗 **Related-posts template helpers** — `{{ range related . 5 }}` returns the
+  posts most related to the current page by shared **tags and keywords** (ranked
+  by overlap, then recency, then slug — deterministic, reads the already-loaded
+  content, no network). `{{ range relatedFromMddb . 5 }}` does the same by
+  querying the **mddb** corpus (a live `Search` filtered by the page's
+  tags/keywords), so it can surface articles beyond the pages built into this
+  site. See `examples/related-posts/` for the keyword, mddb and embeddings/vector
+  approaches.
+- ✉️ **Comments worker: email on a new comment** — set `COMMENTS_MAIL_URL` /
+  `COMMENTS_MAIL_FROM` / `COMMENTS_MAIL_TO` (plus `COMMENTS_MAIL_KEY` for a bearer
+  token) and the worker emails a moderation notice whenever a **non-spam** comment
+  lands. Delivery is a JSON `POST` of `{from, to, subject, text}` — the shape
+  providers like Resend accept, or point it at your own relay — sent in the
+  background (`waitUntil`) so it never delays the submitter, with gateway errors
+  logged rather than fatal. Spam is filtered silently and never mailed; unset ⇒
+  no email.
+- 📣 **Post-publish notifications** — announce each newly published (or changed)
+  post to webhook destinations you define (`notifications:`), pointing them at a
+  platform API, an automation service or your own endpoint; they receive the post
+  as JSON `{slug, title, url, excerpt, date, tags}`. A **committed state file**
+  (`notify_state`, default `.ssg-notifications.json`) dedupes on a content hash,
+  so a post fires **once** — again only when its content changes — and it never
+  sends unless you pass `--notify`, so dev builds stay quiet. Header secrets use
+  `$ENV`; the delivery transport refuses private/loopback ranges at dial time
+  (SSRF-hardened) unless `allow_private` is set; a failed destination retries next
+  run.
+- 🤖 **`[ai …]` content shortcode — ask an AI at build time** — a two-layer
+  setup: **models** under `ai.models` are endpoints (url, `$ENV` key, model id,
+  optional base system prompt, params), and **agents** under `ai.agents` are roles
+  built on a model that layer a persona plus user-defined **`rules`** (constraints
+  they must follow) and **`skills`** (jobs they apply). Ask from inside content
+  with `[ai agent="writer" question="…" ifs="lang == en" fallback="…"]`, or invoke
+  a bare model with `model="…"`. The answer is fetched **once** and
+  **content-addressed cached** (`ai.cache_dir`, default `.ai-cache`) keyed by the
+  effective request, so a build is deterministic and only re-queries when the
+  question, model, rules, skills or params change — commit the cache and CI
+  rebuilds identically with no key and no network. `ifs` is an optional guard over
+  the page's fields with `AND`/`OR` and `==`/`!=`/`contains`/`>`/`<`/`>=`/`<=`;
+  when it is false, or the query fails, the `fallback` text is used. Precedence is
+  explicit agent → explicit model → `ai.default_agent` → `ai.default_model` → sole
+  agent → sole model. Keys are read from the environment, never literals.
+
+### Fixed
+- 👀 **`--watch` now watches the configuration file** (#70) — editing `.ssg.yaml`
+  during a watch session reloads the configuration and rebuilds with the new
+  settings. Previously the watcher observed only content and templates and kept
+  building from the configuration loaded at startup, so a changed theme or option
+  silently did nothing until a restart — with no hint that it had been ignored.
+  Command-line flags still take precedence over the file, exactly as at startup.
+  A config edit that leaves the file unparseable is reported and the **last good
+  configuration is kept running**, so a half-saved file never kills the session.
+  The startup line now names every watched input, e.g. `👀 Watching for changes in
+  content, templates, data, config (.ssg.yaml)...`.
+
+## [1.8.15] - 2026-08-01
+
+### Added
+- ⚡ **Parallel page/post rendering (`--workers`)** — the HTML render loop, not
+  just WebP conversion, now runs on the worker pool, so a content-heavy site
+  publishes much faster (on the docs site here, `--workers=8` roughly halved the
+  build). Pages are grouped by language and the shared site view is set **once**
+  per language, so multilingual output stays correct; the render-time caches
+  (markdown-conversion memo, shortcode templates, missing-translation warnings)
+  are mutex-guarded, with the expensive markdown conversion kept outside the lock
+  so it still parallelises. Output is byte-for-byte identical to a sequential
+  build — verified with the race detector and the golden harness on every corpus.
+  `build_workers` / `--workers=N` governs both render and WebP: unset = one per
+  CPU, `N` = exactly N, `0` = off (sequential).
+
+### Changed
+- 🔗 **`rewrite_md_links` is now on by default** — a relative `.md` link in
+  content is rewritten to its final output URL out of the box, since a raw `.md`
+  link otherwise 404s or serves the source file. Set `rewrite_md_links: false` to
+  opt out; the rewriting behaviour itself is unchanged.
+
+## [1.8.14] - 2026-08-01
+
+### Added
+- ⚡ **Parallel builds (`--workers`)** — the build was fully sequential; WebP image
+  conversion now runs on a worker pool, so an image-heavy site publishes several
+  times faster on a multi-core machine. `build_workers` / `--workers=N`: unset
+  uses the whole machine (one worker per CPU), `N` caps it (e.g. `--workers=2` on
+  a shared box), `--workers=0` turns parallelism off (sequential). Each image is
+  independent, so the output is byte-identical whatever the count — verified with
+  the race detector and the golden harness. (The HTML-render loop stays sequential
+  for now; it threads mutable per-language state through the template context, so
+  parallelising it safely is a separate, race-audited change.)
+- 🔌 **Portable server endpoints, self-hosted first** (#63, foundation) — a new
+  vendor-neutral `endpoints:` block declares small server behaviours once, and the
+  built-in server (`--http`) runs them natively in the single Go binary — no
+  external runtime, works behind nginx/Caddy or the existing Docker image. Two
+  types to start: `redirect` (a request-time 3xx, the dynamic complement to the
+  static `_redirects`) and `proxy` (forward to an upstream, keeping its key
+  server-side). The proxy resolves and vets the upstream IP itself and **refuses
+  loopback/private ranges at dial time** — the same SSRF / DNS-rebinding guard the
+  external-source client uses — with `allow_private: true` to opt in to a genuine
+  self-hosted upstream. Pure-static builds are unaffected (empty `endpoints:` is a
+  no-op).
+  - **Platform adapters (plugin per file).** Set `endpoints_platform` and the
+    build compiles the *same* `endpoints:` into a platform's functions — no
+    rewrite. Three adapters: **Cloudflare** Pages Functions (`functions/<path>.js`,
+    the same tree hand-written workers use, so there's no parallel mechanism),
+    **Netlify** Functions v2 (each declares its own route, no `_redirects`
+    wiring), and **Vercel** Edge Functions + a generated `vercel.json`. Each
+    adapter is a self-contained, self-registering file, so a new target is one
+    file. So an endpoint deploys unchanged to self-hosted, Cloudflare, Netlify or
+    Vercel.
+  - **`form` primitive.** A `form` endpoint accepts a `POST`ed submission, drops
+    bots via a `honeypot` field, and delivers the collected `fields` as JSON to a
+    `to` webhook (kept server-side), then `redirect`s the browser (or returns a
+    small JSON ok). Works self-hosted (same SSRF-guarded delivery as `proxy`) and
+    compiles to all three platforms — a contact form without a SaaS.
+  - **`auth` guard.** An `auth` endpoint protects its `path` as a prefix with HTTP
+    Basic auth (constant-time compare, password from an env var — never a literal),
+    covering both endpoints and static files beneath it. Runs on the built-in
+    server; adapters skip it (use the platform's own access control). The
+    `worker:` migration is the remaining piece of this epic.
+- 📋 **Content contracts: frontmatter schemas, strict mode, route manifest** (#62)
+  — declare per-type frontmatter contracts in `content_schemas` (required fields
+  plus `string`/`int`/`bool`/`date`/`url`/`list`/`enum` field rules) and the build
+  validates every post and page against its type's schema, reporting each
+  violation with file, field and reason. Violations warn by default; `strict`
+  (or `--strict`) turns them — and internal link checking — into hard build
+  failures, so a missing `author` or a renamed slug that orphans a link fails the
+  build instead of shipping. `route_manifest` (or `--route-manifest`) writes
+  `routes.json`: a sorted, deduplicated list of every generated route (posts,
+  pages, and category/tag/series/author/custom-taxonomy archives) with its type,
+  title, source and language — a machine-readable contract external tooling can
+  diff. All opt-in; a plain build is unchanged.
+- 🤖 **AI-first JSON-LD structured data** (#61) — with `seo` on, every page now
+  emits richer Schema.org Linked Data derived from existing frontmatter with zero
+  extra config, so AI agents and answer engines get machine-readable data without
+  running JavaScript. Content types map correctly — blog posts → `BlogPosting`
+  (with `headline`, `datePublished`/`dateModified`, `author`, `keywords` from
+  tags, `mainEntityOfPage`), the home page → `WebSite`, other pages → `WebPage`
+  (previously every non-post was mislabelled `WebSite`) — and every non-home page
+  also gets a `BreadcrumbList` from its URL. Two override layers deep-merge over
+  the derived data (most specific wins): site-wide `schema:` in the config (for a
+  publisher/Organization on every page) and per-page `schema:` in frontmatter.
+  `</script>` in any field is escaped, so untrusted titles can't break out.
+- 🔀 **Per-page `alias_stubs` — 301 instead of a duplicate copy** (#65) — an
+  `aliases:` entry has always emitted a `301` into `_redirects`; by default it
+  *also* writes a meta-refresh stub copy (a fallback for hosts without server
+  redirects). The site-wide `alias_stubs: false` that suppresses those stubs is
+  now overridable **per page** in frontmatter, so a migrated legacy slug can
+  consolidate to its canonical with a pure `301` (no 200-serving duplicate for
+  crawlers) while the rest of the site keeps its stubs — or the reverse. The
+  `301` is emitted either way.
+- 📈 **ssgtheme: Google Analytics 4 (gtag.js), consent-aware** — set
+  `variables.gtag: "G-XXXXXXXXXX"` and the theme injects gtag.js with **Consent
+  Mode v2**: every storage type defaults to `denied`, and when the cookie-consent
+  banner is present its `signal()` flips `analytics_storage` to `granted` once
+  the visitor accepts. No `variables.gtag` → nothing is emitted (the theme stays
+  generic; the measurement ID lives in the site config, never the shared theme).
+- 💬 **Threaded replies on comments** (GO-084) — readers can reply to a
+  top-level comment (one level deep). The widget shows a **Reply** button, nests
+  replies under their parent, and the worker validates the parent is an approved
+  top-level comment on the same page before storing it. A `parent_id` column is
+  added automatically (auto-migrated on existing databases). Replies are
+  moderated like any comment. New i18n strings (Reply / Replying to… / Cancel).
+- 🚦 **One pending comment per person per thread** (GO-083) — a visitor who
+  already has a comment awaiting review on a page can't stack up more (`429`);
+  they can add another once theirs is moderated (approved, spam, or deleted).
+  Keyed on the now-required email, case-insensitively, per URL. The widget also
+  **hides the form after you post and keeps it hidden until your comment is
+  approved** (remembered client-side per URL, with a 14-day fallback), instead of
+  re-showing an empty form.
+- 🗄️ **Comments worker self-initialises its D1 schema** (GO-083) — the worker
+  creates its `comments` table (and indexes) on first use, so binding the D1
+  database is the only setup step — no manual `wrangler d1 execute`. The
+  statements are `IF NOT EXISTS` and run once per isolate, so it's a no-op
+  thereafter; `schema.sql` stays for anyone who prefers to apply it by hand.
+- 📥 **Import WordPress comments** (GO-083) — `workers/comments/tools/wordpress-comments.sh`
+  (bash + `curl` + `jq`, no plugin) pulls comments from a WordPress site's public
+  REST API and converts them to the import JSON, building each comment's URL from
+  its post slug (`URL_TEMPLATE`, default `/blog/{slug}/`). It can print the JSON
+  or `--post` it directly (chunked). Documented in the worker README, including
+  the WXR-export fallback for pending/spam comments and emails.
+- ✉️ **Comment email is now required** (GO-083) — the comment form marks email
+  `required` and the worker rejects a submission without a valid email (`422`).
+  Bulk import still treats email as optional (historical data). The i18n labels
+  drop "optional" in all four languages.
+
+- 🔐 **Docs site: Turnstile keys from GitHub secrets** (GO-082) — the docs-site
+  deploy workflow now injects the Turnstile **site key** into the config from a
+  GitHub secret at build time (the committed test key stays when it's unset), and
+  pushes the **secret key** (plus optional moderation password / IP salt) onto
+  the Pages project via `wrangler pages secret put`, so no keys live in the repo.
+  The comments worker README documents the pattern, including that a D1 binding
+  is a project setting rather than a secret.
+
+### Changed
+- ♻️ **Built-in taxonomies unified onto the registry** (#44) — the built-in
+  `category`, `tag`, `series` and `author` archives are now driven by the single
+  taxonomy registry (`generateTaxonomies`) instead of four separate top-level
+  pipelines, so there is one place that renders every taxonomy. Output is
+  **byte-for-byte identical** (verified by the `make golden` equivalence harness
+  across the corpus, dynamic, multilingual and external fixtures): built-ins keep
+  their legacy-compatible rendering — no taxonomy index page, no i18n path prefix,
+  single-page archives, the `tag.html`→`category.html` template fallback, and
+  skip-not-fail URL collisions. No user-facing change; a `Folded` definition flag
+  marks a built-in migrated onto the registry.
+
+### Fixed
+- 🐛 **Social preview images follow the WebP conversion** (#64) — with `webp` in
+  its default replace mode the original `.jpg`/`.png` is removed after
+  conversion, but `og:image` (and the new `twitter:image` / JSON-LD `image`) kept
+  pointing at the deleted file, so every share preview 404'd. The WebP reference
+  pass now rewrites those social-image references to the emitted `.webp`, same as
+  in-content `<img>`. SEO injection also now emits `twitter:image` and a JSON-LD
+  `image` from `featured_image` (previously only `og:image`), so one field drives
+  the whole preview. Absolute (`https://…`) references are still left untouched;
+  use `webp_keep_original` for hardcoded ones.
+- 🐛 **Moderation panel no longer double-prompts for auth** (GO-084) — the admin
+  `401` carried a `WWW-Authenticate: Basic` header, so the browser popped its
+  native login dialog on top of the panel's own password field. The header is
+  gone (curl `-u` sends the credential proactively and doesn't need it), leaving
+  just the panel's field.
+- 🐛 **Docs site: widget assets no longer cached for a year** (GO-083) — a
+  worker's client files (`/comments.js`, `/cookie-consent.js`, …) sit at the site
+  root and are updated in place, but were served with the default one-year
+  immutable asset cache, so a browser kept a stale copy (e.g. an old form label)
+  long after a deploy. The docs-site config now serves them revalidating
+  (etag-checked) via a `headers:` override, so updates propagate on the next
+  visit. Any site with in-place-updated worker assets should do the same.
+- 🐛 **Comments worker fails clean when D1 isn't bound** (GO-083) — every D1-backed
+  endpoint (`GET`/`POST`/admin/import) now returns a JSON `503 comments not
+  configured` instead of throwing a raw Cloudflare `500` when the `COMMENTS_DB`
+  binding is missing. The widget also parses the response defensively, so a
+  server error no longer shows as a misleading "network error".
+- 🐛 **`ssg --deploy=cloudflare` now ships Pages Functions** (GO-082) — when the
+  output has a `functions/` tree, SSG deploys via `wrangler pages deploy`, but it
+  ran `wrangler pages deploy <output-dir>` from the current directory. wrangler
+  compiles the `functions/` tree relative to its **working directory**, not the
+  deploy-dir argument, so it uploaded the static assets *without* the Functions:
+  the API then served `/api/*` as static (GET → 200 HTML, POST → 405) and every
+  worker endpoint (comments, cookie-consent geo/log, …) was silently dead. SSG
+  now runs wrangler **from** the output directory and deploys `.`, so the
+  Functions are compiled and shipped. (Same working-directory rule already fixed
+  for `--watch` in 1.8.13.)
+
+### Documentation
+- 📄 **TEMPLATES.md: theme asset output URLs** (#59) — documents that a theme's
+  `css/`, `js/` and `images/` directories are copied to `output/css`, `output/js`
+  and `output/images` (referenced as `/css/…`, `/js/…`, `/images/…`), that
+  `media/` comes from the content source rather than the theme, and that a
+  `static_dir` file overwrites a colliding theme asset (static is copied last).
+  Previously a theme author had to read the generator source to learn this.
+
+## [1.8.13] - 2026-07-24
+
+### Added
+- 🔑 **Comments moderation behind Cloudflare Access (SSO/JWT)** (GO-081) — an
+  alternative to the shared moderation password: set `COMMENTS_ACCESS_TEAM` and
+  `COMMENTS_ACCESS_AUD`, put `/comments-admin.html` and `/api/comments/admin*`
+  behind a Cloudflare Access application, and the worker verifies the signed JWT
+  Access forwards (signature against your team's JWKS, audience, issuer, expiry)
+  instead of a password. Moderators sign in through your IdP; the panel detects
+  the Access session and skips its own login. No shared secret to store or
+  rotate. The password path still works when Access isn't configured.
+- ⏱️ **Configurable fetch: `timeout`, `retries`, `retry_delay`, `on_error`**
+  (GO-081) — a remote `include:` (and remote worker `source:`) previously had a
+  fixed 30s timeout, no retry, and any failure hard-failed the build. Each remote
+  include can now set its own `timeout`, `retries` (default 3), `retry_delay`
+  (default 5s) and `on_error` (`fail`, the default, or `warn` to continue without
+  it). A transient failure (network error, HTTP 429/5xx) is retried; a 4xx is
+  not. Absent keys use the defaults, so existing configs keep working.
+- 🚀 **`republish-trigger` worker** (GO-080) — one authenticated webhook,
+  `POST /api/republish`, that fires a CI build on **GitHub**, **GitLab** or
+  **Gitea**, so a headless-CMS "published" webhook, a cron or a `curl` redeploys
+  the site without touching the repo. The caller proves itself with a shared
+  `REPUBLISH_KEY` (constant-time check, header or query); the provider token
+  stays server-side. GitHub uses `workflow_dispatch` (or `repository_dispatch`),
+  GitLab a pipeline trigger token, Gitea a workflow dispatch — self-hosted hosts
+  via `REPUBLISH_API_BASE`. GET is off unless opted in, and an optional KV
+  binding debounces bursts into one build (`429` inside the window). Scaffold
+  with `ssg new worker republish-trigger`.
+- 🔒 **Auto-close idle comment threads** (GO-078) — a new
+  `COMMENTS_CLOSE_AFTER_DAYS` var stops a thread accepting comments once that
+  many days have passed since its last activity (the newest comment, or the
+  post's publish date while it has none). Active discussions stay open; a post
+  nobody has touched for a month locks itself. `GET /api/comments` reports
+  `"closed"`, the widget then hides the form and shows a localised "Comments are
+  closed" notice (existing comments stay visible), and `POST` returns `403
+  comments closed` — checked before spending a Turnstile verification. The theme
+  renders the post's publish date so empty old threads close too. `0`/unset
+  keeps the previous always-open behaviour.
+- 📥 **Bulk comment import** (GO-078) — an admin-only `POST /api/comments/import`
+  takes normalised JSON (an array of `{url, author, body, email?, created_at?,
+  status?}`) so a migration from Disqus, WordPress, Commento or a spreadsheet
+  converts to one shape and posts once. Idempotent — each id is a content hash
+  inserted with `INSERT OR IGNORE`, so re-running a file adds nothing new;
+  invalid rows are skipped and counted, not fatal; up to 1000 per request.
+  Imported comments default to `approved`. The moderation panel gains an
+  **Import comments** box (file or paste) so it needs no curl.
+- 🎨 **Mermaid diagram theme + background** (GO-079) — two new options,
+  `mermaid_theme` (mermaid's built-in `default`/`neutral`/`dark`/`forest`/`base`)
+  and `mermaid_background` (any CSS colour), tune diagram legibility. Diagrams
+  are transparent by default, so on dark site chrome they were hard to read;
+  `mermaid_background` boxes each one on a solid panel (padding + rounded
+  corners), and `mermaid_theme` picks a matching palette. Both only affect pages
+  that actually contain a diagram. The docs site now uses a white panel.
+- 🌐 **Comments widget speaks the page's language** (GO-078) — the `comments`
+  reader widget is now translated (en/pl/de/fr), picking the language from
+  `<html lang>` exactly like the cookie banner, so a post in Polish gets a Polish
+  form. A `comments.i18n` config block overrides any string or adds a language
+  without editing the worker.
+- 🧩 **Config includes: split `.ssg.yaml` across files** (GO-076) — a config can
+  `include:` other YAML files from a **path or a URL**, so a project's config
+  splits into focused pieces (shared defaults in a base, each worker its own
+  file). Base-first merge: includes are merged in listed order, then the main
+  file overlays on top and always wins. Maps merge recursively; lists of maps
+  that carry a `name` merge **by name** (so each file can contribute one
+  `workers:`/`content_sources:` entry without clobbering the others); other
+  lists replace. Cycles are rejected, diamonds allowed. Remote includes take an
+  optional `auth:` (`bearer`/`basic`/`header`) whose secret fields must
+  reference environment variables.
+- 🧰 **Several workers: the `workers:` list** (GO-076) — the singular `worker:`
+  becomes a plural list of **independent** worker definitions, each with its own
+  `routes`, `wrangler_config`, a free-form per-worker `config:` block, and an
+  optional remote `source:` (a GitHub/GitLab repo or `.zip`, fetched into `dir`
+  with the same `auth:` model). The singular `worker:` still works unchanged.
+  Because Cloudflare Pages serves one `functions/` tree per project, the
+  workers' functions merge into it and their routes combine — and two workers
+  claiming the same output file is a **hard error**, never a silent overwrite.
+- 🧩 **Wrangler config generator** (GO-077) — a project that uses workers needs
+  a `wrangler.toml` for `wrangler pages dev`/`deploy`. SSG now writes a starter
+  one when none exists — automatically on `--watch`, or on demand via
+  `ssg new wrangler` — deriving `name` from the domain and
+  `pages_build_output_dir` from the output dir, and appending each worker's own
+  `wrangler.snippet.toml` (its bindings/vars, e.g. cookie-consent's optional
+  `CONSENT_LOG` KV). An existing config is never overwritten.
+- 🔧 **`--watch` serves Functions correctly for Pages** (GO-077) — a
+  functions-mode worker now runs `wrangler pages dev .` **from the output
+  directory** (where SSG copies the `functions/`), so pages and Functions serve
+  together; the previous `wrangler dev` from the worker dir did not serve the
+  static site. A prebuilt `mode: worker` is unchanged.
+- 🎛️ **`toJSON` template helper + cookie-consent on the docs site** (TPL-004) —
+  a `toJSON` helper emits a value as inline JSON (config blobs, JSON-LD),
+  correctly once inside a `<script>` (it returns `template.JS`, so html/template
+  does not double-encode it). ssgtheme renders the cookie-consent banner from a
+  `variables.cookie_consent` block, and the SSG documentation site now dogfoods
+  the worker. The banner's position is configurable — `bottom` (default), `top`
+  or `center`.
+- 💬 **`comments` worker** (GO-078) — comments for a site (blogs especially),
+  stored in Cloudflare D1, scaffolded with `ssg new worker comments`. No
+  accounts: a name, an optional email (avatar hash only), a body. Turnstile on
+  submit, a heuristic spam score (or Akismet when a key is set), and every new
+  comment held `pending` until an admin approves it in a password-protected
+  panel. For compliance the row keeps a **salted hash** of the IP plus the
+  user-agent — the raw IP is never stored. Ships a dependency-free reader widget
+  and a moderation page; JS rendering by default, static baking documented.
+- 🐛 **Scaffold shared worker modules** (GO-078) — `EmbeddedWorkers` now uses
+  `//go:embed all:workers`, so a Pages Function's shared `_`-prefixed module
+  (which go:embed's default rule would drop) ships with the scaffold. Without
+  it, comments' `_lib.ts` was silently missing and the functions failed to
+  build.
+- 🍪 **`cookie-consent` worker** (GO-076) — a GDPR / ePrivacy / UK-PECR consent
+  banner scaffolded with `ssg new worker cookie-consent`. Prior consent
+  (non-essential `<script type="text/plain" data-consent-category>` tags stay
+  inert until granted), reject as prominent as accept, edge geo-gating (shown in
+  the EEA and UK by default, `GET /api/consent/geo`), granular categories,
+  versioned/expiring consent, a "manage cookies" reopen hook, i18n (en/pl/de/fr),
+  Google Consent Mode v2 signals, and an optional Turnstile-verified audit log
+  (`POST /api/consent/log`) that stores the IP only as a salted hash. Ships a
+  starter `cookie-policy.md` the user edits to list their services. The banner
+  js/css live in the worker's `public/`, now served from the site root.
+- 📦 **A worker's `public/` is served as static assets** (GO-076) — each worker
+  can ship client-side files (a consent banner's js/css) under `public/`, copied
+  to the output root at build with the same cross-worker collision guard as its
+  functions.
+- 🔐 **`internal/fetch`** (GO-076) — shared, hardened, authenticated fetch
+  (bounded client, size caps, path-escape-guarded zip extraction, env-only
+  secrets) behind config includes and remote worker sources.
+
+### Fixed
+- 🐛 **A worker without `routes_include` is no longer left unrouted** (GO-081) —
+  the implicit `/api/*` default was applied only to the *combined* route list,
+  so a worker that omitted `routes_include` next to one that set its own (e.g.
+  `/consent/*`) never got routed and its Functions were never invoked. The
+  default is now per-worker, and duplicate routes are collapsed so they don't
+  count twice against the Cloudflare rule cap.
+- 🐛 **A remote worker `source:` without a name is rejected** (GO-081) — two
+  unnamed sources both vendored into `workers/worker`, so the second silently
+  reused the first's files; a source now requires a `name` or an explicit `dir`.
+- 🐛 **A failed worker fetch no longer poisons later builds** (GO-081) — a remote
+  archive now extracts into a staging dir and is renamed into place only on full
+  success, so a mid-extraction failure can't leave a half-populated directory
+  that the next build reuses as if complete.
+- 🐛 **Generated `wrangler.toml` name is always Cloudflare-valid** (GO-081) —
+  `wranglerName` now prefixes a digit-leading domain (`1password.com`) so the
+  name starts with a letter, and caps it at Cloudflare's 58-character limit.
+- 🔒 **Comments auto-close could be bypassed with a forged `published`** (GO-081)
+  — the close check took `max(lastComment, clientPublished)`, so a raw POST with
+  a far-future `published` out-voted a years-old last comment and kept a closed
+  thread open. The newest comment (server-side) now governs; the client-supplied
+  publish date anchors only an empty thread (where forging it merely allows a
+  first comment on an old-but-empty post).
+- 🔒 **Comment IP hash is no longer stored unsalted** (GO-081) — `sha256(ip)`
+  without a salt is reversible across the 2³² IPv4 space, defeating the
+  "raw IP never recoverable" guarantee. With no `COMMENTS_IP_SALT` /
+  `CONSENT_IP_SALT` set, the comments and consent-log workers now store no hash
+  at all instead of a false-safe one.
+- 🔒 **Open redirect via a stored comment URL** (GO-081) — `normaliseURL`
+  rejected `//…` but accepted `/\evil.com`, which a browser resolves to
+  `https://evil.com/`; a moderator clicking the link in the panel was sent
+  off-site. Backslashes are now rejected.
+- 🐛 **Bulk import wasn't idempotent for items without `created_at`** (GO-081) —
+  the row id hashed the `now()` default, so re-importing such an export inserted
+  duplicates; it now hashes the caller-provided timestamp (empty when absent).
+- 🐛 **Consent audit log written on every pageview** (GO-081) — the banner
+  re-ran the full apply (store + log) on each page load for a returning visitor,
+  so the audit log grew by one entry per pageview and the cookie's expiry slid
+  to "last visit". Re-applying a stored choice now only re-activates scripts and
+  re-signals Consent Mode; storing and logging happen only on an actual choice.
+- 🔒 **Hardening** (GO-081) — the moderation panel no longer reveals itself on a
+  `503` "not configured" (only on a real sign-in); the consent-log endpoint caps
+  the number/length of submitted categories; and both constant-time secret
+  compares now fold the length difference in rather than returning early, so a
+  configured secret's length can't leak through timing.
+- 🔒 **Auth credential no longer leaks across a redirect** (GO-081) — the shared
+  authed fetch (YAML `include:` URLs and remote worker `source:`) followed
+  redirects while forwarding the credential: Go re-sends a custom auth header
+  (the `header` auth type, e.g. `X-Api-Key`) to *any* redirect target and only
+  drops `Authorization` across a different domain, so a configured server could
+  `302` a private-source token to another host. The client now strips the
+  credential (custom header, `Authorization`, `Cookie`) on any redirect that
+  leaves the original origin or downgrades https→http. Also: `safeURL` now
+  redacts URL userinfo (`https://<token>@host/…`), not just the query string, so
+  a token embedded in a URL can't surface in an error message.
+- 🐛 **Duplicate `name` in a merged config list no longer corrupts it** (GO-081)
+  — `mergeNamedLists` dropped the first of two same-named entries and emitted the
+  second twice; it now merges a repeated name in place.
+- 🐛 **Bogus "imports npm package" warning on multi-line imports** (GO-080) — the
+  worker npm-import scan read `import {` line by line, so a `import {\n … } from
+  "./_lib"` (as in the comments worker) was mis-reported as importing a package
+  literally named `"import {"`. It now inspects the `from "…"` clause across line
+  breaks: relative/builtin/URL imports are silent and a genuine bare npm
+  specifier is still flagged with its real name — even when the import spans
+  several lines (previously such an import was missed entirely).
+
+
+## [1.8.12] - 2026-07-22
+
+### Added
+- 🔗 **`strip_md_link_text`** (GO-075) — drops the `.md` from a link's visible
+  text when that text is a bare filename, at publish time, so
+  `[CONFIGURATION.md](CONFIGURATION.md)` reads as "CONFIGURATION". Only anchor
+  text that is exactly a filename is touched — prose, inline code and code
+  blocks are left alone, and the source `.md` files are never modified.
+  Complements `rewrite_md_links`. The documentation site enables it.
+- 📊 **Mermaid diagrams** (GO-073) — with `mermaid: true`, a ```` ```mermaid ````
+  fence is rewritten to a `<pre class="mermaid">` block before rendering (so the
+  diagram source passes through verbatim instead of being HTML-escaped — the
+  reason such fences previously failed to parse) and the mermaid.js runtime is
+  injected **only on pages that contain a diagram**, mirroring the page-scoped
+  KaTeX approach. Off by default: a mermaid fence stays a plain code block.
+- 🔢 **Line numbers for code highlighting** (GO-074) — `highlight_line_numbers:
+  true` prefixes every Chroma-highlighted block with line numbers (requires
+  `highlight: true`).
+
+### Changed
+- The documentation site (`docs-site.yaml`) now enables `highlight`,
+  `highlight_line_numbers` and `mermaid`, so guide and blog code blocks are
+  coloured with line numbers and their diagrams render.
+
+## [1.8.11] - 2026-07-22
+
+### Added
+- 🖼️ **AVIF output + `imagePicture` helper** (GO-070, closes #43) — the image
+  pipeline now encodes AVIF through the optional `avifenc` tool (from libavif),
+  mirroring the existing `cwebp` approach: no CGO, the binary stays static, a
+  missing tool is a descriptive error. The new `imagePicture` template helper
+  emits a `<picture>` with format fallback — one `<source>` per format
+  (avif/webp/jpeg…) in declared order, each with its own responsive `srcset`,
+  and an `<img>` fallback carrying `width`/`height` for zero CLS. A format whose
+  encoder is absent is **skipped with a warning, not a build failure**, so the
+  same template works on a machine without `avifenc`/`cwebp`. `.HTML` returns
+  ready markup; `.Sources`/`.Fallback` expose the parts. Documented in
+  `docs/IMAGES.md`.
+- 🧭 **`ssg init`** (GO-071) — scaffolds a ready-to-build project in the current
+  directory (config, a content source tree with a sample page and post, a
+  `static/` folder and a `.gitignore`) **without overwriting any existing
+  file**: every file already present is kept and reported, so it is safe to run
+  in a populated directory. Optional source name and `--domain`.
+- 🗂️ **Per-taxonomy `paginate`** (GO-072, part of #44) — a taxonomy definition
+  can set its own `paginate:` page size, overriding the global `paginate` for
+  that taxonomy's term archives (0 = fall back to the global value). A site with
+  400 tags and 12 categories can now paginate each differently. Documented in
+  `docs/TAXONOMIES.md`.
+- 🔀 **Redirects engine** (GO-063) — a `redirects:` config section now generates
+  a real Cloudflare Pages / Netlify `_redirects` file (previously it was written
+  empty). Rules support exact paths, `/old/*` splats with `:splat`, and status
+  `301`/`302`/`307`/`308`/`410`. Frontmatter `aliases:` are added as `301`s
+  automatically, and exact chains `A → B → C` are flattened to `A → C` at build
+  time (with cycle detection) so visitors take one hop, not several — the
+  chained-redirect SEO penalty. Validation warns on duplicate sources, wildcard
+  shadowing, `:splat` without a `*`, missing targets and the Cloudflare rule
+  caps, never failing the build. `alias_stubs: false` keeps only the `_redirects`
+  301s and drops the meta-refresh stub pages. Empty by default — existing sites
+  are unchanged.
+- 📥 **`ssg import redirects`** (GO-067) — converts a Next.js `redirects()` rule
+  set into a ready-to-paste `redirects:` YAML block. Reads a JSON dump
+  (`--from-json`, the reliable path) or heuristically parses a
+  `next.config.(js|ts|mjs)`. Next.js path syntax (`/:slug*`) is translated to
+  `_redirects` syntax (`/*` → `:splat`), `permanent` maps to 301/302, and any
+  entry it cannot read (conditional `has`/`missing`, template literals,
+  regex-constrained params) is reported — never silently dropped.
+- ⚡ **Cloudflare Pages Functions / Worker integration** (GO-065) — a `worker:`
+  section wires a Functions directory (or a prebuilt `_worker.js`) into the
+  build output and generates `_routes.json`, so transactional endpoints (Stripe,
+  contact/job forms, dynamic pricing, server-side conversions) live beside the
+  static site. Deploy is automatic: a `functions/` tree deploys via `wrangler
+  pages deploy`, `mode: worker` via pure-Go Direct Upload. `--watch` defaults its
+  runner to `wrangler dev` so preview and Functions run together. No JS bundler —
+  Pages builds Functions from source.
+- 🧰 **`ssg new worker <template>`** (GO-066) — scaffolds batteries-included
+  Pages Functions templates (no npm dependencies): `contact-form` (Turnstile +
+  MailChannels/Resend), `stripe-checkout` (Checkout Session + webhook signature
+  verification), `dynamic-price` (KV/API price lookup + client snippet) and
+  `conversions-proxy` (server-side Meta CAPI with hashed PII).
+- 🧱 **Configurable `_headers`** (GO-064) — a `headers:` section overrides or
+  extends the generated Cloudflare Pages header blocks per path pattern;
+  `headers_defaults_off` drops the built-in security/cache blocks. Empty config
+  reproduces the historical output byte-for-byte (locked by a regression test).
+- 📗 **Payload CMS build-time recipe** (GO-068) — documented in
+  `docs/EXTERNAL_SOURCES.md`: pull Payload's REST API into `.ExternalData` via
+  the existing `http` connector, no new adapter needed.
+
+### Fixed
+- 📝 **`docs/DEPLOYMENT.md` claimed aliases became `301`s in `_redirects`** — the
+  code only wrote meta-refresh stubs (GO-069). The redirects engine (GO-063)
+  makes the claim true; the docs now describe the real mechanism.
+- 🧩 **`layout:` in frontmatter never selected the layout** (GO-058) — the
+  lookup asked for the template named `layouts/<name>.html`, but `ParseGlob`
+  registers a template under its **base** filename, so `layouts/blog.html` is
+  parsed as `blog.html`. Nothing matched, and the page fell back to `page.html`
+  without a warning: the documented feature could not work unless the theme
+  happened to write `{{ define "layouts/blog.html" }}`. Both spellings now
+  resolve, path form first, so existing themes are unaffected.
+
+## [1.8.10] - 2026-07-21
+
+### Added
+- 📚 **`content_sources`: Markdown from more than one place** (CONTENT-002) —
+  a site is no longer limited to one `content/<source>/` tree. `content_sources`
+  lists extra flat Markdown roots (loaded recursively), each merged as pages or
+  posts and optionally filed under one category, which is created when the
+  loaded metadata does not define it. Sources join the site before finalize, so
+  they get the same URL, permalink, i18n, taxonomy and collision treatment as
+  native content; watch mode watches them; the image pipeline resolves images
+  beside them. With at least one extra source the primary `source` — and its
+  `metadata.json` — becomes optional, so a site can consist of a `docs/` folder
+  alone. CLI: repeatable `--content-source=DIR`. Empty by default, so
+  single-source builds are unchanged.
+- 🎨 **Bundled `ssgtheme` documentation theme** — cards, guide layout, archive
+  and post templates, a colour-scheme switch, an optional hero photograph
+  rendered through SSG's own image pipeline, and shared chrome in `partials/`.
+  Design tokens mirror the [Tradik design system](https://designstyles.tradik.com/)
+  1:1; all text meets WCAG 2.2 AA and body text AAA in both schemes. The
+  repository's own docs build with it via `make site` / `make site-watch`.
+- 🔗 **`link_rewrites`** (LINK-002) — maps an href prefix in content to a
+  replacement, so documentation links to repository files the site never
+  publishes (`../examples/`, a sample config) point at the repository instead
+  of 404ing. Longest matching prefix wins.
+- 🔤 **`auto_excerpt`** (GO-057) — derives a missing excerpt from the content's
+  opening paragraph (capped at 200 characters on a word boundary, skipping
+  headings, fenced code, tables, quotes, images and Liquid guards), so cards,
+  feeds and meta descriptions are not blank for documents written without a
+  `## Excerpt` section. Off by default: it changes those texts on an existing
+  site.
+- ➗ **Arithmetic template helpers `add` / `sub` / `mul` / `div`** (TPL-003) —
+  Go templates have none, so a theme could not split a list into columns or
+  compute "page N of M" without preprocessing in Go. Integer operands give
+  integer results (`div 7 2` → `3`); a float operand gives a float. Division by
+  zero and non-numeric arguments are template errors, not silent infinities.
+- 🔣 **Site variables reach shortcode templates** (issue #37) — `{{$.Vars.key}}`
+  / `{{.Vars.key}}` now resolve inside a shortcode template, the same spelling
+  page templates use. Previously the template context was the `Shortcode`
+  struct alone, so `$.Vars.anything` was a template error that silently removed
+  the whole shortcode from the page while the build still exited 0.
+- 🚨 **`shortcode_errors` / `--shortcode-errors=drop|keep|strict`** (issue #37)
+  — chooses what a shortcode that fails to render leaves behind. `drop`
+  (default) keeps today's behaviour, so existing sites build byte-identically.
+  `keep` leaves the shortcode's raw source (`{{promo}}`, `[promo a="b"]`) in
+  the page, making the gap visible — a page that quietly lost its payment
+  widget looks fine, one showing `[stripe_form]` does not — and unlike an HTML
+  comment it survives minification. `strict` additionally fails the build after
+  the render step, listing every shortcode that failed.
+
+- 🚀 **Documentation site published to Cloudflare Pages** — `ssg.tradik.com` is
+  built by `.github/workflows/docs-site.yml` from `docs/` via `content_sources`,
+  using the `ssg` binary from the commit being deployed. `shortcode_errors:
+  strict` plus `--check-links=strict` gate the upload, so a broken shortcode or
+  a dead internal link fails the run instead of publishing a hole. The workflow
+  creates the Pages project and attaches the custom domain on its first run, so
+  setup is two repository secrets and nothing in the dashboard.
+
+### Removed
+- 🧹 **Jekyll GitHub Pages workflow** — it built the whole repository root as a
+  Jekyll site and had been failing on every push; the documentation site is now
+  built by SSG itself. The `{% raw %}` guards that existed only for Jekyll are
+  gone from `docs/`, where they had started leaking into rendered excerpts.
+
+### Fixed
+- 🔗 **`.md` links with an anchor were never rewritten** (GO-056) — the rewrite
+  pattern required the href to *end* in `.md`, so `CONFIGURATION.md#section`
+  silently shipped as a dead link to a file that does not exist in the output,
+  while the same link without an anchor worked. Anchors and query strings are
+  now carried across to the rewritten URL.
+- 📄 **Plain Markdown files were untitled** (GO-057) — a file without
+  frontmatter had no title, so it appeared blank in every listing, navigation
+  menu and `<title>`. The title now falls back to the document's own first
+  heading (ATX or Setext). Frontmatter still wins.
+- 🧩 **`partials/` was documented but never parsed** (DOC-014) — the theme
+  structure in `docs/TEMPLATES.md` has always listed `partials/`, yet only the
+  theme root and `layouts/` were parsed, so defines placed there were silently
+  unavailable. `partials/*.html` now joins the same template set.
+
+### Changed
+- 🩺 **A misconfigured build says what is wrong** (UX-002) — an unknown YAML key
+  is reported by name and ignored instead of vanishing (a config written for a
+  newer ssg no longer looks like a missing value), and missing required
+  settings are named along with the config file that was read and what it
+  provided, instead of printing usage alone.
+
+### Documentation
+- 📘 **Template loading and sharing** (DOC-014) — `docs/TEMPLATES.md` now states
+  which directories are parsed into the template set, how a theme shares its
+  chrome through `partials/` + `dict`, what `base.html` actually is, and which
+  theme directories are copied to the output.
+- 📘 **Extra content sources and inferred values** — `docs/CONTENT.md` documents
+  `content_sources` and the title/excerpt derivation rules; `docs/CONFIGURATION.md`
+  documents `content_sources`, `link_rewrites`, `auto_excerpt` and the two new
+  diagnostics; `docs/TEMPLATE_HELPERS.md` documents the arithmetic helpers.
+- 📘 **Shortcode template scope** (issue #37) — `docs/TEMPLATES.md` now states
+  what a shortcode template can see (`.Name`…`.Tags`, `.Data`, `.Attrs`,
+  `.InnerContent`, `.Vars`) and what it cannot (`.Page`, `.Site`, `.Posts` —
+  one instance may render on many pages), with the failure modes table.
+
+## [1.8.9] - 2026-07-21
+
+### Added
+- 🗂️ **Watch-runner config paths** (GO-054) — the runner's own config file no
+  longer has to sit in the project root: `--wrangler-config=FILE` and
+  `--workerd-config=FILE` point the emulator at a config kept anywhere (e.g.
+  `deploy/wrangler.toml`) and select that runner in the process, so
+  `--wrangler`/`--workerd` become optional and flag order does not matter.
+  `--watch-runner-config=FILE` is the runner-agnostic spelling for use with a
+  custom `--watch-runner`, and `watch_runner_config` is the config-file key.
+  `wrangler` and custom runners receive it as `--config <path>`, `workerd` as
+  its positional config argument. A missing file warns instead of failing, and
+  the spawned command line is now echoed on start.
+- 📁 **Watch-runner working directory** (issue #35) — `--wrangler-dir=DIR`,
+  `--workerd-dir=DIR` and `--watch-runner-dir=DIR` (config key
+  `watch_runner_dir`) start the emulator in another directory, so a monorepo
+  Worker in `booking/apps/api/` no longer fails with *"Missing entry-point to
+  Worker script or to assets directory"* when `ssg` runs from the repo root. A
+  relative runner config is anchored to ssg's own working directory first, so
+  `--wrangler-dir` and `--wrangler-config` combine; a non-existent directory
+  aborts the runner without killing the build.
+- 🔤 **Environment variables in `external_sources`** (GO-055, issue #35) —
+  `url`, `headers` and `query` now expand `$NAME`/`${NAME}` **inline**
+  (`url: "$MY_API_BASE/api/accommodations"`), so one config switches between
+  production and a local Worker instead of being generated per environment.
+  `$$` is a literal `$`, and a `$` not followed by a variable name stays
+  literal. `dsn`/`auth` keep the stricter whole-value form.
+- 🧯 **Optional sources survive unset variables** (issue #35) — a source with
+  `required: false` whose config references an unset (or empty) variable is now
+  **skipped with a warning** instead of aborting the build, so a shared config
+  can carry env-driven sources not everyone sets up. Required sources still
+  fail, naming the variable.
+- 🔓 **`allow_http` / `allow_private` in `external_sources.defaults`**
+  (issue #35) — previously per-source only, and silently ignored under
+  `defaults`. A source can still override either. The rejection message now
+  says where the key may live.
+
+### Changed
+- 🎯 **`allowed_hosts` entries may carry a port** (issue #35) — `127.0.0.1:8787`
+  now matches only that port instead of being rejected outright; entries
+  without a port keep matching the host on any port. The error message states
+  the rule.
+
+### Security
+- 🛡️ **Image decode format allowlist** (SEC-013) — `image.Decode` dispatches on
+  magic bytes, and importing `disintegration/imaging` transitively registers the
+  TIFF/BMP decoders, so a crafted TIFF renamed `photo.png` could reach imaging's
+  transforms — the path that panics in CVE-2023-36308 (GHSA-q7pp-wcgr-pffx, no
+  fixed upstream release). Decoded formats are now checked against
+  jpeg/png/gif/webp before any pixel work, in both the image processor and
+  `imageInfo`. `govulncheck` reported the vulnerable symbol as uncalled; this
+  removes the residual path rather than relying on that.
+
+## [1.8.8] - 2026-07-20
+
+### Added
+- ⚡ **Watch Runner Support** — added support for spawning background watch runners (emulators) alongside the file watch loop: `--wrangler` (executes `npx wrangler dev`), `--workerd` (executes `workerd serve`), or `--watch-runner="cmd"` (runs any custom command). Automatically coordinates execution and handles process output/cleanup.
+
+### Fixed
+- 🗂️ **Enriched YAML parsing errors** (issue #31) — if a YAML data file under `data/` fails to parse, `ssg` now scans the file for space-preceded hash characters (` #`) and prints precise line-number diagnostic hints to help debug unquoted comment issues.
+- 🍺 **Homebrew tap was never updated after v1.7.14** (OPS-012) — the CI step
+  authenticated to `spagu/homebrew-tap` with `AUTHORIZATION: bearer <PAT>`,
+  which GitHub's git-over-HTTPS endpoint rejects with 401 (it expects Basic
+  auth; that an invalid header also breaks *anonymous* clones of a public repo
+  is what made this look like an expired token). Now uses
+  `basic base64(x-access-token:<PAT>)`, the same form `actions/checkout` uses.
+- 🔊 **Silent tap failures are now loud** (OPS-012) — tap publishing moved out
+  of the `release` job into `.github/workflows/homebrew.yml`, which **fails**
+  on a missing token, a failed clone/push, or missing checksums, and writes the
+  outcome to the job summary. Previously every failure path was
+  `::warning::` + `exit 0`, so releases from v1.7.15 through v1.8.7 reported
+  success while Homebrew users stayed on 1.7.14 for a week.
+
+### Added
+- 🔁 **Manually runnable tap publish** (OPS-012) — `.github/workflows/homebrew.yml`
+  accepts `workflow_dispatch` with a version input, so a failed tap publish is
+  repaired by re-running that one workflow instead of cutting a new tag.
+  Re-running the *release* is not a fix: it rebuilds the binaries and changes
+  their published SHA-256 sums.
+
+### Changed
+- 🔖 `scripts/sync-version.sh` now syncs and drift-checks the **download URLs**
+  in `packaging/brew/ssg.rb`, not just its `version` field — the old check
+  passed while the file claimed `version "1.8.6"` with v1.7.13 URLs.
+  Checksums stay owned by the workflow; they exist only after a release builds.
+
+## [1.8.7] - 2026-07-15
+
+Completion of 15 unfinished-feature findings from the 2026-07-15 audit round
+(GO-053…GO-062, DOC-013…DOC-016, FE-011): half-wired flags, silent
+degradations, and documentation that promised more than the code delivered.
+
+### Added
+- 📦 **Embedded starter themes** (DOC-013) — `simple` and `krowy` are now
+  compiled into the binary with `go:embed` and extracted (HTML **and** assets)
+  on first use, so `ssg my-blog simple example.com` finally matches the README
+  Quick Start without a repository checkout. Unknown themes still scaffold the
+  generic starter.
+- 🧹 **Image-cache garbage collection** (GO-057) — `--images-gc`
+  (`images_gc: true`) prunes cache entries the finished build no longer
+  references; `--images-gc-dry` reports what it would reclaim. Runs after
+  generation and never fails the build.
+- 🔀 **HTTP external-source pagination** (GO-062) — `pagination:` per source
+  with `mode: page` (incrementing query param) or `mode: link` (`Link
+  rel="next"`), `per_page`, `start_page`, and a `max_pages` guard (default 10,
+  max 1000). Pages aggregate into one JSON array; hitting the cap warns.
+- 💬 **Movable Type comment import** (GO-058) — `movable_type.include_comments:
+  true` imports visible (`comment_visible = 1`) comments into each entry's
+  `.Extra["comments"]`. Previously the option hard-failed as "deferred".
+
+### Changed
+- 🧩 **Every value flag accepts both `--flag=value` and `--flag value`**
+  (GO-053) — the space form used to leak silently into positional arguments, so
+  `--deploy cloudflare` quietly skipped the deploy. Both spellings now share one
+  parser; unexpected positionals warn, and a value flag with no value warns.
+- 🎛️ **Alt-engine helper parity** (GO-054) — pongo2 exposes the SSG FuncMap as
+  real filters and Handlebars as real helpers (reflection adapter); Mustache
+  reports its logic-less limitation once. Helpers an engine cannot express fail
+  loudly instead of the old passthrough/ignore/`recover` silence. New support
+  matrix in `docs/TEMPLATES.md`.
+- 🔢 **Fenced `` ```math `` blocks render** (GO-055) — they are rewritten to
+  `$$…$$` display math before conversion, so detection and KaTeX injection
+  agree. Docs corrected: inline `\(…\)` is not supported.
+- 🔊 **Loud TLS/HTTP-3 degradations** (GO-056) — `--http3` without TLS, and
+  incomplete TLS pairs (`--tls-auto` without `--tls-domain`, cert without key),
+  now warn instead of silently serving plain HTTP.
+- ⚙️ **`seo_off` honoured** (GO-059) — the deprecated config key now forces SEO
+  off with a deprecation warning instead of being a silent no-op.
+- 🧰 **`getExternal`/`getExternalMeta` work in shortcode templates** (DOC-016).
+
+### Fixed
+- 🔒 **Generic scaffold no longer leaks to Google Fonts** (FE-011) — the
+  fallback template used a system font stack; no external CDN, neutral English
+  copy, `lang="en"` (was Polish text with a `fonts.googleapis.com` link,
+  contradicting the project's own privacy rule).
+- 🗺️ **Cloudflare deploy error names the real flag** (GO-060) —
+  `--deploy-project` instead of the non-existent `--cf-project`.
+- 📖 **Docs/CLI discoverability** (DOC-014/DOC-015) — `--feed`, `--toc`,
+  `--highlight`, `--paginate`, `--languages`, `--outputs`, `--check-links` and
+  more are now in `--help` and the man page; README deploy table fixes
+  (`VERCEL_ORG_ID` optional, SFTP needs `SSH_USERNAME`); Action `version`
+  output documented.
+
+### Removed
+- 🧟 **13 dead legacy transform helpers** (GO-061) — the pre-PERF-005 tree-walk
+  functions (`minifyOutput`, `injectSEO`, `convertToRelativeLinks`, … and
+  one-shot `contentSignature`) were reachable only from tests; removed, with
+  their tests re-pointed at the live string transforms.
+
+## [1.8.6] - 2026-07-15
+
+Fixes for the two open WordPress-migration issues.
+
+### Fixed
+- 🔗 **Heading anchor ids derive from visible text** (#26) — a heading
+  containing a Markdown link leaked the href into its auto id
+  (`### [Ian Zane](/authors/ian-zane/) — Generalist` →
+  `id="ian-zaneauthorsian-zane--generalist"`). Link/image-bearing headings now
+  get `slugify(visible text)` (`id="ian-zane-generalist"`), de-duplicated with
+  `-N` suffixes; the TOC uses the same ids. **Backward compatible:** plain
+  headings keep goldmark's ids bit-for-bit, so existing anchors never change —
+  only the malformed link-bearing ids do.
+- 🏷️ **Numeric WordPress tag ids resolve via metadata.json** (#27) —
+  `tags: [1691]` produced a raw `/tag/1691/` archive even when the export's
+  `tags` collection carried the term. Numeric tag values now resolve to the
+  term name (like `author:` resolves via `users`), and those id-resolved tags
+  archive under the export's canonical slug. **Backward compatible:**
+  hand-written tag names keep their historical derived slugs, and unknown
+  ids/plain names pass through unchanged — pre-1.8.6 tag URLs never move.
+
+## [1.8.5] - 2026-07-15
+
+Author-archive safety, define-shell template fallback and Hugo-compatible
+string helpers (GO-050/GO-051).
+
+### Fixed
+- 🛡️ **Explicit content wins over auto archives** — a page/post/alias that
+  already owns `/author/<slug>/`, `/category/…`, `/tag/…` or `/series/…` used
+  to be **silently overwritten** by the auto-generated archive (archives render
+  last). The archive is now skipped with a build warning, and suppressed
+  archives stay out of the sitemap and slug maps used for feeds.
+- 🛡️ **Define-shell templates no longer render blank pages** — copying
+  `category.html` to `author.html` in a `{{define}}`-based theme left the
+  define name unchanged, and the whitespace-only file-level template rendered
+  a **blank archive**. Shells are now treated as absent (the category.html
+  fallback applies, matching pre-1.8 behaviour) and the build prints a warning
+  telling the author to rename the define. Applies to every template executed
+  by file name (index/post/page/category/tag/series/author/taxonomy*).
+
+### Added
+- 🖼️ **Non-destructive WebP mode** — `webp_keep_original: true`
+  (`--webp-keep-original`, action input `webp-keep-original`) emits each
+  `.webp` NEXT TO its original instead of replacing it, so themes with
+  hardcoded `.png`/`.jpg` references (favicons, logos, `og:image`) keep
+  working while rewritten `<img>` references serve WebP. The default remains
+  the historical replace-in-place behaviour.
+- 🎬 **GitHub Action traceability** — the resolved ssg version is logged on
+  every run (a `::notice::` when `version: latest` was used) and exposed as
+  the `version` output; docs now recommend pinning `version:` for production
+  deploys.
+- 🧩 `hasPrefix` / `hasSuffix` template helpers — Hugo-compatible aliases of
+  `startsWith` / `endsWith` (also in shortcode templates).
+- 📖 Author archives documented in `docs/CONTENT.md`: the `users` block in
+  `metadata.json`, `author:` accepting ID/name/slug, posts-only listings, the
+  `author.html` → `category.html` fallback, the reserved `author` path and the
+  new collision rule. (Migrating the author archive onto the generic taxonomy
+  registry remains a documented deferred item.)
+
+## [1.8.4] - 2026-07-14
+
+Full internationalisation (audit/i18n-feature.md), dynamic taxonomies
+(audit/taxonomies-feature.md), unified external sources
+(audit/ssg-external-sources-implementation-plan.md) and built-in server access
+control. Everything is opt-in; builds using none of it are byte-for-byte
+unchanged.
+
+### Added
+- 🔌 **External sources — one registry** (`external_sources:`) exposing every
+  source as `.ExternalData.<name>` (+ `.ExternalDataMeta`, `getExternal`/
+  `getExternalMeta` helpers) with deterministic ordering, bounded concurrency,
+  required/optional semantics, a unified error model (source/type/stage, never
+  credentials) and env-only secrets (`"$VAR"`; literals rejected). `.Data`
+  unchanged. Guide: `docs/EXTERNAL_SOURCES.md` + `examples/external-sources/`.
+- 🔌 **File connector** — YAML/JSON/TOML/CSV/XML with transport-independent
+  parsers, template-friendly XML mapping, size caps, sha256 checksums and the
+  `transform.select` dot-path unwrapper.
+- 🔌 **HTTP connector** — hardened client (HTTPS default, host allowlist with
+  wildcards, private/loopback IPs blocked at dial time → DNS-rebinding safe,
+  5-redirect cap with re-validation, response size limits, content-type
+  validation, query-free identifiers), bearer/basic/header auth, retries with
+  backoff on 5xx/429; shared disk cache (`<hash>.body` + `<hash>.meta.json`,
+  TTL + stale-if-error, corruption eviction), offline mode with
+  `fail_on_cache_miss`. CLI: `--offline`, `--refresh-external-sources`,
+  `--clear-external-cache`, `--external-source=NAME`.
+- 🔌 **SQL connector** — MySQL/MariaDB (go-sql-driver), PostgreSQL (pgx),
+  SQLite (pure-Go modernc.org/sqlite); queries only in config, statically
+  validated read-only (single SELECT/WITH statement), per-query `max_rows`
+  (exceeding errors instead of truncating), query timeouts, DSNs scrubbed from
+  errors.
+- 🔌 **CMS adapters** — WordPress (posts/pages/custom post types, users,
+  taxonomies → dynamic-taxonomy map, custom fields → `.Extra`, media), Drupal
+  8-11 (nodes, bodies, vocabularies, users, `path_alias` preserved as links,
+  dynamic `node__field_*` discovery) and Movable Type (released entries/pages,
+  authors, categories, tags, assets). `mode: content` merges imports into the
+  site before finalize (native URL/translation/taxonomy/collision treatment);
+  `mode: data` feeds only `.ExternalData`.
+- 🔒 **Server access control** (config-only) — `server_auth: basic` (users as
+  `login:$PASS_ENV`, constant-time compare) or `jwt` (HS256 bearer tokens,
+  single-algorithm by construction, exp/nbf honoured), `ip_allowlist`/
+  `ip_blocklist` (IPs/CIDRs, checked before anything else), `rate_limit`/
+  `rate_burst` per-IP token bucket (429 + Retry-After). X-Forwarded-For is
+  deliberately not trusted.
+- 🏷️ **Dynamic taxonomies** — declare any number of classifications in
+  `taxonomies:`; `category`/`tag`/`series` are auto-registered and keep their
+  legacy URLs, templates and feeds. Per-taxonomy config: `label/singular/path/
+  field/multiple/archive/feed/sitemap/template/term_template/sort/
+  case_sensitive/slugify/generate_empty`; names validated, paths unique,
+  `author`/`page`/language codes reserved.
+- 🏷️ **Frontmatter sources with priority** — generic `taxonomies:` map >
+  configured direct field > legacy fields; multi-value merge + dedupe,
+  single-value conflicts fail the build; generic `tag`/`series` values sync
+  back onto the legacy pipelines.
+- 🏷️ **Term normalization** — whitespace-collapsed, Unicode case-insensitive
+  identity (opt-out via `case_sensitive`), first-seen display name, slug
+  collisions and archive-vs-page URL collisions fail the build.
+- 🏷️ **Term metadata** — `data/taxonomies/<name>.yaml`: display name, slug,
+  description, `weight` (for `sort: weight`), free-form `data`;
+  `generate_empty` renders metadata-only terms.
+- 🏷️ **Archives** — `/technology/` index + `/technology/go/` term pages with
+  template fallback chains (`taxonomy-<name>.html` → `taxonomy.html` →
+  `archive.html` → `category.html`; `-term` variants for terms), pagination
+  (`/page/N/`), i18n language buckets and prefixes.
+- 🏷️ **Integrations** — sitemap entries (`sitemap: true`), Atom feed per term
+  (`feed: true`), `taxonomies` map in the search index and JSON output.
+- 🏷️ **Template helpers** — `taxonomies`, `taxonomy`, `taxonomyTerms`,
+  `pageTerms`, `termURL`, `hasTerm`, `pagesByTerm`.
+- 🏷️ Example project `examples/dynamic-taxonomies/` + guide `docs/TAXONOMIES.md`.
+- 🌍 **i18n core** — expanded language config (`code/locale/name/timezone`) next
+  to the legacy compact list; startup validation (duplicate codes, unknown
+  default, bad timezones, policy values, fallback cycles) fails the build with
+  descriptive errors. `translation_key` frontmatter (or a deterministic
+  path-derived key) groups content variants; duplicates fail/warn per policy;
+  output-path collisions (pages + aliases) fail the build.
+- 🌍 **Language-aware routing** — configurable `prefix_default_language`;
+  prefix logic centralised in `internal/i18n.Prefix` and applied to pages,
+  posts, aliases, home pages, pagination, feeds, search indexes and JSON output.
+- 🌍 **Translation dictionaries** — YAML/JSON catalogs in `i18n/` with nested
+  keys, named `{{placeholder}}` interpolation, per-language fallback chains and
+  `missing_translation` policies (warn default, error/empty/fallback).
+- 🌍 **Template helpers** — `t`, `hasTranslation`, `translationURL`,
+  `languageURL`, `localizeDate`; context: `.Site.Language/.Languages/
+  .DefaultLanguage/.LanguagePages/.LanguagePosts`, `.Page.Lang/.Locale/
+  .TranslationKey/.Translations` (with `IsCurrent`).
+- 🌍 **SEO** — dynamic `<html lang>`, per-translation canonical, hreflang with
+  `x-default` (falling back to the default-language root when a group has no
+  default variant), sitemap XHTML alternates, `og:locale`+`og:locale:alternate`,
+  JSON-LD `inLanguage`.
+- 🌍 **Language-aware `.md` links (§13)** — the rewriter resolves the
+  active-language translation, preserves explicit `file.<lang>.md` links,
+  applies the `content_fallback` chain only when enabled, warns once per
+  missing translation, and is deterministic (the previous flat map picked a
+  random language for translated filenames).
+- 🌍 Example project `examples/multilingual-site/` + full guide `docs/I18N.md`.
+
+### Deferred (documented, follow-up phases)
+- Language-scoped LEGACY taxonomy pages (categories/tags/authors/series remain
+  cross-language; custom taxonomies ARE language-scoped), language selector +
+  `t` labels in the built-in themes (output `<html lang>` is corrected at
+  render time), localized month names in `localizeDate`, plural rules.
+- Taxonomies: hierarchical terms, term aliases/redirects, translated term
+  names, custom `path`/`template` overrides for the built-in
+  category/tag/series pipelines, author archive on the generic registry.
+- External sources (phase 7): Ghost/Strapi/Contentful/Sanity/Notion/Airtable/
+  Google Sheets/GitHub/GitLab adapters, Drupal 7, Movable Type comments,
+  direct-URL helpers (`getJSON`/`getCSV`/`getXML`), file-source `watch`,
+  example CMS projects with seed scripts; MDDB on the connector interface.
+- Server auth: SSO and LDAP (deliberately out of scope — too heavy for the
+  built-in server), RS256/JWKS token verification.
+
+## [1.8.3] - 2026-07-14
+
+Template query language, SCSS, accessibility and a performance batch
+(PERF-004/005/007/008). All new features are opt-in; performance changes keep
+output byte-equivalent for generated pages.
+
+### Added
+- ✨ **Template collection & conditional helpers** — Go templates can now query
+  content in pipelines (collection is always the last argument):
+  `where` `filter` (eq/ne/gt/ge/lt/le/contains/notContains/in/notIn) `sort`
+  `first` `last` `limit` `offset` `groupBy` `uniq` `uniqBy` `reverse` `slice`
+  `pluck` `indexBy`; conditionals `in` `notIn` `contains` `startsWith`
+  `endsWith` `matches` (cached RE2) `isNil` `isEmpty` `ternary`; content
+  wrappers `latest` `published` `byTag` `byCategory` `byAuthor` `related`.
+  Generic over structs/pointers/maps via reflection, never mutate input, never
+  panic — invalid usage fails the render with a descriptive error. Safe subset
+  also exposed to shortcode templates. Note: registering `slice` overrides Go's
+  builtin sub-slicing. Full reference: `docs/TEMPLATE_HELPERS.md`.
+- 🎨 **SCSS/Sass compilation (ASSET-003)** — `--scss` / `scss: true` compiles
+  `*.scss` → `*.css` via the optional dart-sass CLI before bundling/minify
+  (partials `_*.scss` resolve via `@use`; all `.scss` sources are removed from
+  the output). Missing binary skips the step with a warning (cwebp philosophy);
+  `--sass-binary=` overrides PATH lookup; paths hardened per SEC-011.
+- 🖼️ **Image processing in templates** (`audit/images-processing-feature.md`) —
+  `imageInfo`, `imageResize` (scale/fit_width/fit_height/fit/fill), `imageCrop`
+  (explicit rect, 9 anchors + compass aliases, focal points), `imageFilter`
+  (grayscale/invert/sepia/brightness/contrast/saturation/gamma/blur/sharpen/
+  opacity), `imageProcess` (ordered pipeline) and `imageSrcSet` (responsive
+  variants). Deterministic content-addressed cache (`.ssg-cache/images/`) with
+  atomic publishing into `processed_images/`; EXIF orientation normalized and
+  metadata stripped; path traversal/symlink escapes rejected; decompression-bomb
+  limits; animated GIFs error instead of silently flattening. JPEG/PNG pure Go
+  (disintegration/imaging); WebP via the optional cwebp tool. Available in theme
+  AND shortcode templates. Reference: `docs/IMAGES.md`.
+- ♿ **Skip-links (FE-004, WCAG 2.2 2.4.1)** — every theme (krowy, simple, imd,
+  engine examples, ananke, embedded defaults) gains a visually-hidden
+  "Skip to content" link before the navigation plus `:focus-visible` outlines.
+
+### Performance
+- ⚡ **Markdown render cache (PERF-004)** — each unique markdown body is
+  converted by goldmark exactly once per build; feeds, search index, JSON
+  output and both page-format paths reuse the memo (verified by a
+  conversion-counter test).
+- ⚡ **Single-write HTML pipeline (PERF-005)** — SEO block, KaTeX injection,
+  relative links, prettify and HTML minification are applied in memory at
+  render time, so each page is written once instead of being re-read/re-written
+  by up to 8 tree-walks. Only genuinely global passes remain (bundling, CSS/JS
+  minify, fingerprint, link check). Behaviour note: HTML copied verbatim from
+  `static/` is no longer post-processed (matching its documented contract).
+- ⚡ **Co-located assets only where referenced (PERF-007)** — a post's category
+  directory assets are copied only into posts that actually reference them by
+  filename, eliminating O(posts × assets) duplication and output-dir bloat.
+- ⚡ **Watch-mode signature cache (PERF-008)** — the content signature streams
+  file hashes (no whole-file loads) and caches them per path keyed by
+  size+mtime, so a change event re-hashes only what changed; touch-only events
+  still skip rebuilds (PLAT-006 semantics preserved).
+
+## [1.8.2] - 2026-07-11
+
+### Changed
+- ⚠️ **SEO injection is now opt-in (`--seo` / `seo: true`)** — the generator-level
+  OpenGraph/Twitter/JSON-LD partial is **off by default**, so `ssg` never rewrites your
+  rendered `<head>` unless you ask. This aligns SEO with the project's opt-in philosophy
+  (it *modifies* your HTML, unlike sitemap/robots which write separate files). **Behaviour
+  change:** sites that relied on automatic OG tags must now pass `--seo`. The legacy
+  `--seo-off` flag and `seo_off` config key are still accepted as deprecated no-ops.
+
+### Docs
+- 📚 **Greatly expanded README** for both humans and AI agents: a new "Project & Content
+  Structure" section (annotated directory tree, `pages/` vs `posts/<subfolder>/` rules,
+  `metadata.json` shape, minimal end-to-end example), a complete **Frontmatter Reference**
+  table, richer argument/path-resolution docs, and a "Common Recipes (task → command)"
+  cheat-sheet.
+
+## [1.8.1] - 2026-07-10
+
+Server-hardening and packaging release. The built-in server gains optional public-facing
+capabilities (TLS, HTTP/2, HTTP/3, compression, limits); the build gains extra archive
+formats. Every addition is opt-in; default behaviour (plain HTTP dev server, ZIP) is unchanged.
+
+### Added
+- ✨ **Optional server TLS** — `--tls-cert=`/`--tls-key=` (manual PEM) or `--tls-auto` +
+  `--tls-domain=` (automatic Let's Encrypt via `autocert`). HTTP/2 is negotiated
+  automatically over TLS (ALPN).
+- ✨ **HTTP/3 (QUIC)** — `--http3` serves HTTP/3 alongside HTTP/2 and advertises it via
+  `Alt-Svc` (requires TLS; `github.com/quic-go/quic-go/http3`).
+- ✨ **Server hardening middlewares** — `--gzip` (content compression), security headers
+  (`X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, HSTS under TLS),
+  cache-control (immutable for fingerprinted assets, `no-cache` for HTML), `--max-conns=N`
+  (connection cap via `netutil.LimitListener`), `--mem-limit=SIZE` (runtime GC soft limit).
+- ✨ **tar.gz / tar.xz archive output** — `--targz` and `--tarxz` alongside `--zip`
+  (`archive/tar` + `compress/gzip`; `github.com/ulikunitz/xz`).
+- ✨ **HTML sanitization (FE-005)** — `--sanitize-html` / `sanitize_html: true` runs raw
+  HTML in markdown through the bluemonday UGC policy.
+- ✨ **Timezone-aware dates (I18N-001)** — `timezone: Europe/Warsaw` / `--timezone=` renders
+  content dates (permalink `:year/:month/:day` tokens, `Date`/`Modified` template context)
+  in an IANA zone; `language_timezones:` overrides it per content language. The IANA db is
+  embedded (`time/tzdata`) so static/Windows builds resolve zones. Empty = previous
+  behaviour (no conversion).
+- 🚀 **Native deploy (`--deploy=`)** — SSG publishes the output tree itself, no external
+  CLI. Providers: **Cloudflare Pages** (Direct Upload API — blake3 manifest, upload only
+  what changed), **GitHub Pages** (force-push to `gh-pages`), **Netlify** (digest deploy
+  API), **Vercel** (files + deployments API), **FTP**, and **SFTP/SSH** (host-key verified
+  against `known_hosts`). Flags `--deploy-project`/`--deploy-branch`/`--deploy-target`; all
+  secrets come from the environment, never the config file. Runs after build + webp/zip.
+- 🧱 **ARM improvements** — `linux/arm/v7` (GOARM=7) release binary + Docker platform;
+  multi-arch cross-compile via buildx `TARGETARCH`/`TARGETVARIANT`.
+- 🔤 **Template engines documented as shipping** — README/CLI now correctly list pongo2,
+  mustache and handlebars as supported (they render the theme's own templates; GO-007).
+
+### Changed
+- ♻️ **Flag parsing refactor** — boolean and simple string `--flag=value` options are now
+  table-driven; the value switch is split into focused helpers (resolves SonarCloud
+  S1479/S3776/S1192, keeps each function under the complexity budget).
+- ♻️ **`build()` split** into `runWebP` / `runArchives` / `runDeploy` helpers.
+
+### Fixed
+- 🔧 **OPS-009** — homebrew tap push uses an `http.extraheader` auth header instead of
+  embedding the token in the remote URL.
+- 🔧 **OPS-011** — CI/Docker workflows add a `concurrency:` group (cancel in-progress for
+  branches, never for tags).
+- 🔧 **OPS-013** — pinned tool versions (golangci-lint v2.12.2, govulncheck v1.3.0).
+- 🔧 **FE-002** — theme muted-text colours raised to WCAG 2.2 AA (`krowy` 5.72:1,
+  `simple` 5.65:1).
+- 🔧 **FE-006 / FE-008** — OpenGraph/meta locale corrected to `en_US` / `en-US`; schema
+  description de-hardcoded to `{{.Domain}}`.
+- 🔒 **SonarCloud S5445** — the autocert cache (Let's Encrypt private keys) no longer falls
+  back to the shared, world-predictable system temp dir; it uses per-user cache/home paths.
+- 🔒 **SEC-014** — `--sanitize-html` now holds on every render path: alt engines
+  (pongo2/mustache/handlebars), full-content feeds and raw `{{.Content}}` (plain string →
+  auto-escape when the sanitizer is on). Trusted shortcode output ([youtube]/[embed],
+  custom shortcodes) survives sanitization via token protection (GO-037); hostile iframes
+  in content do not.
+- 🔒 **SEC-015** — generator SEO meta tags HTML-escape attribute values (Go `%q` allowed
+  attribute injection through titles/descriptions).
+- 🔧 **GO-033** — `Alt-Svc` (HTTP/3 advertisement) is built from the configured port instead
+  of quic-go's `SetQUICHeaders` (which needs a live listener); present from the first TCP
+  response; `TestAltSvcMiddleware` green again.
+- 🔧 **GO-012/019/020/034** — server: `--gzip` no longer corrupts Range requests;
+  `--max-conns` enforced in `--tls-auto` mode too; `--tls-domain=a.com,b.com` split into a
+  proper autocert whitelist; autocert `:80` bind failures logged; IPv6 `--host` handled via
+  `net.JoinHostPort`.
+- 🔧 **GO-013/014/015/030/031/041 (mddb)** — `--mddb-lang` actually filters (HTTP body +
+  client-side; gRPC proto has no lang field → client-side); single-element
+  tags/categories/aliases no longer dropped; pagination survives a missing/malformed
+  `X-Total-Count` and server-clamped page sizes; gRPC string IDs normalized (`asInt`);
+  `AddedAt==0` no longer becomes 1970-01-01 and dates are pinned UTC (reproducible URLs);
+  checksum query URL-escaped.
+- 🔧 **GO-016/017/032/038 (webp)** — uppercase extensions (`Photo.JPG`) convert correctly;
+  originals deleted only when the .webp exists; reference rewriting is scoped to local
+  attribute/`url()` refs with existing targets (CDN URLs and prose untouched, `.HTML`/`.CSS`
+  processed); srcset includes the full-size original (RIFF-header width parser, no new
+  deps); `data-src` and self-closing `<img/>` are safe.
+- 🔧 **GO-021/022/023/037 (generator)** — feed summaries truncate by runes (valid UTF-8);
+  `--minify-html` preserves `<pre>/<textarea>/<script>/<style>`; a post whose `link` has no
+  path no longer overwrites the homepage; `--sanitize-html` no longer deletes video embeds.
+- 🔧 **GO-024/025/035/036/018/046 (CLI)** — ZIP/tar output `Close` errors propagate (no more
+  corrupt archives reported as success); watch mode no longer loses edits made during a
+  rebuild; symlinks archive correctly as symlink entries; space-separated flag values are
+  not miscounted as positional args; `--mddb-watch` (boolean form) works; vacuous
+  `handleConfigSkip` removed.
+- 🔧 **GO-026/027/039 (parser)** — frontmatter delimiter tolerant of trailing spaces/CRLF;
+  code-fence tracking (no more eaten `# comment` lines or hijacked `## Content-…` headings);
+  10 MB line buffer (base64 data-URIs parse); unclosed frontmatter is a clear error, not a
+  silent empty page.
+- 🔧 **GO-028/029/040 (themes)** — `.tar.gz` theme URLs rejected up-front with a clear
+  message; zip prefix stripped only when truly common to all entries (no more flattened
+  layouts); `main`→`master` branch fallback for GitHub/GitLab archives; extraction `Close`
+  errors propagate.
+- 🧹 **GO-042/043** — dead code removed: `mddb.ErrorResponse`, `models.Metadata.ExportedAt`,
+  unread `generator.Config` copies (`ImageSizes*`, `Mddb.Watch*`).
+
+### Performance
+- ⚡ **PERF-001** — `--lastmod-from-git` runs one `git log --name-only` scan (path→date map)
+  instead of one `git log` process per page/feed entry (minutes saved at 1k+ posts).
+- ⚡ **PERF-002** — shortcode templates are parsed once per build and cached (previously
+  stat+read+parse per occurrence per page).
+- ⚡ **PERF-003** — fingerprint reference rewriting precompiles its regexes once per walk
+  (was O(pages × assets) compiles + rescans).
+- ⚡ **PERF-006** — ~25 hot-path regexes hoisted to package level; `fixMediaPaths` rewrites
+  WordPress image URLs in a single pass (was a fresh regex + full-document rescan per image).
+- ⚡ **PERF-009/010/011** — link-checker target memoization; mddb metadata fetched with the
+  configured batch size (was hardcoded 100 → 10× fewer round trips); srcset variant stats
+  and width decodes memoized per build.
+
+### Docs
+- 📚 **DOC-001** — `docs/STYLES.md` documents theme palettes with contrast ratios.
+- 📚 **DOC-006** — `SECURITY.md` Supported Versions refreshed to the 1.8.x line.
+
+### Testing
+- ✅ Coverage raised on the packages below 96%: `cmd/ssg` 65→80%, `internal/webp` 92→96.5%,
+  `internal/generator` 89→91.7%, `internal/theme` 94.8→95.5%. Added server, archive, mddb
+  (mock-server), sanitizer and WebP responsive-variant tests.
+- ✅ New `internal/deploy` package tested with mock HTTP servers (Cloudflare/Netlify/Vercel),
+  a local bare-repo git push (GitHub Pages), manifest/hash and URL/credential unit tests.
+
+## [1.8.0] - 2026-07-10
+
+Feature release from the post-1.7.x roadmap (`audit/roadmap/`) plus audit fixes. Every new
+feature is opt-in behind a config flag; default behaviour is unchanged.
+
+### Added
+- ✨ **Configurable permalinks (SEO-001)** — `permalinks:` per content type with tokens
+  `:year :month :day :slug :category` (e.g. `/:year/:month/:slug/`); flags
+  `--permalink-post=` / `--permalink-page=`. Empty = current date/slug behaviour.
+- ✨ **Frontmatter aliases (SEO-002)** — `aliases: [/old/path/]` emits meta-refresh +
+  canonical + `noindex` redirect stubs, excluded from the sitemap; collisions are skipped.
+- ✨ **`--lastmod-from-git` (SEO-004)** — sitemap `<lastmod>` from each source file's last
+  git commit, with graceful fallback outside git or for mddb content.
+- ✨ **Reading time / word count (BLOG-006)** — `.WordCount` and `.ReadingTime` exposed to
+  all engines (markup stripped; 200 wpm, rounded up).
+- ✨ **Pagination (BLOG-003)** — `paginate: N` / `--paginate=N` splits the index into
+  `/page/N/` and adds a `.Pager` (Current/Total/PerPage/PrevURL/NextURL). `0` = disabled.
+- ✨ **Working source maps (BLOG-007 / GO-004)** — `--sourcemap` now truly emits v3
+  `*.js.map` / `*.css.map` (line-preserving minification → exact mappings); the flag is no
+  longer a no-op.
+- ✨ **Asset fingerprinting (ASSET-001)** — `fingerprint: true` / `--fingerprint`:
+  sha256 → `name.<hash8>.ext`, `assets-manifest.json`, reference rewrite in HTML and
+  CSS (`url()`/`@import`), deterministic across builds. Terminal asset step.
+- ✨ **Responsive images (ASSET-004)** — `image_sizes: [480,960,1600]` emits WebP variants
+  (no upscaling) and `<img srcset>`/`sizes`; `--image-sizes=` / `--image-sizes-attr=`.
+- ✨ **Math rendering (AX-004)** — `math: true` / `--math` detects `$$…$$` / ```` ```math ````
+  and injects KaTeX only on pages that use it (`.HasMath` exposed).
+- ✨ **Series (AX-005)** — `series:` frontmatter → `/series/{slug}/` landing pages
+  (`series.html`, fallback `category.html`) and `.SeriesPrev*/.SeriesNext*` navigation.
+- ✨ **Data files (PLAT-002)** — `data/*.yaml|*.json` loaded into `.Data.*` (nested by
+  subdirectory); `data_dir:` / `--data-dir=`.
+- ✨ **Build hooks (PLAT-001)** — `hooks:` `pre_build` / `post_build` / `post_page` exec
+  hooks (argv-split, no shell, 60 s timeout, trusted local config only), context via env
+  `SSG_OUTPUT_DIR` / `SSG_PHASE` / `SSG_PAGE_PATH`.
+- ✨ **i18n / multilingual (PLAT-005)** — `languages:` + `default_language:` produce
+  language-prefixed output (`/en/…`) with `.Translations`, `.Hreflang`, `.Languages`
+  context and `hreflang`/`x-default` alternates.
+- ✨ **Incremental watch (PLAT-006)** — `--watch` now gates rebuilds on a content
+  signature, skipping touch-only (mtime-but-not-bytes) events; any real change still
+  triggers a full, correct rebuild.
+- ✨ **Single source of version truth (DOC-005)** — `VERSION` file + `scripts/sync-version.sh`
+  (`--check`) + Makefile `-X main.Version`; the version propagates into every packaging
+  manifest (FreeBSD/OpenBSD/deb/rpm/brew/install.sh).
+- ✨ **Collection renderer + archives (BLOG-001/004/005)** — shared archive renderer powers
+  `/tag/{slug}/` and `/author/{slug}/` listings (`tag.html`/`author.html`, fallback
+  `category.html`), included in the sitemap.
+- ✨ **Atom feeds (BLOG-002)** — `feed: true` writes `feed.xml` at the root and per
+  category/tag; `feed_items` / `feed_full_content`. Closes the FE-010 feed gap.
+- ✨ **Generator SEO partial (SEO-003)** — OpenGraph + Twitter Card + JSON-LD (Article/WebSite)
+  injected into pages lacking their own OG tags, plus feed + hreflang links; `seo_off` opts out.
+- ✨ **Internal link checker (SEO-005)** — `--check-links[=warn|strict]` validates internal
+  href/src against the output tree (no network); strict fails the build.
+- ✨ **Syntax highlighting (AX-001)** — `highlight: true` renders code blocks via Chroma;
+  `highlight_style`.
+- ✨ **Table of contents (AX-002)** — `toc: true` exposes `.TOC`; `[toc]` expands inline;
+  `toc_depth`; anchors use goldmark auto heading IDs.
+- ✨ **Footnotes (AX-003)** — goldmark footnote syntax (`[^1]`) is enabled by default.
+- ✨ **Asset bundling (ASSET-002)** — `bundles:` concatenates CSS/JS groups before
+  minify/fingerprint.
+- ✨ **Output formats & search (PLAT-003/PLAT-004)** — `outputs: [html, json]` writes a
+  per-page `index.json`; `search_index: true` writes `search-index.json` for client-side search.
+- ✨ **Alternate template engines (GO-007)** — `--engine=pongo2|mustache|handlebars` now
+  render for real; themes must be authored in that engine's syntax.
+
+### Security
+- 🔒 **mddb API key not sent over plaintext (SEC-007)** — the HTTP client refuses to attach
+  `Authorization: Bearer` over `http://` to a non-loopback host (https:// / loopback allowed).
+- 🔒 **gRPC transport security (SEC-004)** — the gRPC client selects TLS from the scheme
+  (`grpcs://`/`https://` → TLS; `grpc://`/`http://` → insecure; bare host → TLS unless
+  loopback) and refuses to send an API key over an insecure channel to a non-loopback host.
+
+### Fixed
+- 🐛 **No-frontmatter files no longer silently dropped (GO-009)** — a `.md` file without an
+  opening `---` is treated as published content instead of yielding empty output.
+- 🐛 **`datetime` attribute leading space (FE-009)** — `<time datetime>` in the krowy/imd
+  themes no longer emits `datetime=" 2026-…"` (invalid machine date).
+- 🐛 **Hugo theme conversion wired (GO-010)** — `--online-theme` now converts a downloaded
+  Hugo theme's `layouts/`+`static/`+`assets/` into the SSG layout; dead `ToMetadata` removed.
+- 🐛 **Dead/broken `base.html` removed (FE-007)** — the unused krowy/simple `base.html` (with
+  invalid `{{template " description"}}` names) are gone.
+
+### Privacy / DevOps / Docs
+- 🔏 **No Google Fonts CDN (FE-003)** — first-party themes drop external font requests and
+  use a system font stack (no visitor IP leak to Google).
+- 🐳 **Container hardening** — `docker-compose.yml` gains log caps, healthchecks and
+  resource limits/reservations via a YAML anchor (OPS-003); the Dockerfile gains a
+  `HEALTHCHECK` (OPS-004); every CI job gets `timeout-minutes` (OPS-007).
+- 📚 **Docs/Makefile** — README deb/rpm versions and INSTALL.md artifact links corrected and
+  made version-resilient (DOC-002/DOC-004); complete `.PHONY` and demo targets on
+  `test-content` (DOC-007/DOC-008); CHANGELOG compare links (DOC-011); `make security`
+  target running gosec + govulncheck (DOC-012).
+
+### Removed
+- 🧹 **`LICENSE.md` duplication (DOC-010)** — `LICENSE.md` is now a pointer to the canonical
+  `LICENSE` (BSD-3-Clause).
+
+## [1.7.15] - 2026-07-09
+
+Audit hardening round: 5 security + 3 correctness fixes from the local audit backlog.
+
+### Security
+- 🔒 **Decompression-bomb total limit (SEC-006)** — theme extraction now enforces a
+  cumulative size cap (500 MB), a per-file cap (100 MB) and an entry-count cap (10 000)
+  in addition to bounding the download itself, so a malicious archive can no longer
+  exhaust disk/memory.
+- 🔒 **Theme download timeout & redirect cap (SEC-008)** — `theme.Download` uses a bounded
+  `http.Client` (30 s timeout, ≤5 redirects) instead of `http.DefaultClient`, preventing
+  hangs and redirect-loop SSRF-lite.
+- 🔒 **Bounded mddb response reads (SEC-009)** — every mddb HTTP body is wrapped in an
+  `io.LimitReader` (64 MB payloads, 64 KB error bodies) so a hostile/broken server cannot
+  exhaust memory via `io.ReadAll`/streaming decode.
+- 🔒 **Archive file permissions clamped (SEC-010)** — extracted files/dirs use fixed safe
+  modes (`0644`/`0755`) instead of trusting `f.Mode()` from the archive.
+- 🔒 **Dev server binds loopback by default (SEC-012)** — the built-in server now listens on
+  `127.0.0.1` instead of `0.0.0.0`; exposing on all interfaces requires an explicit
+  `--host=0.0.0.0` (new `--host` flag / `host:` config, default `127.0.0.1`).
+
+### Fixed
+- 🐛 **`sitemap: no` honored for file content (GO-003)** — the `sitemap` frontmatter field
+  is now parsed for file-based pages (previously only mddb set it), so `sitemap: no`
+  correctly excludes a page from `sitemap.xml`.
+- 🐛 **`--sourcemap` is no longer a silent no-op (GO-004)** — the flag now prints a clear
+  "not yet implemented" notice and the help text is truthful.
+- 🐛 **`recentPosts` negative-count panic fixed (GO-008)** — `{{recentPosts -1}}` no longer
+  panics with slice-bounds-out-of-range; the count is clamped at both ends.
+
+## [1.7.14] - 2026-07-08
+
+### Security
+- 🔒 **Go toolchain bumped to 1.26.5 (GO-2026-5856)** — go1.26.4's `crypto/tls`
+  is affected by an Encrypted Client Hello privacy leak (reachable via the dev
+  server, mddb client, and theme downloader). Pinned `GO_VERSION` and the
+  Dockerfile builder image to 1.26.5, where it is fixed. `govulncheck` is clean.
+- 🔒 **Path traversal / arbitrary write via slug/link hardened (SEC-001)** — output
+  sub-paths derived from `slug`/`link` (fully controlled by a remote `mddb` server) are
+  now sanitized (`models.SanitizeRelPath`), and every page/post/category write is verified
+  to stay within the output directory (`ensureWithinOutput`). Malicious values such as
+  `../../../etc/...` can no longer escape the output directory.
+- 🔒 **Script injection in the GitHub composite action closed (SEC-002)** — `action.yml`
+  no longer interpolates `${{ inputs.* }}` inside `run:` blocks. All inputs are passed via
+  `env:` and referenced as quoted shell variables; build flags are assembled as a bash
+  array; `version`/`webp-quality`/`engine` are validated. Prevents RCE on the runner.
+- 🔒 **CI/CD supply-chain hardening (OpenSSF Scorecard)** — resolves the open code-scanning
+  alerts:
+  - **Token-Permissions** — added least-privilege top-level `permissions: contents: read`
+    to every workflow that lacked one (`ci.yml`, `docker.yml`, `snap.yml`, `test-action.yml`);
+    jobs that need more (release, GHCR push) elevate locally.
+  - **Pinned-Dependencies** — every third-party GitHub Action is now pinned to a full commit
+    SHA with a `# vX` comment (Dependabot still updates them), across all six workflows.
+  - **Binary-Artifacts** — removed the 21 MB compiled `ssg` binary that was committed to the
+    repository and added `/ssg`, `/ssg-*` to `.gitignore` and `.dockerignore`.
+- 🔒 **Module toolchain floor raised to go1.26.5** — `go.mod`'s `go` directive is now
+  `1.26.5`, so any build (not just CI/Docker) uses the toolchain where GO-2026-5856
+  (`crypto/tls` ECH leak) and GO-2026-4970 (`os`) are fixed. `govulncheck ./...` is clean.
+- 🔒 **cwebp argument-injection hardened (SEC-011)** — image paths passed to the `cwebp`
+  binary are now prefixed with `./` when relative, so a file named like `-o.png` can no
+  longer be interpreted as a `cwebp` flag.
+
+### Added
+- ✨ **`static/` passthrough directory (`--static-dir`, `static_dir:`)** — a project-level
+  static directory is now copied verbatim into the output during generation.
+
+### Fixed
+- 🐛 **Panic in `fixMediaPaths` on empty media file (GO-001)** — an empty
+  `MediaDetails.File` previously caused `filename[:len-4]` to panic (slice bounds out of
+  range) and crash the whole build. The filename is now trimmed with `filepath.Ext` and
+  empty names are skipped safely.
+- 🐛 **mddb media details were dropped (GO-006)** — `extractMediaFromDoc` now populates
+  `MediaDetails.file/width/height`, so mddb-sourced media has correct paths (this was the
+  root cause of GO-001).
+- 🐛 **`--engine` flag no longer silently ignored (GO-002)** — only the Go
+  (`html/template`) engine is wired into rendering. Requesting `pongo2`/`mustache`/
+  `handlebars` now fails fast with a clear "not yet implemented" error instead of silently
+  rendering with Go. Help text and the action input description updated accordingly.
+- 🐛 **gRPC connection leak in watch mode fixed (GO-005)** — `MddbClient` now exposes
+  `Close()` (HTTP no-op, gRPC closes the connection) and `loadContentFromMddb` defers it.
+  A fresh client is created on every `Generate()`, so `--mddb-watch` rebuilds no longer
+  leak `*grpc.ClientConn` connections and goroutines.
+- 🐛 **All `static/` files and subdirectories now reach the output (#8)** — previously only a
+  fixed subset was emitted, so directories like `downloads/`, `assets/`, `scripts/`, `styles/`
+  and files like `manifest.json` were silently dropped. The generator now copies the entire
+  `static/` tree (configurable via `--static-dir` / `static_dir:`, default `static`) verbatim
+  to the output. A missing directory is a no-op, so existing sites are unaffected.
+
+## [1.7.13] - 2026-04-08
+
+### Fixed
+- 🐛 **Shortcode templates now have FuncMap** — `safeHTML`, `decodeHTML`, `getCategoryName`, `getAuthorName`, and other template functions are now available in shortcode templates (fixes #11)
+  - `{{.InnerContent | safeHTML}}` works correctly — HTML is no longer auto-escaped
+  - All standard template functions available: `formatDate`, `formatDatePL`, `stripHTML`, `default`, `dict`, etc.
+
+## [1.7.12] - 2026-04-08
+
+### Added
+- ✨ **Bracket shortcodes with attributes and closing tags** - WordPress-style shortcode syntax (requires `shortcode_brackets: true`)
+  - `[name attr="val"]` — self-closing with inline attributes, available as `{{.Attrs.key}}` in template
+  - `[name]content[/name]` — closing tag with inner content, available as `{{.InnerContent}}` in template
+  - `[name attr="val"]content[/name]` — combined attributes and inner content
+  - Config-defined fields (Title, Text, Url, etc.) remain available alongside inline attrs
+  - Unknown shortcodes are left untouched (no silent removal)
+
+## [1.7.11] - 2026-04-06
+
+### Added
+- ✨ **Flexible author and category fields** - Frontmatter `author` and `categories` now accept both integer IDs and string values
+  - `author: 3` (int ID) — works as before
+  - `author: "Jan Kowalski"` (name) — resolved to ID via author name lookup
+  - `author: "jan-kowalski"` (slug) — resolved to ID via author slug lookup
+  - `categories: [1, 5]` (int IDs) — works as before
+  - `categories: ["Humor", "Technology"]` (names) — resolved to IDs via category name/slug lookup
+  - Numeric strings (e.g., `author: "42"`) are parsed as integers automatically
+  - Resolution is case-insensitive
+  - Same flexibility works for MDDB content source
+  - Unresolved string values (no matching author/category found) are silently ignored
+- ✨ **WordPress-style bracket shortcodes** - opt-in via `shortcode_brackets: true`
+  - Enables `[shortcode_name]` syntax alongside existing `{{shortcode_name}}`
+  - Only defined shortcodes are matched — unknown `[tags]` are left untouched
+  - Disabled by default to avoid conflicts with markdown link syntax
+
+## [1.7.10] - 2026-04-06
+
+### Added
+- ✨ **Rewrite `.md` links to final URLs** - opt-in via `rewrite_md_links: true` (closes #5)
+- ✨ **Sitemap exclusion** - pages/posts with `robots: "noindex"`, `layout: "redirect"`, or `sitemap: "no"` are excluded from `sitemap.xml` (closes #7)
+  - Rewrites `href="AUTHENTICATION.md"` → `href="/authentication/"` based on actual slug
+  - Handles relative prefixes `./file.md`, `../dir/file.md` — only base filename is matched
+  - Priority: exact source filename > lowercase > slug-derived
+  - Unknown `.md` links are left untouched
+  - Disabled by default to avoid breaking sites serving raw `.md` files
+- ✨ **Auto-derive slug from filename** - when no `slug:` in frontmatter, derived from filename
+  - `AUTHENTICATION.md` without slug → slug `authentication` → `/authentication/`
+- ✨ **`preserve_slug_case` option** - control URL casing for slugs derived from filenames
+  - Default (`false`): lowercased — `API.md` → `/api/`
+  - `preserve_slug_case: true` — original case kept — `API.md` → `/API/`
+
+### Fixed
+- Fix sitemap: use file modification time when `date`/`modified` fields are empty instead of writing `0001-01-01`
+- Fix template fallback detection for custom page layouts
+
+## [1.7.9] - 2026-04-06
+
+### Added
+- ✨ **Configurable pages and posts paths** - Override default `pages/` and `posts/` subdirectory names via config
+  - `pages_path: "docs"` — read static pages from `content/{source}/docs/` instead of `pages/`
+  - `posts_path: "articles"` — read posts from `content/{source}/articles/` instead of `posts/`
+  - Default behaviour (`pages/` and `posts/`) is preserved when not set
+
+## [1.7.8] - 2026-04-06
+
+### Added
+- ✨ **Template variables** - Define custom variables in `.ssg.yaml` available in all templates as `{{.Vars.key}}`
+  - Flat and nested structures supported: `{{.Vars.gtm}}`, `{{.Vars.api.endpoint}}`
+  - Values starting with `$` are resolved from OS environment variables at build time (e.g. `"$GTM_CODE"`)
+  - All variables automatically exported as environment variables with `SSG_` prefix (e.g. `SSG_GTM`, `SSG_API_ENDPOINT`)
+  - Available in every template context: index, page, post, category
+
 ## [1.7.7] - 2026-04-01
 
 ### Added
@@ -478,3 +4150,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Single binary output
 - Dependencies: gopkg.in/yaml.v3, github.com/yuin/goldmark
 - Cross-platform build support (Linux, macOS, Windows)
+
+<!-- Compare links (DOC-011) -->
+[Unreleased]: https://github.com/spagu/ssg/compare/v1.8.24...HEAD
+[1.8.24]: https://github.com/spagu/ssg/compare/v1.8.23...v1.8.24
+[1.8.23]: https://github.com/spagu/ssg/compare/v1.8.22...v1.8.23
+[1.8.22]: https://github.com/spagu/ssg/compare/v1.8.21...v1.8.22
+[1.8.21]: https://github.com/spagu/ssg/compare/v1.8.20...v1.8.21
+[1.8.20]: https://github.com/spagu/ssg/compare/v1.8.19...v1.8.20
+[1.8.19]: https://github.com/spagu/ssg/compare/v1.8.18...v1.8.19
+[1.8.18]: https://github.com/spagu/ssg/compare/v1.8.17...v1.8.18
+[1.8.17]: https://github.com/spagu/ssg/compare/v1.8.16...v1.8.17
+[1.8.16]: https://github.com/spagu/ssg/compare/v1.8.15...v1.8.16
+[1.8.10]: https://github.com/spagu/ssg/compare/v1.8.9...v1.8.10
+[1.8.9]: https://github.com/spagu/ssg/compare/v1.8.8...v1.8.9
+[1.8.8]: https://github.com/spagu/ssg/compare/v1.8.7...v1.8.8
+[1.8.7]: https://github.com/spagu/ssg/compare/v1.8.6...v1.8.7
+[1.8.6]: https://github.com/spagu/ssg/compare/v1.8.5...v1.8.6
+[1.8.5]: https://github.com/spagu/ssg/compare/v1.8.4...v1.8.5
+[1.8.4]: https://github.com/spagu/ssg/compare/v1.8.3...v1.8.4
+[1.8.3]: https://github.com/spagu/ssg/compare/v1.8.2...v1.8.3
+[1.8.2]: https://github.com/spagu/ssg/compare/v1.8.1...v1.8.2
+[1.8.1]: https://github.com/spagu/ssg/compare/v1.8.0...v1.8.1
+[1.8.0]: https://github.com/spagu/ssg/compare/v1.7.15...v1.8.0
+[1.7.15]: https://github.com/spagu/ssg/compare/v1.7.14...v1.7.15
+[1.7.14]: https://github.com/spagu/ssg/compare/v1.7.13...v1.7.14
+[1.7.13]: https://github.com/spagu/ssg/compare/v1.7.12...v1.7.13
+[1.7.12]: https://github.com/spagu/ssg/compare/v1.7.11...v1.7.12
+[1.7.11]: https://github.com/spagu/ssg/compare/v1.7.10...v1.7.11
+[1.7.10]: https://github.com/spagu/ssg/compare/v1.7.9...v1.7.10

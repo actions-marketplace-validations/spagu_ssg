@@ -4,22 +4,51 @@
 # Required: Content source, template, and domain
 source: "my-content"
 template: "krowy"
-domain: "example.com"
+domain: "example.com" # The host alone — no https://, no trailing slash. Canonical
+# URLs, og:url, the sitemap and the JSON-LD @id are built as https://<domain>/…
 
 # Paths (optional, these are defaults)
 content_dir: "content"
 templates_dir: "templates"
 output_dir: "output"
+static_dir: "static"   # Copied verbatim to output (all files & subdirs). Missing dir = no-op
 
 # Server & Development
 http: false          # Start built-in HTTP server
+host: "127.0.0.1"    # Dev server bind address (use 0.0.0.0 to expose on all interfaces)
 port: 8888           # HTTP server port
 watch: false         # Watch for changes and rebuild
 clean: false         # Clean output before build
 
+# Public Server Hardening (opt-in; all off by default)
+tls_cert: ""         # Path to a PEM certificate (with tls_key → HTTPS + HTTP/2)
+tls_key: ""          # Path to the matching PEM private key
+tls_auto: false      # Automatic Let's Encrypt certificates (needs tls_domain, port 443)
+tls_domain: ""       # Domain(s) for autocert, comma-separated
+http3: false         # Serve HTTP/3 (QUIC) alongside HTTP/2 (requires TLS)
+gzip: false          # gzip-compress responses when the client accepts it
+max_conns: 0         # Cap simultaneous connections (0 = unlimited)
+mem_limit: ""        # Runtime GC soft memory target, e.g. "512MiB", "1GiB"
+
+# Server access control (config-only; SSO/LDAP deliberately not implemented)
+server_auth: ""      # "" (open) | basic | jwt
+# server_users:        # basic: passwords ALWAYS from env, never literals
+#   - "admin:$SSG_ADMIN_PASS"
+# jwt_secret: "$JWT_SECRET"   # jwt: HS256 shared secret from env
+# ip_allowlist: ["203.0.113.0/24", "198.51.100.7"]  # only these may connect
+# ip_blocklist: ["192.0.2.0/24"]                    # refused before anything else
+rate_limit: 0        # Requests/second per client IP (0 = off)
+rate_burst: 0        # Token-bucket size (default 2×rate_limit)
+
 # Output Control
 sitemap_off: false   # Disable sitemap.xml generation
 robots_off: false    # Disable robots.txt generation
+
+# A 404.html is generated when the site does not provide one. Without it, static
+# hosts fall back to index.html for unmatched paths and answer 200, so every dead
+# URL looks to a crawler like a live copy of the home page. A page slugged "404"
+# takes precedence; set this to suppress the generated one entirely.
+not_found_off: false
 pretty_html: false   # Prettify HTML (remove all blank lines)
 relative_links: false # Convert absolute URLs to relative links
 post_url_format: ""  # Post URL format: "date" (default: /YYYY/MM/DD/slug/) or "slug" (/slug/)
@@ -28,7 +57,298 @@ minify_all: false    # Minify HTML, CSS, and JS
 minify_html: false   # Minify only HTML
 minify_css: false    # Minify only CSS
 minify_js: false     # Minify only JS
-sourcemap: false     # Include source maps
+sourcemap: false     # Emit v3 source maps (*.js.map/*.css.map) for minified JS/CSS
+                     # (minification becomes line-preserving so mappings are exact)
+fingerprint: false   # Content-hash CSS/JS → name.<hash8>.ext + assets-manifest.json,
+                     # rewriting references in HTML and CSS (immutable caching)
+scss: false          # Compile *.scss → *.css via dart-sass before bundling/minify (ASSET-003);
+                     # optional tool — missing binary skips the step with a warning
+sass_binary: ""      # Explicit dart-sass path; empty = look up `sass` in PATH
+
+# SEO & Migration
+lastmod_from_git: false   # sitemap <lastmod> from each file's last git commit (fallback: modified/date)
+# permalinks:               # Configurable URL patterns per content type (default: date/slug)
+#   post: "/:year/:month/:slug/"   # tokens: :year :month :day :slug :category
+#   page: "/:slug/"
+# Per-page frontmatter: aliases: [/old/path/] → meta-refresh + canonical redirect stubs
+
+# Blog
+paginate: 0          # Posts per index page; 0 disables pagination (else adds /page/N/ + .Pager)
+
+# Authoring
+math: false          # Detect $$…$$ / ```math and inject KaTeX only on pages that use it (opt-in)
+mermaid: false       # Render ```mermaid fences as diagrams (runtime injected only on pages that use one)
+sanitize_html: false # Sanitize raw HTML in markdown via bluemonday UGC policy (FE-005)
+highlight: false     # Syntax highlighting for code blocks via Chroma
+highlight_style: "github"  # Chroma style (e.g. github, monokai, dracula)
+highlight_line_numbers: false  # Prefix highlighted code blocks with line numbers (needs highlight: true)
+toc: false           # Expose .TOC (table of contents); [toc] in content always expands
+toc_depth: 3         # Max heading level included in the TOC
+
+# Blog feeds & archives
+feed: false          # Generate Atom feed.xml at root + per category/tag
+feed_items: 20       # Max items per feed
+feed_full_content: false  # true = full rendered content, false = summary/excerpt
+
+# SEO
+date_archives: false # Publish /YYYY/ and /YYYY/MM/ listings of your posts (and
+                     # /YYYY/MM/DD/ when permalinks carry the day). WordPress has
+                     # them and links to them from every byline; a hand-authored
+                     # site usually does not, so this is opt-in. `ssg migrate`
+                     # turns it on for a migrated project.
+
+# type_archives declares which content types get a listing at /<type>/ — the
+# section a custom post type serves, which the CMS renders from has_archive and
+# which therefore appears in no export. It cannot be inferred: a site can have
+# one custom type whose section exists and another whose section 404s.
+# An export that records has_archive answers for itself; `false` here overrules
+# it. Empty (the default) builds nothing.
+# type_archives:
+#   realizacje: true
+#   reviews: false
+
+# Invisible characters that render as nothing and break things: a zero-width
+# space splits a word for Ctrl+F and for a screen reader, a bidi override makes
+# text render in a different order than it is stored. None of it is authored on
+# purpose and all of it survives a migration, so this is on by default.
+# Never touches <pre>/<code>: a page documenting these needs them literally.
+#   on (default) · warn (report only) · off
+sanitize_output: on
+
+# What survives into a published image. "strip" (the default) removes EXIF,
+# IPTC and XMP — a photo straight from a phone carries GPS coordinates and a
+# serial number, and a migration copies a whole media library across. Colour
+# profile and orientation always survive. "keep" for a portfolio that shows
+# camera settings on purpose.
+image_metadata: strip
+
+# Which formats a site publishes its images in, in preference order. AVIF is
+# typically half the size of WebP on photographs — one migrated hero image went
+# 571 KB JPEG -> 279 KB WebP -> 96 KB AVIF — and the browser picks the first it
+# understands, with the original always the last resort.
+#
+# Needs the optional avifenc (apt install libavif-bin / apk add libavif-apps /
+# brew install libavif). A format whose encoder is missing is skipped with a
+# warning and the build carries on; WebP remains the default.
+# image_formats: [avif, webp]
+# avif_quality: 45    # avifenc -q; lower than webp_quality on purpose — AVIF
+#                     # holds detail where WebP starts to soften
+seo: false           # Opt in to OpenGraph/Twitter/JSON-LD injection (off by default since v1.8.2;
+                     # non-destructive — only fills pages that lack their own tags).
+                     # Legacy seo_off / --seo-off are still accepted as no-ops.
+analytics: false     # Render the tracking snippets a migration recorded in
+                     # metadata.json (`analytics`: GTM, GA4). Separate from seo
+                     # on purpose — third-party JavaScript on every page is your
+                     # call. The ids stay readable at .Site.Analytics regardless;
+                     # icons/social/verification ride with `seo` (they load nothing).
+
+# Site-wide JSON-LD merged into every page (a publisher, for example).
+# schema:
+#   publisher: { "@type": Organization, name: Example }
+#
+# JSON-LD defaults per content section. Site-wide schema: cannot carry an @type —
+# it would apply to every page, so a home-page type would stop each post being a
+# BlogPosting. Keys match the page's directory relative to the source folder,
+# longest prefix first (the same rule as link_rewrites); "home" is reserved for
+# the site root. Precedence: schema < derived < schema_defaults < frontmatter.
+# schema_defaults:
+#   home:          { "@type": WebSite }
+#   pages/recipes: { "@type": Recipe, recipeCuisine: Polish }
+check_links: ""      # "" (off), "warn" (report dead internal links), "strict" (fail build)
+check_schema: ""     # "" (off), "warn" or "strict" — validate emitted JSON-LD against
+                     # the properties search engines require (unknown @types pass)
+
+# Validation over the generated HTML. Same shape as check_links; strict: true
+# escalates any of them to a build failure.
+check_images: ""     # "" | warn | strict | strict-decorative — reports images with NO alt
+                     # attribute. alt="" is a valid decorative image and stays silent
+                     # unless strict-decorative. Alt text is never generated (#75).
+check_meta: ""       # "" | warn | strict — indexable pages need a <title> and a
+                     # non-empty meta description; noindex pages are skipped (#76).
+check_orphans: ""    # "" | warn | strict — indexable pages nothing links to. Only
+                     # <a href> counts; self-links and the site root are ignored (#77).
+check_redirects: ""  # "" | warn | strict — links the HOST would redirect rather than
+                     # serve. Needs pretty_urls to know what the host does (#87).
+pretty_urls: false   # the host strips ".html" and appends a trailing slash (most
+                     # static hosts). Leave false for a plain object store, where
+                     # the extensionless form is a genuine 404.
+
+# Advisory length ranges for check_meta. Warnings only, never build failures.
+# Unset ⇒ the built-in default; an explicit 0 disables that bound.
+meta_limits:
+  title_min: 30
+  title_max: 60
+  description_min: 70
+  description_max: 160
+
+# sitemap.xml always drops pages whose rendered HTML says noindex. Pages whose
+# canonical points elsewhere are kept unless you opt in here — a mismatched
+# canonical is usually a theme bug, not a deliberate exclusion (#78).
+sitemap_prune_canonical: false
+
+# Markdown under content_dir that is data, not a page: matched before parsing, so
+# a file whose front matter cannot be read as a page is skipped cleanly (#74).
+# "**" crosses directory separators.
+content_exclude: []
+
+# Extra verbatim passthrough roots beyond static_dir (#84). Each entry keeps its
+# own name, so files already published at stable URLs keep resolving. dest: moves
+# an entry; dest: "." spreads a directory's contents at the output root.
+static_sources: []
+
+# Extra feeds beyond `feed: true` (#86). Each picks its own posts, path and
+# format: atom (default), rss (2.0) or json (JSON Feed 1.1). Selection criteria
+# (source / categories / tags / type) are optional and combine with AND.
+feeds: []
+
+# Inject <link rel="alternate"> for every feed into every HTML page. Default true.
+# Set false to keep publishing the feeds but place the tags yourself — for a theme
+# that wants control over their order, titles, or which feeds are advertised.
+feed_autodiscovery: true
+#  - path: /blog/feed.xml
+#    title: "Blog"
+#    source: blog            # a content_sources path or content folder
+#  - path: /blog/rss.xml
+#    title: "Blog"
+#    source: blog
+#    format: rss
+#  - path: /planet.xml
+#    name: planet          # optional handle for the `feed` template helper
+#  - path: /releases.xml
+#    title: "Release notes"
+#    format: rss
+#    categories: [release, changelog]
+#    items: 10
+#  - path: schema.json
+#  - path: xml
+#  - path: editor
+#    dest: editor
+#  - "docs/examples/**"
+#  - "sample-*.md"
+
+# Asset bundling — concatenate groups before minify/fingerprint (reference the bundle in templates)
+# bundles:
+#   app.css: ["reset.css", "layout.css", "theme.css"]
+#   app.js:  ["vendor.js", "main.js"]
+
+# Output formats & search
+outputs: ["html"]    # add "json" for a headless index.json next to each index.html
+search_index: false  # Emit search-index.json (title/url/tags/excerpt/text) for client-side search
+
+# Data files — data/*.yaml|*.json exposed to templates as {{.Data.*}} (nested by subdir)
+data_dir: "data"
+
+# External sources (docs/EXTERNAL_SOURCES.md) — files, HTTP APIs, SQL, CMS imports
+# exposed as {{.ExternalData.<name>}} / getExternal "<name>". Secrets ($VARS) only
+# from the environment. CLI: --offline, --refresh-external-sources,
+# --clear-external-cache, --external-source=NAME.
+# external_sources:
+#   enabled: true
+#   cache_dir: .ssg-cache/external-sources
+#   offline: false            # serve HTTP sources from the disk cache only
+#   refresh: false            # ignore fresh cache entries, re-fetch
+#   stale_if_error: true      # serve an expired copy when a fetch fails
+#   fail_on_cache_miss: true  # offline + no cached copy = build failure
+#   max_concurrent_sources: 4
+#   allowed_hosts: []         # HTTP allowlist: "api.example.com", "*.example.com"
+#   defaults:
+#     timeout: 10s
+#     cache_ttl: 1h
+#     stale_ttl: 24h
+#     retries: 2
+#     retry_backoff: 500ms
+#     max_response_size: 5MB
+#     required: true          # required source failure aborts the build
+#   sources:
+#     catalog:                # local file: yaml/json/toml/csv/xml (by extension)
+#       type: file
+#       path: ./data/catalog.csv
+#       csv: {header: true, delimiter: ","}
+#     products_api:           # HTTPS by default; private IPs blocked at dial time
+#       type: http
+#       url: https://api.example.com/products
+#       format: json
+#       auth: {type: bearer, token: "$API_TOKEN"}
+#       transform: {select: data.items}
+#     inventory:              # read-only SQL; queries live ONLY in config
+#       type: sql
+#       driver: postgres      # mysql | mariadb | postgres | sqlite
+#       dsn: "$INVENTORY_DSN"
+#       queries:
+#         products: {sql: "SELECT id, name FROM products WHERE published = true", max_rows: 10000}
+#     legacy_blog:            # CMS import: wordpress | drupal | movable_type
+#       type: cms
+#       adapter: wordpress
+#       driver: mysql
+#       dsn: "$WORDPRESS_DSN"
+#       mode: content         # content = merge into the site; data = .ExternalData only
+#       wordpress: {table_prefix: wp_, post_types: [post, page], statuses: [publish]}
+
+# i18n / multilingual — language-prefixed output (/en/…) + hreflang alternates
+# Full i18n (docs/I18N.md): expanded languages + i18n: section
+# languages:
+#   - code: pl
+#     locale: pl-PL
+#     name: Polski
+#     timezone: Europe/Warsaw
+#   - code: en
+#     locale: en-GB
+#     name: English
+# i18n:
+#   enabled: true
+#   prefix_default_language: false  # true → /pl/… for the default language too
+#   translations_dir: i18n          # per-language dictionaries: i18n/pl.yaml, i18n/en.json
+#   dictionary_fallback: true       # t: missing key walks fallback_languages
+#   content_fallback: false         # .md links may fall back to another language's page
+#   missing_translation: warn       # warn | error | empty | fallback
+#   invalid_language: fail          # fail | warn
+#   duplicate_translation: fail     # fail | warn
+#   fallback_languages:
+#     pl: [en]
+# languages: ["pl", "en"]
+# default_language: "pl"     # default is NOT prefixed; other languages get /<lang>/…
+# language_sections:         # a language for a whole section, not per page (#182)
+#   de: de                   # everything under content/<source>/de is German
+#   fr/blog: fr              # longest prefix wins
+#   home: en                 # "home" is the site root
+# Precedence: a page's own `lang:` > its section > default_language. The shape a
+# migrated site arrives in: WordPress kept languages in /de/ and /fr/ and said so
+# nowhere a page carried, so three lines here survive the next re-migration.
+
+# Dynamic taxonomies (docs/TAXONOMIES.md) — category/tag/series are built in;
+# declare custom ones here. Frontmatter priority: taxonomies: map > direct
+# field > legacy fields. Term metadata: data/taxonomies/<name>.yaml.
+# taxonomies:
+#   technology:
+#     label: Technologies    # plural heading (default: title-cased name)
+#     singular: Technology   # singular heading
+#     path: technology       # URL segment, must be unique (default: name)
+#     field: technology      # frontmatter field read (default: name)
+#     multiple: true         # false = exactly one value per post (else build fails)
+#     archive: true          # emit /technology/ + /technology/<term>/
+#     feed: false            # Atom feed per term (needs global feed: true)
+#     sitemap: true          # include archives in sitemap.xml
+#     template: ""           # index template override (default chain: taxonomy-<name>.html
+#                            # → taxonomy.html → archive.html → category.html)
+#     term_template: ""      # term template override (taxonomy-<name>-term.html → …)
+#     sort: name             # term order: name | count | weight
+#     case_sensitive: false  # false merges "Go"/"go" into one term
+#     slugify: true          # slug from term name; collisions fail the build
+#     generate_empty: false  # archives for metadata-only terms with no posts
+
+# Timezone for content dates (permalink :year/:month/:day tokens and the
+# Date/Modified template context). IANA names; empty = no conversion (UTC as parsed).
+# timezone: "Europe/Warsaw"
+# language_timezones:        # per-language override (wins over timezone: for that lang)
+#   en: "America/New_York"
+#   pl: "Europe/Warsaw"
+
+# Build hooks — exec commands per lifecycle phase. TRUSTED LOCAL CONFIG ONLY: argv-split
+# (no shell), time-limited. Env: SSG_OUTPUT_DIR, SSG_PHASE, SSG_PAGE_PATH (post_page).
+# hooks:
+#   pre_build:  ["./scripts/prepare.sh"]
+#   post_build: ["./scripts/deploy.sh"]
+#   post_page:  []
 
 # Template Engine
 engine: "go"         # Options: go, pongo2, mustache, handlebars
@@ -38,13 +358,69 @@ engine: "go"         # Options: go, pongo2, mustache, handlebars
 # Image Processing (requires cwebp installed)
 webp: false          # Convert images to WebP
 webp_quality: 60     # Quality 1-100 (lower = smaller file)
+webp_keep_original: false  # true = emit .webp NEXT TO the original (safe for themes
+                     # with hardcoded .png/.jpg refs: favicons, logos, og:image);
+                     # false = historical replace-in-place (original is deleted)
 reconvert_images: false  # Force reconvert even if WebP already exists
+# image_sizes: [480, 960, 1600]  # Responsive widths (px): emit WebP variants + <img srcset> (no upscaling)
+# image_sizes_attr: "100vw"      # Value of the generated sizes attribute
 
 # Deployment
-zip: false           # Create ZIP for Cloudflare Pages
+zip: false           # Create ZIP archive of the output tree (Cloudflare Pages ready)
+targz: false         # Create gzip-compressed tarball (.tar.gz) of the output tree
+tarxz: false         # Create xz-compressed tarball (.tar.xz) of the output tree
+
+# Native publish (secrets ALWAYS come from the environment, never this file)
+deploy: ""           # "" (off) | cloudflare | github-pages | netlify | vercel | ftp | sftp
+deploy_project: ""   # Pages/site/project name (cloudflare, netlify, vercel)
+deploy_branch: ""    # Target branch (cloudflare, github-pages; default gh-pages)
+deploy_target: ""    # ftp://user@host/path, sftp://user@host/path, or a git remote URL
+# Required env per provider:
+#   cloudflare   → CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID
+#   github-pages → GITHUB_TOKEN (https remotes) or an SSH key
+#   netlify      → NETLIFY_AUTH_TOKEN (site via deploy_project or NETLIFY_SITE_ID)
+#   vercel       → VERCEL_TOKEN, VERCEL_ORG_ID (project via deploy_project)
+#   ftp          → FTP_USERNAME, FTP_PASSWORD
+#   sftp         → SSH_USERNAME, SSH_PASSWORD or SSH_KEY_FILE (host in known_hosts)
+
+# Redirects (Cloudflare Pages / Netlify _redirects; GO-063). Empty by default.
+# Exact paths, /old/* splats (:splat in the destination), status
+# 301/302/303/307/308/410. Note 410 is Netlify-only — Cloudflare Pages ignores
+# it and the path keeps answering 200; the build warns when deploy: cloudflare.
+# Frontmatter aliases: are added as 301s and exact chains are flattened to one hop.
+# Import an existing Next.js rule set with: ssg import redirects next.config.ts
+# redirects:
+#   - from: /old-pricing
+#     to: /pricing              # status defaults to 301
+#   - from: /blog/*
+#     to: /articles/:splat
+#     status: 301
+#   - from: /discontinued
+#     to: /
+#     status: 410
+# alias_stubs: true             # also write meta-refresh stub pages for aliases (default true)
+
+# Custom _headers blocks (GO-064). A pattern here replaces that default block;
+# unknown patterns are appended. Empty = the built-in security/cache defaults.
+# headers:
+#   /*:
+#     Content-Security-Policy: "default-src 'self'"
+#   /api/*:
+#     Access-Control-Allow-Origin: "*"
+# headers_defaults_off: false   # true drops the built-in blocks entirely
+
+# Cloudflare Worker / Pages Functions beside the static site (GO-065).
+# Scaffold a template with: ssg new worker <contact-form|stripe-checkout|dynamic-price|conversions-proxy>
+# worker:
+#   dir: workers/stripe-checkout  # Functions project, or a dir with a prebuilt _worker.js
+#   mode: functions               # functions (default) | worker
+#   routes_include: ["/api/*"]    # paths that invoke the Function (default ["/api/*"])
+#   routes_exclude: []            # paths carved back out to static
+#   wrangler_config: ""           # wrangler config outside the project root
 
 # Shortcodes - reusable content snippets, use {{name}} in markdown
 # Template file is REQUIRED - create your own templates in the theme folder
+# shortcode_brackets: false  # Also match [name] syntax (WordPress-style, default: false)
 # shortcodes:
 #   - name: "thunderpick"          # Use as {{thunderpick}} in content
 #     template: "shortcodes/banner.html"  # REQUIRED: template file in theme
@@ -59,6 +435,81 @@ zip: false           # Create ZIP for Cloudflare Pages
 #     data:                        # Available as {{.Data.key}} in template
 #       color: "blue"
 #       size: "large"
+
+# Content directory structure (optional, these are defaults)
+# pages_path: "pages"   # Subdirectory inside source for static pages (default: "pages")
+# posts_path: "posts"   # Subdirectory inside source for blog posts  (default: "posts")
+# rewrite_md_links: true       # Rewrite relative .md links to final output URLs (default: on; set false to disable)
+# strip_md_link_text: false    # Drop ".md" from link text that is a bare filename (needs rewrite_md_links; opt-in)
+
+# Markdown for agents / AI search (index.md + page.md + llms.txt + text/markdown <head> alternate)
+# markdown_publish: false      # Publish a Markdown copy of every page for LLMs and agents
+# clean_special_chars: false   # Normalise AI smart punctuation (quotes, dashes, NBSP, zero-width) to ASCII; CJK untouched
+# output_encoding: "utf-8"     # Text-output encoding: utf-8 | utf-16le | utf-16be (BOM added for UTF-16)
+# output_encoding_sections:    # Per-section overrides (longest prefix wins; "home" = root)
+#   legacy: "utf-16le"
+# home_pages_limit: 6          # Cap home-page guide cards (0 = default 6, negative = no limit)
+# home_posts_limit: 6          # Cap home-page post cards before a "see all" link
+# robots_rules:                # Explicit per-crawler robots.txt (empty = allow-all default)
+#   - { user_agent: "*", allow: ["/"] }
+#   - { user_agent: GPTBot, allow: ["/"] }
+#   - { user_agent: OAI-SearchBot, allow: ["/"] }
+# preserve_slug_case: false    # Keep original casing in slugs/URLs (default: lowercase)
+
+# Variables - custom variables available in all templates as {{.Vars.key}}
+# and exported as environment variables with SSG_ prefix (e.g. SSG_GTM).
+# Values starting with $ are resolved from the current OS environment.
+# variables:
+#   gtm: "GTM-XXXXXXX"          # Use as {{.Vars.gtm}} in templates, exported as SSG_GTM
+#   analytics_id: "$GA_ID"       # Resolved from env var $GA_ID at build time
+#   api:
+#     endpoint: "https://api.example.com"  # Nested: {{.Vars.api.endpoint}}, exported as SSG_API_ENDPOINT
+
+# Build-time AI ([ai ...] shortcode) - models are endpoints, agents are roles
+# built on a model (persona + rules + skills). Keys always come from $ENV.
+# ai:
+#   default_agent: writer
+#   cache_dir: .ssg-cache/ai    # commit it for reproducible, key-free CI builds (pre-1.8.27 .ai-cache still read)
+#   timeout: 30s
+#   models:
+#     fast:
+#       url: https://api.openai.com/v1/chat/completions
+#       key: $OPENAI_KEY        # never a literal
+#       model: gpt-4o-mini
+#       system: "Answer in one short paragraph."
+#   agents:
+#     writer:
+#       model: fast
+#       system: "You are the site's copy editor."
+#       rules: ["Answer in the page's language.", "Never invent facts or links."]
+#       skills: ["Summarise long text into one sentence."]
+
+# Post-publish notifications - POST each new/changed post to webhooks you define.
+# Only sends with --notify; the committed state file dedupes (once per content).
+# notify_state: .ssg-notifications.json
+# notifications:
+#   - name: zapier
+#     url: https://hooks.zapier.com/hooks/catch/XXX/YYY
+#     headers: { X-Token: $ZAP_TOKEN }
+
+# Development MCP server (ssg mcp) - designer + content-manager roles for an AI
+# assistant; optional git write-back: branch -> commit -> human review -> PR.
+# mcp:
+#   git:
+#     account: you
+#     token: $GITHUB_TOKEN      # never a literal; unset = git tools hidden
+#     default_branch: main
+#     branch_prefix: mcp/
+#   search:                     # optional: designer_find/content_find via MDDB
+#     mddb_url: http://localhost:11023
+#     mddb_collection: theme    # fill it with `ssg mddb push-theme`
+#     mddb_api_key: $MDDB_TOKEN # never a literal
+#     mddb_lang: en
+#     mddb_fuzzy: 1             # typo tolerance: 0 off, 1 or 2 edits
+#     mddb_validate: true       # check each document before storing it (MDDB 2.12.0+);
+#                               # warnings never fail a push. false skips the round trip
+#     mddb_allow_http: false    # true only when mddb_url is http:// on a private
+#                               # network; an API key is refused over plaintext otherwise
 
 # Other
 quiet: false         # Suppress output (only exit codes)

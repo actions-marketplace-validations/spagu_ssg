@@ -9,16 +9,14 @@
     <meta name="description" content="Articles in category: {{.Category.Name}}">
     <link rel="canonical" href="https://{{.Domain}}/category/{{.Category.Slug}}/">
     {{template "seo-head" .}}
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/css/style.css">
 </head>
 
 <body>
+    <a href="#main-content" class="skip-link">Skip to content</a>
     {{template "navigation.html" .}}
 
-    <main class="main-content">
+    <main id="main-content" class="main-content">
         <header class="category-header">
             <div class="container">
                 <h1 class="category-title">{{.Category.Name}}</h1>
@@ -36,7 +34,7 @@
                         <h3 class="post-card-title">
                             <a href="{{getURL .}}">{{.Title | decodeHTML}}</a>
                         </h3>
-                        <time class="post-date" datetime="{{.Date.Format " 2006-01-02"}}">
+                        <time class="post-date" datetime="{{.Date.Format "2006-01-02"}}">
                             {{.Date.Format "2 January 2006"}}
                         </time>
                         {{if .Excerpt}}

@@ -6,7 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -18,6 +21,7 @@ type Client struct {
 	httpClient *http.Client
 	apiKey     string
 	batchSize  int
+	allowHTTP  bool
 }
 
 // Config holds mddb client configuration
@@ -26,6 +30,11 @@ type Config struct {
 	APIKey    string // Optional API key for authentication
 	Timeout   int    // Timeout in seconds (default: 30)
 	BatchSize int    // Batch size for pagination (default: 1000)
+	// AllowHTTP permits sending the API key over plaintext http:// to a
+	// non-loopback host. Off by default and deliberately awkward to turn on:
+	// it is the right answer on a private container network and the wrong one
+	// on anything routable (#201).
+	AllowHTTP bool
 }
 
 // Document represents a markdown document from mddb
@@ -71,9 +80,20 @@ func (m *mddbDocument) toDocument(collection string) Document {
 		Lang:       m.Lang,
 		Content:    m.ContentMd,
 		Metadata:   metadata,
-		CreatedAt:  time.Unix(m.AddedAt, 0),
-		UpdatedAt:  time.Unix(m.UpdatedAt, 0),
+		CreatedAt:  unixToTime(m.AddedAt),
+		UpdatedAt:  unixToTime(m.UpdatedAt),
 	}
+}
+
+// unixToTime converts a Unix seconds timestamp to a UTC time.Time. A zero
+// timestamp means "no date": it maps to the zero time.Time so IsZero() guards
+// fire instead of publishing posts under /1970/01/01/, and .UTC() keeps
+// date-based URLs reproducible across build machines (GO-031).
+func unixToTime(sec int64) time.Time {
+	if sec == 0 {
+		return time.Time{}
+	}
+	return time.Unix(sec, 0).UTC()
 }
 
 // GetRequest represents a request to fetch a single document
@@ -87,16 +107,12 @@ type GetRequest struct {
 // SearchRequest represents a request to search documents
 type SearchRequest struct {
 	Collection string           `json:"collection"`
+	Lang       string           `json:"lang,omitempty"` // Language filter, e.g. "en_US" (GO-013)
 	FilterMeta map[string][]any `json:"filterMeta,omitempty"`
 	Sort       string           `json:"sort,omitempty"`   // Field to sort by (e.g., "updatedAt")
 	Asc        bool             `json:"asc,omitempty"`    // Sort ascending
 	Limit      int              `json:"limit,omitempty"`  // Max results
 	Offset     int              `json:"offset,omitempty"` // Skip results
-}
-
-// ErrorResponse represents an error from MDDB
-type ErrorResponse struct {
-	Error string `json:"error"`
 }
 
 // NewClient creates a new mddb client
@@ -120,7 +136,31 @@ func NewClient(cfg Config) *Client {
 		},
 		apiKey:    cfg.APIKey,
 		batchSize: batchSize,
+		allowHTTP: cfg.AllowHTTP,
 	}
+}
+
+// Close satisfies MddbClient. The HTTP client holds no long-lived connection
+// that must be torn down (the stdlib transport pools and reaps idle
+// connections), so this is a no-op provided for interface symmetry (GO-005).
+func (c *Client) Close() error {
+	return nil
+}
+
+// Response-size limits bound a single mddb HTTP response so a malicious or
+// broken server cannot exhaust memory by streaming unbounded data (SEC-009).
+const (
+	maxResponseSize = 64 * 1024 * 1024 // document payloads
+	maxErrBodySize  = 64 * 1024        // error message bodies
+)
+
+// limitedBody wraps a response body so reads are capped at limit while Close
+// still closes the underlying connection.
+func limitedBody(body io.ReadCloser, limit int64) io.ReadCloser {
+	return struct {
+		io.Reader
+		io.Closer
+	}{io.LimitReader(body, limit), body}
 }
 
 // Get fetches a single document by collection and key
@@ -150,7 +190,9 @@ func (c *Client) Get(req GetRequest) (*Document, error) {
 	return &doc, nil
 }
 
-// Search fetches multiple documents matching filters
+// Search fetches multiple documents matching filters. The returned total is
+// the server-reported X-Total-Count, or 0 when the header is absent/malformed
+// — callers must not treat the batch length as the collection total (GO-015).
 func (c *Client) Search(req SearchRequest) ([]Document, int, error) {
 	body, err := json.Marshal(req)
 	if err != nil {
@@ -163,10 +205,18 @@ func (c *Client) Search(req SearchRequest) ([]Document, int, error) {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	// Get total count from header
+	// Get total count from header; 0 means unknown (GO-015). A malformed
+	// value is logged instead of silently swallowed so truncated builds are
+	// diagnosable.
 	totalCount := 0
 	if tc := resp.Header.Get("X-Total-Count"); tc != "" {
-		totalCount, _ = strconv.Atoi(tc)
+		n, convErr := strconv.Atoi(tc)
+		if convErr != nil || n < 0 {
+			fmt.Fprintf(os.Stderr,
+				"Warning: mddb sent malformed X-Total-Count header %q; paginating until an empty batch (GO-015)\n", tc)
+		} else {
+			totalCount = n
+		}
 	}
 
 	var mddbDocs []mddbDocument
@@ -180,12 +230,65 @@ func (c *Client) Search(req SearchRequest) ([]Document, int, error) {
 		docs[i] = mddbDoc.toDocument(req.Collection)
 	}
 
-	// If no header, use array length
-	if totalCount == 0 {
-		totalCount = len(docs)
+	return docs, totalCount, nil
+}
+
+// filterDocsByLang drops documents in other languages. It is the client-side
+// safety net for GO-013: servers that ignore SearchRequest.Lang (and the gRPC
+// transport, whose proto SearchRequest has no lang field) still yield a
+// single-language result. Documents without a lang are kept so metadata
+// collections (categories, media, users) survive the filter.
+func filterDocsByLang(docs []Document, lang string) []Document {
+	if lang == "" {
+		return docs
+	}
+	filtered := make([]Document, 0, len(docs))
+	for _, doc := range docs {
+		if doc.Lang == "" || doc.Lang == lang {
+			filtered = append(filtered, doc)
+		}
+	}
+	return filtered
+}
+
+// getAllPaginated drives search until the collection is exhausted. One
+// coherent loop fixes GO-015 and GO-041: the offset advances by the number of
+// documents actually received (servers may clamp the page size below the
+// requested batch), the loop stops on an empty batch instead of trusting the
+// first batch length as a total, and a positive server-reported total still
+// allows an early stop without an extra request. Shared by the HTTP and gRPC
+// clients (DRY).
+func getAllPaginated(search func(SearchRequest) ([]Document, int, error),
+	collection, lang string, filterMeta map[string][]any, batchSize int) ([]Document, error) {
+	var allDocs []Document
+	offset := 0
+
+	for {
+		req := SearchRequest{
+			Collection: collection,
+			Lang:       lang, // GO-013: propagate the language filter
+			FilterMeta: filterMeta,
+			Limit:      batchSize,
+			Offset:     offset,
+		}
+
+		docs, total, err := search(req)
+		if err != nil {
+			return nil, fmt.Errorf("fetching batch at offset %d: %w", offset, err)
+		}
+		if len(docs) == 0 {
+			break
+		}
+
+		allDocs = append(allDocs, filterDocsByLang(docs, lang)...)
+		offset += len(docs)
+
+		if total > 0 && offset >= total {
+			break
+		}
 	}
 
-	return docs, totalCount, nil
+	return allDocs, nil
 }
 
 // GetAll fetches all documents from a collection with pagination
@@ -194,65 +297,13 @@ func (c *Client) GetAll(collection string, lang string, batchSize int) ([]Docume
 		batchSize = c.batchSize
 	}
 
-	var allDocs []Document
-	offset := 0
-
-	for {
-		req := SearchRequest{
-			Collection: collection,
-			Limit:      batchSize,
-			Offset:     offset,
-		}
-
-		docs, total, err := c.Search(req)
-		if err != nil {
-			return nil, fmt.Errorf("fetching batch at offset %d: %w", offset, err)
-		}
-
-		allDocs = append(allDocs, docs...)
-
-		if len(allDocs) >= total || len(docs) < batchSize {
-			break
-		}
-
-		offset += batchSize
-	}
-
-	return allDocs, nil
+	return getAllPaginated(c.Search, collection, lang, nil, batchSize)
 }
 
 // GetByType fetches all documents filtered by type (page or post) with pagination
 func (c *Client) GetByType(collection string, docType string, lang string) ([]Document, error) {
-	batchSize := c.batchSize
-
-	var allDocs []Document
-	offset := 0
-
-	for {
-		req := SearchRequest{
-			Collection: collection,
-			FilterMeta: map[string][]any{
-				"type": {docType},
-			},
-			Limit:  batchSize,
-			Offset: offset,
-		}
-
-		docs, total, err := c.Search(req)
-		if err != nil {
-			return nil, fmt.Errorf("fetching batch at offset %d: %w", offset, err)
-		}
-
-		allDocs = append(allDocs, docs...)
-
-		if len(allDocs) >= total || len(docs) < batchSize {
-			break
-		}
-
-		offset += batchSize
-	}
-
-	return allDocs, nil
+	return getAllPaginated(c.Search, collection, lang,
+		map[string][]any{"type": {docType}}, c.batchSize)
 }
 
 // Health checks if the mddb server is available
@@ -264,7 +315,7 @@ func (c *Client) Health() error {
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrBodySize))
 		return fmt.Errorf("health check failed: %s", string(body))
 	}
 
@@ -280,7 +331,10 @@ type ChecksumResponse struct {
 
 // Checksum returns the checksum for a collection (for change detection)
 func (c *Client) Checksum(collection string) (*ChecksumResponse, error) {
-	endpoint := fmt.Sprintf("/v1/checksum?collection=%s", collection)
+	// GO-041: escape the collection name so '&', spaces etc. cannot alter the query
+	query := url.Values{}
+	query.Set("collection", collection)
+	endpoint := "/v1/checksum?" + query.Encode()
 	resp, err := c.doRequest("GET", endpoint, nil)
 	if err != nil {
 		return nil, err
@@ -288,7 +342,7 @@ func (c *Client) Checksum(collection string) (*ChecksumResponse, error) {
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrBodySize))
 		return nil, fmt.Errorf("checksum request failed: %s", string(body))
 	}
 
@@ -298,6 +352,39 @@ func (c *Client) Checksum(collection string) (*ChecksumResponse, error) {
 	}
 
 	return &checksumResp, nil
+}
+
+// ensureSecureForAPIKey refuses to attach a Bearer API key over plaintext http://
+// to a non-loopback host, preventing credential leakage over untrusted networks
+// (SEC-007). https:// and loopback hosts (localhost, 127.0.0.0/8, ::1) are allowed.
+func ensureSecureForAPIKey(rawURL string, allowHTTP bool) error {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return fmt.Errorf("parsing mddb URL %q: %w", rawURL, err)
+	}
+	if u.Scheme == "https" || isLoopbackHost(u.Hostname()) || allowHTTP {
+		return nil
+	}
+	// The message names the setting that would change the answer. A refusal
+	// whose only remedy is reading the source teaches people to route around
+	// the tool: the escape from this one used to be a private CA mounted into
+	// every container, an hour of certificate ceremony to encrypt a link
+	// between two processes on one host (#201).
+	return fmt.Errorf(
+		"refusing to send API key over plaintext %s:// to non-loopback host %q; "+
+			"use https://, or set mddb.allow_http / mcp.search.mddb_allow_http when the network is private",
+		u.Scheme, u.Hostname())
+}
+
+// isLoopbackHost reports whether host is localhost or a loopback IP.
+func isLoopbackHost(host string) bool {
+	if host == "localhost" || host == "" {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
 
 // doRequest performs an HTTP request to the mddb server
@@ -318,7 +405,10 @@ func (c *Client) doRequest(method, endpoint string, body []byte) (*http.Response
 	req.Header.Set("Accept", "application/json")
 
 	if c.apiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+		if err := ensureSecureForAPIKey(c.baseURL, c.allowHTTP); err != nil {
+			return nil, err
+		}
+		setCredential(req.Header, c.apiKey)
 	}
 
 	resp, err := c.httpClient.Do(req)
@@ -328,10 +418,67 @@ func (c *Client) doRequest(method, endpoint string, body []byte) (*http.Response
 
 	// Don't treat 404 as error for Get - let caller handle it
 	if resp.StatusCode >= 400 && resp.StatusCode != http.StatusNotFound {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrBodySize))
 		_ = resp.Body.Close()
 		return nil, fmt.Errorf("request failed with status %d: %s", resp.StatusCode, string(body))
 	}
 
+	// SEC-009: cap every successful body so downstream decoders/readers are bounded.
+	resp.Body = limitedBody(resp.Body, maxResponseSize)
 	return resp, nil
+}
+
+// setCredential puts the configured secret in the header MDDB reads it from.
+//
+// The two are not interchangeable, which is the whole of #202. MDDB's HTTP
+// middleware takes whatever follows "Bearer " and validates it as a JWT; only
+// when there is no bearer value at all does it look at X-API-Key. So an API key
+// sent as a bearer token is never even offered to the key path — it is parsed
+// as a token, fails, and comes back as `401 invalid token`, which sends the
+// reader off to check a key that was correct all along.
+//
+// A JWT is three base64url segments separated by dots. Anything else is a
+// credential MDDB validates as a key, so it goes in X-API-Key: that is the
+// documented header, and defaulting to it means a key of any format works
+// rather than only the mddb_live_ / mddb_test_ shapes we happen to know about.
+func setCredential(h http.Header, secret string) {
+	if looksLikeJWT(secret) {
+		h.Set("Authorization", "Bearer "+secret)
+		return
+	}
+	h.Set("X-API-Key", secret)
+}
+
+// looksLikeJWT reports whether secret has the shape of a JSON Web Token.
+func looksLikeJWT(secret string) bool {
+	parts := strings.Split(secret, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	for _, p := range parts {
+		if p == "" {
+			return false
+		}
+		for _, r := range p {
+			// base64url: the standard alphabet with - and _ for + and /, and
+			// = where a JWT is padded (it usually is not).
+			if !isBase64URLChar(r) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// isBase64URLChar reports whether r may appear in a JWT segment: the base64url
+// alphabet, which swaps + and / for - and _, plus = where a token is padded
+// (most are not).
+func isBase64URLChar(r rune) bool {
+	switch {
+	case r >= 'A' && r <= 'Z', r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+		return true
+	case r == '-', r == '_', r == '=':
+		return true
+	}
+	return false
 }

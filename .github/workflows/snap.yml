@@ -6,30 +6,60 @@ on:
         tags:
             - "v*"
     workflow_dispatch:
+    # The snap bundles wpexporter, built from @latest AT BUILD TIME, so the
+    # engine a user gets is frozen at the moment the snap was published and a
+    # fix released downstream reaches nobody until ssg is rebuilt (#148). ssg
+    # releases every few days, but the exporter released three times in one day
+    # more than once. A weekly rebuild puts a ceiling on how stale the bundled
+    # engine can get without anyone noticing.
+    schedule:
+        - cron: "17 5 * * 1"
+
+env:
+    FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+# Least-privilege token: this workflow only reads the repo; publishing to the
+# Snap Store uses SNAPCRAFT_STORE_CREDENTIALS, not GITHUB_TOKEN.
+permissions:
+    contents: read
 
 jobs:
     snap:
-        name: Build Snap
-        runs-on: ubuntu-latest
+        name: Build Snap (${{ matrix.arch }})
+        runs-on: ${{ matrix.runner }}
+        timeout-minutes: 30
+        strategy:
+            matrix:
+                include:
+                    - arch: amd64
+                      runner: ubuntu-latest
+                    - arch: arm64
+                      runner: ubuntu-24.04-arm
         steps:
             - name: Checkout code
-              uses: actions/checkout@v6
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
             - name: Build Snap
-              uses: snapcore/action-build@v1
+              uses: snapcore/action-build@3bdaa03e1ba6bf59a65f84a751d943d549a54e79 # v1
               id: build
 
             - name: Upload Snap artifact
-              uses: actions/upload-artifact@v7
+              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
               with:
-                  name: snap-package
+                  name: snap-package-${{ matrix.arch }}
                   path: ${{ steps.build.outputs.snap }}
                   retention-days: 7
 
-            # Publish to Snap Store (requires SNAPCRAFT_STORE_CREDENTIALS secret)
+            # Publish to Snap Store (requires SNAPCRAFT_STORE_CREDENTIALS secret).
+            # workflow_dispatch also publishes, so a stuck store version can be
+            # pushed without cutting a new release — the recovery path this
+            # workflow lacked when it froze at 1.8.6 (OPS-013). A manual run
+            # builds from the default branch, whose VERSION is the truth.
             - name: Publish to Snap Store
-              uses: snapcore/action-publish@v1
-              if: startsWith(github.ref, 'refs/tags/v') && github.repository == 'spagu/ssg'
+              uses: snapcore/action-publish@214b86e5ca036ead1668c79afb81e550e6c54d40 # v1
+              if: >-
+                (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
+                && github.repository == 'spagu/ssg'
               env:
                 SNAPCRAFT_STORE_CREDENTIALS: ${{ secrets.SNAPCRAFT_STORE_CREDENTIALS }}
               with:

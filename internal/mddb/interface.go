@@ -21,6 +21,12 @@ type MddbClient interface {
 
 	// Checksum returns the checksum for a collection (for change detection)
 	Checksum(collection string) (*ChecksumResponse, error)
+
+	// Close releases any resources held by the client. For the HTTP client this
+	// is a no-op; the gRPC client closes its underlying connection. Callers must
+	// Close every client they create to avoid connection/goroutine leaks,
+	// especially in watch mode where a client is created per rebuild (GO-005).
+	Close() error
 }
 
 // ClientConfig holds configuration for creating an MDDB client
@@ -30,6 +36,7 @@ type ClientConfig struct {
 	APIKey    string // Optional API key for authentication
 	Timeout   int    // Timeout in seconds (default: 30)
 	BatchSize int    // Batch size for pagination (default: 1000)
+	AllowHTTP bool   // Permit an API key over plaintext http:// to a private host (#201)
 }
 
 // NewMddbClient creates a new MDDB client based on protocol configuration
@@ -49,6 +56,7 @@ func NewMddbClient(cfg ClientConfig) (MddbClient, error) {
 			APIKey:    cfg.APIKey,
 			Timeout:   cfg.Timeout,
 			BatchSize: cfg.BatchSize,
+			AllowHTTP: cfg.AllowHTTP,
 		}), nil
 	}
 }

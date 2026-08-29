@@ -1,0 +1,329 @@
+/*
+ * ssg comments — a dependency-free comments widget.
+ *
+ * Mount point (the theme renders this on a post):
+ *   <div id="ssg-comments" data-url="/blog/my-post/"></div>
+ *   <script id="ssg-comments-config" type="application/json">
+ *     { "turnstileSiteKey": "0x...", "api": "/api/comments", "order": "newest" }
+ *   </script>
+ *   <script src="/comments.js" defer></script>
+ *
+ * User content is always inserted as text (never innerHTML), so a comment
+ * cannot inject markup. New comments are held for moderation, so nothing a
+ * visitor writes appears until an admin approves it.
+ */
+(function () {
+  "use strict";
+
+  var DEFAULTS = {
+    api: "/api/comments",
+    order: "newest",
+    turnstileSiteKey: "",
+    defaultLang: "en",
+    i18n: {},
+  };
+
+  // UI strings. The active language is <html lang> if we ship it, else
+  // cfg.defaultLang, else English; cfg.i18n[lang] overrides any key, so a site
+  // can retranslate or add a language without editing this file.
+  var STRINGS = {
+    en: {
+      title: "Comments", empty: "No comments yet. Be the first.",
+      formTitle: "Leave a comment",
+      name: "Name", email: "Email (required — never shown publicly)",
+      body: "Your comment", submit: "Post comment",
+      sending: "Sending…", thanks: "Thanks — your comment is awaiting review.",
+      error: "Could not post your comment.", network: "Network error — please try again.",
+      closed: "Comments are closed for this post.",
+      reply: "Reply", replyingTo: "Replying to {author}", cancel: "Cancel",
+    },
+    pl: {
+      title: "Komentarze", empty: "Brak komentarzy. Bądź pierwszy.",
+      formTitle: "Dodaj komentarz",
+      name: "Imię", email: "E-mail (wymagany — nigdy nie pokazywany publicznie)",
+      body: "Twój komentarz", submit: "Opublikuj komentarz",
+      sending: "Wysyłanie…", thanks: "Dziękujemy — komentarz czeka na moderację.",
+      error: "Nie udało się dodać komentarza.", network: "Błąd sieci — spróbuj ponownie.",
+      closed: "Komentarze do tego wpisu są zamknięte.",
+      reply: "Odpowiedz", replyingTo: "Odpowiedź do {author}", cancel: "Anuluj",
+    },
+    de: {
+      title: "Kommentare", empty: "Noch keine Kommentare. Schreiben Sie den ersten.",
+      formTitle: "Kommentar hinterlassen",
+      name: "Name", email: "E-Mail (erforderlich — nie öffentlich angezeigt)",
+      body: "Ihr Kommentar", submit: "Kommentar absenden",
+      sending: "Senden…", thanks: "Danke — Ihr Kommentar wird geprüft.",
+      error: "Kommentar konnte nicht gesendet werden.", network: "Netzwerkfehler — bitte erneut versuchen.",
+      closed: "Die Kommentare zu diesem Beitrag sind geschlossen.",
+      reply: "Antworten", replyingTo: "Antwort an {author}", cancel: "Abbrechen",
+    },
+    fr: {
+      title: "Commentaires", empty: "Aucun commentaire. Soyez le premier.",
+      formTitle: "Laisser un commentaire",
+      name: "Nom", email: "E-mail (obligatoire — jamais affiché publiquement)",
+      body: "Votre commentaire", submit: "Publier le commentaire",
+      sending: "Envoi…", thanks: "Merci — votre commentaire est en attente de validation.",
+      error: "Impossible de publier votre commentaire.", network: "Erreur réseau — veuillez réessayer.",
+      closed: "Les commentaires sont fermés pour cet article.",
+      reply: "Répondre", replyingTo: "En réponse à {author}", cancel: "Annuler",
+    },
+  };
+
+  function strings(cfg) {
+    var html = (document.documentElement.getAttribute("lang") || "").slice(0, 2).toLowerCase();
+    var pick = STRINGS[html] ? html : cfg.defaultLang;
+    var base = STRINGS[pick] || STRINGS.en;
+    return Object.assign({}, base, (cfg.i18n && cfg.i18n[pick]) || {});
+  }
+
+  function readConfig() {
+    var el = document.getElementById("ssg-comments-config");
+    var cfg = Object.assign({}, DEFAULTS);
+    if (el) {
+      try {
+        Object.assign(cfg, JSON.parse(el.textContent || "{}"));
+      } catch (e) {
+        console.warn("ssg-comments: invalid config JSON", e);
+      }
+    }
+    return cfg;
+  }
+
+  function el(tag, attrs, text) {
+    var node = document.createElement(tag);
+    if (attrs) {
+      Object.keys(attrs).forEach(function (k) { node.setAttribute(k, attrs[k]); });
+    }
+    if (text != null) node.textContent = text; // text, never HTML
+    return node;
+  }
+
+  function formatDate(iso) {
+    try {
+      return new Date(iso).toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+    } catch (e) {
+      return iso;
+    }
+  }
+
+  function renderComment(c, t, onReply, canReply) {
+    var item = el("li", { class: "ssg-comment" });
+    var head = el("div", { class: "ssg-comment-head" });
+    if (c.avatar_hash) {
+      head.appendChild(el("img", {
+        class: "ssg-comment-avatar", width: "36", height: "36", alt: "",
+        src: "https://www.gravatar.com/avatar/" + c.avatar_hash + "?s=72&d=identicon",
+      }));
+    }
+    head.appendChild(el("span", { class: "ssg-comment-author" }, c.author));
+    head.appendChild(el("time", { datetime: c.created_at, class: "ssg-comment-date" }, formatDate(c.created_at)));
+    item.appendChild(head);
+    item.appendChild(el("div", { class: "ssg-comment-body" }, c.body));
+    // Only top-level comments get a Reply button — replies are one level deep.
+    if (canReply && onReply) {
+      var reply = el("button", { type: "button", class: "ssg-comment-reply" }, t.reply);
+      reply.addEventListener("click", function () { onReply(c); });
+      item.appendChild(reply);
+    }
+    return item;
+  }
+
+  function renderList(root, data, t, onReply) {
+    root.appendChild(el("h2", { class: "ssg-comments-title" }, t.title + " (" + data.count + ")"));
+    if (!data.comments.length) {
+      root.appendChild(el("p", { class: "ssg-comments-empty" }, t.empty));
+      return;
+    }
+    // Group replies under their parent (one level deep).
+    var childrenOf = {};
+    var tops = [];
+    data.comments.forEach(function (c) {
+      if (c.parent_id) { (childrenOf[c.parent_id] = childrenOf[c.parent_id] || []).push(c); }
+      else { tops.push(c); }
+    });
+    var list = el("ol", { class: "ssg-comments-list" });
+    tops.forEach(function (c) {
+      var item = renderComment(c, t, onReply, true);
+      var kids = childrenOf[c.id];
+      if (kids && kids.length) {
+        var sub = el("ol", { class: "ssg-comments-replies" });
+        kids.forEach(function (r) { sub.appendChild(renderComment(r, t, onReply, false)); });
+        item.appendChild(sub);
+      }
+      list.appendChild(item);
+    });
+    root.appendChild(list);
+  }
+
+  function renderForm(root, cfg, url, t, published, onPosted) {
+    var form = el("form", { class: "ssg-comments-form", novalidate: "" });
+    var replyTo = null; // { id, author } when replying, else null
+
+    // "Replying to X — cancel" banner, shown only while a reply is in progress.
+    var banner = el("div", { class: "ssg-reply-banner", hidden: "" });
+    var bannerText = el("span", null, "");
+    var bannerCancel = el("button", { type: "button", class: "ssg-reply-cancel" }, t.cancel);
+    bannerCancel.addEventListener("click", function () { setReplyTo(null); });
+    banner.appendChild(bannerText);
+    banner.appendChild(bannerCancel);
+    form.appendChild(banner);
+
+    function setReplyTo(c) {
+      replyTo = c ? { id: c.id, author: c.author } : null;
+      if (replyTo) {
+        bannerText.textContent = (t.replyingTo || "Replying to {author}").replace("{author}", c.author);
+        banner.hidden = false;
+        if (form.scrollIntoView) form.scrollIntoView({ behavior: "smooth", block: "center" });
+      } else {
+        banner.hidden = true;
+      }
+    }
+
+    form.appendChild(el("h3", null, t.formTitle));
+
+    var name = el("input", { type: "text", name: "author", required: "", maxlength: "80", placeholder: t.name, "aria-label": t.name });
+    var email = el("input", { type: "email", name: "email", required: "", maxlength: "254", placeholder: t.email, "aria-label": t.email });
+    var body = el("textarea", { name: "body", required: "", rows: "4", maxlength: "5000", placeholder: t.body, "aria-label": t.body });
+    form.appendChild(name);
+    form.appendChild(email);
+    form.appendChild(body);
+
+    if (cfg.turnstileSiteKey) {
+      form.appendChild(el("div", { class: "cf-turnstile", "data-sitekey": cfg.turnstileSiteKey }));
+    }
+
+    var status = el("p", { class: "ssg-comments-status", role: "status", "aria-live": "polite" });
+    var submit = el("button", { type: "submit", class: "ssg-comments-submit" }, t.submit);
+    form.appendChild(submit);
+    form.appendChild(status);
+
+    form.addEventListener("submit", function (e) {
+      e.preventDefault();
+      submit.disabled = true;
+      status.textContent = t.sending;
+      var token = "";
+      var tw = form.querySelector('[name="cf-turnstile-response"]');
+      if (tw) token = tw.value;
+      fetch(cfg.api, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          url: url, author: name.value, email: email.value, body: body.value,
+          token: token, published: published,
+          parentId: replyTo ? replyTo.id : undefined,
+        }),
+      })
+        // Parse the body defensively: a server error can return a non-JSON body
+        // (e.g. a raw 500), which must not be mistaken for a network failure.
+        .then(function (r) {
+          return r.text().then(function (text) {
+            var d = null;
+            try { d = JSON.parse(text); } catch (e) { /* non-JSON body */ }
+            return { ok: r.ok, status: r.status, d: d };
+          });
+        })
+        .then(function (res) {
+          if (res.ok) {
+            // Posted → remember it and replace the form with the "awaiting
+            // review" notice, so the visitor can't stack up comments. It stays
+            // hidden (across reloads) until this comment is approved.
+            setPending(url, body.value.trim().slice(0, 5000));
+            var notice = el("p", { class: "ssg-comments-closed" }, t.thanks);
+            if (form.parentNode) form.parentNode.replaceChild(notice, form);
+            if (onPosted) onPosted();
+            return;
+          }
+          status.textContent = (res.d && res.d.error) || (t.error + " (" + res.status + ")");
+        })
+        .catch(function () { status.textContent = t.network; })
+        .finally(function () {
+          submit.disabled = false;
+          if (window.turnstile) { try { window.turnstile.reset(); } catch (e2) { /* ignore */ } }
+        });
+    });
+
+    root.appendChild(form);
+    return { setReplyTo: setReplyTo };
+  }
+
+  function loadTurnstileScript() {
+    if (document.querySelector('script[src*="challenges.cloudflare.com/turnstile"]')) return;
+    var s = document.createElement("script");
+    s.src = "https://challenges.cloudflare.com/turnstile/v0/api.js";
+    s.async = true;
+    s.defer = true;
+    document.head.appendChild(s);
+  }
+
+  // Remember a comment the visitor posted here, so the form stays hidden until
+  // it's approved. Stored per-URL with a 14-day TTL so a comment that is never
+  // approved (e.g. rejected as spam) doesn't hide the form forever.
+  function pendingKey(url) { return "ssgc-pending:" + url; }
+  function getPending(url) {
+    try {
+      var raw = localStorage.getItem(pendingKey(url));
+      if (!raw) return null;
+      var o = JSON.parse(raw);
+      if (!o || Date.now() - (o.t || 0) > 14 * 864e5) { clearPending(url); return null; }
+      return o.b || null;
+    } catch (e) { return null; }
+  }
+  function setPending(url, body) {
+    try { localStorage.setItem(pendingKey(url), JSON.stringify({ b: body, t: Date.now() })); } catch (e) { /* ignore */ }
+  }
+  function clearPending(url) {
+    try { localStorage.removeItem(pendingKey(url)); } catch (e) { /* ignore */ }
+  }
+
+  function mount() {
+    var root = document.getElementById("ssg-comments");
+    if (!root) return;
+    var url = root.getAttribute("data-url") || location.pathname;
+    var published = root.getAttribute("data-published") || "";
+    var cfg = readConfig();
+    var t = strings(cfg);
+
+    var q = cfg.api + "?url=" + encodeURIComponent(url);
+    if (published) q += "&published=" + encodeURIComponent(published);
+
+    fetch(q, { headers: { accept: "application/json" } })
+      .then(function (r) { return r.ok ? r.json() : { comments: [], count: 0 }; })
+      .then(function (data) {
+        root.textContent = "";
+        // A Reply button targets the form's reply mode; the form is rendered
+        // after the list, so resolve it lazily through this closure.
+        var formApi = null;
+        var onReply = function (c) { if (formApi) formApi.setReplyTo(c); };
+        renderList(root, data, t, onReply);
+        // A closed thread shows its history but no form.
+        if (data.closed) {
+          root.appendChild(el("p", { class: "ssg-comments-closed" }, t.closed));
+          return;
+        }
+        // The visitor already posted here and it's awaiting review: keep the
+        // form hidden until that comment is approved (shows up in the list).
+        var mine = getPending(url);
+        if (mine) {
+          if (data.comments.some(function (c) { return c.body === mine; })) {
+            clearPending(url); // approved now → they may post again
+          } else {
+            root.appendChild(el("p", { class: "ssg-comments-closed" }, t.thanks));
+            return;
+          }
+        }
+        if (cfg.turnstileSiteKey) loadTurnstileScript();
+        formApi = renderForm(root, cfg, url, t, published, function () { /* comment pending; list unchanged until approved */ });
+      })
+      .catch(function () {
+        root.textContent = "";
+        if (cfg.turnstileSiteKey) loadTurnstileScript();
+        renderForm(root, cfg, url, t, published);
+      });
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", mount);
+  } else {
+    mount();
+  }
+})();

@@ -1,40 +1,92 @@
-name: ssg
-version: "1.7.7"
-summary: Static Site Generator
+name: static-site-generator
+# The version is NOT hardcoded here: it is read from ./VERSION at build time by
+# the `ssg` part below (adopt-info). A literal `version:` field is what let the
+# Snap Store sit on 1.8.6 from 1.8.6 through 1.8.12 while every release reported
+# a successful publish — sync-version.sh never covered this file, so the number
+# was frozen. Reading the single source of truth directly makes drift impossible
+# (OPS-013). Fixed in 1.8.13; the range above is history — do NOT bump it.
+adopt-info: ssg
+title: SSG - Static Site Generator
+summary: Fast static site generator written in Go
 description: |
-  Fast static site generator written in Go.
-  Converts Markdown content with YAML frontmatter to static HTML.
+  SSG converts Markdown content with YAML frontmatter to static HTML sites.
 
   Features:
   - Built-in HTTP server with watch mode
   - WebP image conversion
   - Cloudflare Pages deployment support
-  - Multiple templates (simple, krowy)
+  - Multiple template engines (Go, Pongo2, Mustache, Handlebars)
   - SEO-friendly URL generation
+  - Config variables with env var support
+  - .md link rewriting
+  - Custom content paths (pages_path, posts_path)
+  - Preserve slug case option
 
 grade: stable
-confinement: classic
+confinement: strict
 license: BSD-3-Clause
 base: core24
+
+contact: https://github.com/spagu/ssg/issues
+issues: https://github.com/spagu/ssg/issues
+source-code: https://github.com/spagu/ssg
+website: https://github.com/spagu/ssg
+donation: https://github.com/sponsors/spagu
 
 platforms:
   amd64:
   arm64:
 
 apps:
+  static-site-generator:
+    command: bin/ssg
+    plugs:
+      - home
+      - removable-media
+      - network
+      - network-bind
   ssg:
     command: bin/ssg
     plugs:
       - home
+      - removable-media
       - network
       - network-bind
 
 parts:
   ssg:
-    plugin: go
+    # plugin: nil (not "go") so snapcraft's Go plugin does not run its compiler
+    # version check, which chokes on the "go: downloading go1.26.5" line emitted
+    # when go.mod's toolchain (>= 1.26.5) is newer than the go snap. GOTOOLCHAIN
+    # stays "auto", so `go build` fetches the required toolchain cleanly.
+    plugin: nil
     source: .
     source-type: local
     build-snaps:
       - go/latest/stable
+    # Bundle cwebp so `webp: true` works under strict confinement, where
+    # exec.LookPath only sees the snap's own rootfs — the host's /usr/bin/cwebp
+    # is invisible. `webp` puts cwebp in $SNAP/usr/bin, which is on the app PATH
+    # (#114). avifenc (libavif-bin) does the same for AVIF output.
+    stage-packages:
+      - webp
+      - libavif-bin
+    build-environment:
+      - GOTOOLCHAIN: auto
     override-build: |
-      go build -ldflags "-s -w" -o $SNAPCRAFT_PART_INSTALL/bin/ssg ./cmd/ssg
+      # Single source of truth: ./VERSION is copied in with `source: .`, so the
+      # snap version and the binary's -X main.Version can never disagree with the
+      # release, and no packaging-sync step has to remember this file (OPS-013).
+      VERSION="$(tr -d '[:space:]' < VERSION)"
+      craftctl set version="$VERSION"
+      mkdir -p "$SNAPCRAFT_PART_INSTALL/bin"
+      go build -ldflags "-s -w -X main.Version=$VERSION" -o "$SNAPCRAFT_PART_INSTALL/bin/ssg" ./cmd/ssg
+      # Bundle the WordPress migration engine for the same reason as cwebp
+      # above (#114): `ssg migrate wordpress` execs wpexporter, and a strictly
+      # confined snap sees only its own rootfs. The host's copy is invisible —
+      # and installing the wpexporter SNAP does not help either, because a snap
+      # cannot execute another snap ("cannot join mount namespace of pid 1").
+      # `go install pkg@latest` is module-aware and ignores this repo's go.mod,
+      # so it always picks up wpexporter's newest tagged release.
+      GOBIN="$SNAPCRAFT_PART_INSTALL/bin" go install -ldflags "-s -w" \
+        github.com/tradik/wpexporter/cmd/wpexporter@latest

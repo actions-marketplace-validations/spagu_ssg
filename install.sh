@@ -5,7 +5,7 @@
 # =============================================================================
 set -e
 
-VERSION="${SSG_VERSION:-1.7.7}"
+VERSION="${SSG_VERSION:-1.8.52}"
 INSTALL_DIR="${SSG_INSTALL_DIR:-/usr/local/bin}"
 
 RED='\033[0;31m'
@@ -44,11 +44,10 @@ download_and_install() {
     log_info "Downloading SSG v${VERSION}..."
     
     if command -v curl &> /dev/null; then
-        curl -sL "$url" -o "$tmp_dir/ssg.tar.gz"
-    elif command -v wget &> /dev/null; then
-        wget -q "$url" -O "$tmp_dir/ssg.tar.gz"
+        curl --proto '=https' --proto-redir =https -sL "$url" -o "$tmp_dir/ssg.tar.gz"
     else
-        log_error "curl or wget is required"
+        log_error "curl is required"
+        exit 1
     fi
     
     log_info "Extracting..."

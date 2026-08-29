@@ -7,19 +7,30 @@ package main
 
 import (
 	"archive/zip"
+	"context"
 	"fmt"
 	"io"
-	"net/http"
+	"net"
 	"os"
+	"os/exec"
+	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
+	_ "time/tzdata" // embed the IANA zone db so --timezone works in static/Windows builds (I18N-001)
 
+	"github.com/spagu/ssg/internal/ai"
 	"github.com/spagu/ssg/internal/config"
+	"github.com/spagu/ssg/internal/deploy"
 	"github.com/spagu/ssg/internal/engine"
+	"github.com/spagu/ssg/internal/fetch"
 	"github.com/spagu/ssg/internal/generator"
 	"github.com/spagu/ssg/internal/mddb"
+	"github.com/spagu/ssg/internal/notify"
 	"github.com/spagu/ssg/internal/theme"
 	"github.com/spagu/ssg/internal/webp"
 )
@@ -30,6 +41,16 @@ var Version = "dev"
 func main() {
 	args := os.Args[1:]
 
+	// Subcommands. Verb+noun pairs (new worker, import redirects) dispatch only
+	// on a known noun so a source directory literally named "new"/"import" still
+	// builds normally (GO-067). `init` is a standalone verb like `git init`.
+	if code, handled := dispatchSingleVerb(args); handled {
+		os.Exit(code)
+	}
+	if code, handled := dispatchSubcommand(args); handled {
+		os.Exit(code)
+	}
+
 	cfg := loadConfig(args)
 	parseFlags(args, cfg)
 	validateRequiredFields(args, cfg)
@@ -39,18 +60,35 @@ func main() {
 
 	genCfg := createGeneratorConfig(cfg)
 
+	// Which binary produced this output, on the first line of it (#193). A build
+	// log read a month later — in CI, or on someone else's machine — otherwise
+	// gives no way to tell whether the tool changed or the site did.
+	logRunningVersion(cfg)
+
 	if !runInitialBuild(genCfg, cfg) && !cfg.Watch && !cfg.HTTP {
 		os.Exit(1)
 	}
 
 	if cfg.HTTP {
-		go startServer(cfg.OutputDir, cfg.Port, cfg.Quiet)
+		if autoReloadEnabled(cfg) {
+			setReloadHub(newLiveReloadHub())
+		}
+		startServerAsync(cfg)
 	}
 
 	runWatchOrServe(genCfg, cfg)
 }
 
-// applyMinifyAll sets all minify flags if minify_all is enabled
+// autoReloadEnabled reports whether live reload should run: it needs both the
+// server and the watcher, and is on by default unless explicitly disabled.
+func autoReloadEnabled(cfg *config.Config) bool {
+	return cfg.HTTP && cfg.Watch && (cfg.AutoReload == nil || *cfg.AutoReload)
+}
+
+// applyMinifyAll sets all minify flags if minify_all is enabled. config.Load
+// performs the same expansion for file-based configs, but this call is NOT
+// redundant: it is the only expansion point when --minify-all is given on the
+// command line (parsed after config load) or when no config file exists (GO-046).
 func applyMinifyAll(cfg *config.Config) {
 	if cfg.MinifyAll {
 		cfg.MinifyHTML = true
@@ -63,7 +101,7 @@ func applyMinifyAll(cfg *config.Config) {
 func runInitialBuild(genCfg generator.Config, cfg *config.Config) bool {
 	if err := build(genCfg, cfg); err != nil {
 		if !cfg.Quiet {
-			fmt.Fprintf(os.Stderr, "❌ Error: %v\n", err)
+			errf("❌ Error: %v\n", err)
 		}
 		return false
 	}
@@ -78,25 +116,162 @@ func runWatchOrServe(genCfg generator.Config, cfg *config.Config) {
 	if cfg.Mddb.Watch && cfg.Mddb.Enabled {
 		runMddbWatchLoop(genCfg, cfg)
 	} else if cfg.Watch {
-		runWatchLoop(genCfg, cfg)
+		runWatchLoop(genCfg, cfg, nil) // the process's own loop: it ends with the process
 	} else if cfg.HTTP {
 		select {}
 	}
 }
 
-// runWatchLoop continuously watches for file changes and rebuilds
-func runWatchLoop(genCfg generator.Config, cfg *config.Config) {
+// runWatchLoop continuously watches for file changes and rebuilds. Rebuilds are
+// gated on a content signature so that touch-only events (mtime bumped, bytes
+// unchanged) do not trigger redundant work — a conservative first increment of
+// incremental builds where any real change still triggers a full, correct rebuild
+// (PLAT-006).
+func runWatchLoop(genCfg generator.Config, cfg *config.Config, stop <-chan struct{}) {
+	configPath := configPathOf(os.Args[1:])
 	if !cfg.Quiet {
-		fmt.Println("👀 Watching for changes in content and templates...")
+		fmt.Printf("👀 Watching for changes in %s...\n", strings.Join(watchedInputs(cfg, configPath), ", "))
 	}
-	lastBuild := time.Now()
-
-	for {
-		time.Sleep(1 * time.Second)
-		if hasChanges([]string{cfg.ContentDir, cfg.TemplatesDir}, lastBuild) {
-			lastBuild = rebuildOnChange(genCfg, cfg)
+	// A configured worker defaults the watch runner to `wrangler pages dev`, so
+	// the static preview and the Functions run together (GO-065). Only here, in
+	// the watch path — a one-shot build must never start a runner. Generate a
+	// starter wrangler.toml first when one is missing, so `wrangler pages dev`
+	// has bindings to read (GO-077).
+	ensureWranglerForWorkers(cfg)
+	config.ApplyWorkerWatchDefaults(cfg)
+	if cfg.WatchRunner != "" {
+		cmd := startWatchRunner(watchRunnerSpec{
+			Runner: cfg.WatchRunner,
+			Config: cfg.WatchRunnerConfig,
+			Dir:    cfg.WatchRunnerDir,
+			Quiet:  cfg.Quiet,
+		})
+		if cmd != nil {
+			defer func() {
+				if cmd.Process != nil {
+					_ = cmd.Process.Kill()
+				}
+			}()
 		}
 	}
+	dirs := watchDirs(cfg)
+	// One cache for the whole loop: unchanged files keep their hash between
+	// polls, so a change event never re-reads the entire content tree (PERF-008).
+	sigCache := newFileSigCache()
+	lastBuild := time.Now()
+	lastSig := sigCache.signature(dirs)
+	configSig := fileSignature(configPath)
+
+	for {
+		select {
+		case <-stop:
+			// The owner is done with this watcher. A nil channel never fires,
+			// which is the main command's case: its watch loop ends with the
+			// process. `ssg migrate --watch` does have an owner, and a watcher
+			// outliving it kept rebuilding into whatever directory the process
+			// had wandered to by then (#191).
+			return
+		case <-time.After(1 * time.Second):
+		}
+		// The config file is watched as an input of its own: an edit reloads it
+		// and rebuilds with the new settings, so the watcher never keeps building
+		// from the configuration it started with (#70).
+		if sig := fileSignature(configPath); sig != configSig {
+			configSig = sig
+			if newGen, newCfg, ok := reloadWatchConfig(os.Args[1:], configPath, cfg); ok {
+				genCfg, cfg = newGen, newCfg
+				dirs = watchDirs(cfg)
+				sigCache = newFileSigCache()
+				lastSig = sigCache.signature(dirs)
+			}
+			rebuildOnChange(genCfg, cfg)
+			lastBuild = time.Now()
+			continue
+		}
+		lastBuild, lastSig = watchIteration(dirs, sigCache, lastBuild, lastSig, func() {
+			rebuildOnChange(genCfg, cfg)
+		})
+	}
+}
+
+// watchedInputs names what the watcher observes, so the startup line tells the
+// truth about which edits trigger a rebuild (#70).
+func watchedInputs(cfg *config.Config, configPath string) []string {
+	inputs := []string{"content", "templates"}
+	if cfg.DataDir != "" {
+		inputs = append(inputs, "data")
+	}
+	if configPath != "" {
+		inputs = append(inputs, "config ("+configPath+")")
+	}
+	return inputs
+}
+
+// reloadWatchConfig re-runs the startup configuration pipeline after the config
+// file changed, returning the refreshed pair. On a config that no longer loads it
+// reports the error and returns ok=false, so the watcher keeps the last good
+// settings instead of dying on a half-saved edit.
+//
+// args are the command-line arguments the flags are re-applied from. They are a
+// parameter rather than os.Args[1:] because `ssg mcp --watch` reloads through
+// here too (#184), and its argument list still carries the `mcp` verb and the
+// mcp-only flags — replaying those through parseFlags would read the subcommand
+// name as a source directory.
+func reloadWatchConfig(args []string, configPath string, old *config.Config) (generator.Config, *config.Config, bool) {
+	cfg, err := loadConfigFile(configPath)
+	if err != nil {
+		if !old.Quiet {
+			errf("❌ Config error: %v\n", err)
+			fmt.Println("⚠️  Keeping the previous configuration — fix the file and save to retry...")
+		}
+		return generator.Config{}, nil, false
+	}
+	parseFlags(args, cfg) // command-line flags still win over the file
+	applyMinifyAll(cfg)
+	setupTemplateEngine(cfg)
+	// Endpoints are served by the running server, which was wired at startup;
+	// republish them or a route added to the config answers 404 until the
+	// process restarts (#180).
+	republishEndpoints(cfg)
+	if !cfg.Quiet {
+		fmt.Printf("♻️  Configuration reloaded from %s\n", configPath)
+	}
+	return createGeneratorConfig(cfg), cfg, true
+}
+
+// watchIteration runs one poll of the watch loop: detect changes, skip
+// touch-only events, rebuild. It returns the updated lastBuild/lastSig pair.
+// The build timestamp is taken BEFORE the rebuild runs, so files edited while
+// the build is in progress are picked up on the next poll instead of being
+// lost (GO-025).
+func watchIteration(dirs []string, sigCache *fileSigCache, lastBuild time.Time, lastSig string, rebuild func()) (time.Time, string) {
+	if !hasChanges(dirs, lastBuild) {
+		return lastBuild, lastSig
+	}
+	sig := sigCache.signature(dirs)
+	if sig == lastSig {
+		// mtime changed but bytes did not — skip the rebuild (PLAT-006).
+		return time.Now(), lastSig
+	}
+	buildStart := time.Now()
+	rebuild()
+	return buildStart, sig
+}
+
+// watchDirs returns the directories watched for changes: content, templates,
+// data and every extra Markdown root, so editing a file in a content_sources
+// directory rebuilds like editing the primary source does (CONTENT-002).
+func watchDirs(cfg *config.Config) []string {
+	dirs := []string{cfg.ContentDir, cfg.TemplatesDir}
+	if cfg.DataDir != "" {
+		dirs = append(dirs, cfg.DataDir)
+	}
+	for _, src := range cfg.ContentSources {
+		if p := strings.TrimSpace(src.Path); p != "" {
+			dirs = append(dirs, p)
+		}
+	}
+	return dirs
 }
 
 // runMddbWatchLoop continuously polls MDDB checksum and rebuilds on changes
@@ -107,9 +282,10 @@ func runMddbWatchLoop(genCfg generator.Config, cfg *config.Config) {
 		APIKey:    cfg.Mddb.APIKey,
 		Timeout:   cfg.Mddb.Timeout,
 		BatchSize: cfg.Mddb.BatchSize,
+		AllowHTTP: cfg.Mddb.AllowHTTP,
 	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Error creating MDDB client: %v\n", err)
+		errf("❌ Error creating MDDB client: %v\n", err)
 		return
 	}
 
@@ -128,7 +304,7 @@ func runMddbWatchLoop(genCfg generator.Config, cfg *config.Config) {
 	// Get initial checksum
 	checksumResp, err := client.Checksum(cfg.Mddb.Collection)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "⚠️  Could not get initial checksum: %v\n", err)
+		errf("⚠️  Could not get initial checksum: %v\n", err)
 	} else {
 		lastChecksum = checksumResp.Checksum
 		if !cfg.Quiet {
@@ -143,7 +319,7 @@ func runMddbWatchLoop(genCfg generator.Config, cfg *config.Config) {
 		checksumResp, err := client.Checksum(cfg.Mddb.Collection)
 		if err != nil {
 			if !cfg.Quiet {
-				fmt.Fprintf(os.Stderr, "⚠️  Checksum check failed: %v\n", err)
+				errf("⚠️  Checksum check failed: %v\n", err)
 			}
 			continue
 		}
@@ -159,93 +335,188 @@ func runMddbWatchLoop(genCfg generator.Config, cfg *config.Config) {
 	}
 }
 
-// rebuildOnChange handles rebuilding when changes are detected
-func rebuildOnChange(genCfg generator.Config, cfg *config.Config) time.Time {
+// rebuildOnChange handles rebuilding when changes are detected. It no longer
+// returns a completion timestamp: the watch loop stamps lastBuild before the
+// build starts so mid-build edits are not lost (GO-025).
+func rebuildOnChange(genCfg generator.Config, cfg *config.Config) {
 	if !cfg.Quiet {
 		fmt.Println("\n🔄 Changes detected! Rebuilding...")
 	}
 	if err := build(genCfg, cfg); err != nil {
+		notifyBuildError(err.Error()) // show the error overlay in connected browsers
 		if !cfg.Quiet {
-			fmt.Fprintf(os.Stderr, "❌ Build error: %v\n", err)
+			errf("❌ Build error: %v\n", err)
 			fmt.Println("⚠️  Fix the issue and save to retry...")
 		}
-	} else if !cfg.Quiet {
-		fmt.Printf("✅ Rebuilt successfully\n")
+	} else {
+		// The generated _redirects/_headers changed with everything else, so
+		// the running server re-reads them here rather than waiting for a
+		// config edit or a restart (#181).
+		republishOutputRules(cfg)
+		notifyReload() // refresh connected browsers (no-op unless --auto-reload)
+		if !cfg.Quiet {
+			fmt.Printf("✅ Rebuilt successfully\n")
+		}
 	}
 	if !cfg.Quiet {
 		fmt.Println("👀 Watching for changes...")
 	}
-	return time.Now()
 }
+
+// configFlag selects the configuration file; it is consumed by loadConfig before
+// the regular flag parsing runs.
+const configFlag = "--config"
 
 // loadConfig loads configuration from file or returns defaults
 func loadConfig(args []string) *config.Config {
-	var configPath string
+	cfg, err := loadConfigFile(configPathOf(args))
+	if err != nil {
+		errf("❌ Error loading config: %v\n", err)
+		os.Exit(1)
+	}
+	return cfg
+}
 
-	// Look for --config flag
+// configPathOf resolves which configuration file a run uses: an explicit
+// --config, else the auto-detected default, else "" for a flags-only run.
+func configPathOf(args []string) string {
 	for i, arg := range args {
-		if strings.HasPrefix(arg, "--config=") {
-			configPath = strings.TrimPrefix(arg, "--config=")
-		} else if arg == "--config" && i+1 < len(args) {
-			configPath = args[i+1]
+		if strings.HasPrefix(arg, configFlag+"=") {
+			return strings.TrimPrefix(arg, configFlag+"=")
+		} else if arg == configFlag && i+1 < len(args) {
+			return args[i+1]
 		}
 	}
+	return config.FindConfigFile()
+}
 
-	// If no --config, look for default config file
-	if configPath == "" {
-		configPath = config.FindConfigFile()
+// loadConfigFile loads a config file, or returns the defaults when path is empty.
+// Unlike loadConfig it reports errors instead of exiting, so the watcher can keep
+// running on a broken edit (#70).
+func loadConfigFile(path string) (*config.Config, error) {
+	if path == "" {
+		return config.DefaultConfig(), nil
 	}
-
-	// Load config file if exists
-	if configPath != "" {
-		cfg, err := config.Load(configPath)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "❌ Error loading config: %v\n", err)
-			os.Exit(1)
-		}
-		return cfg
-	}
-
-	return config.DefaultConfig()
+	return config.Load(path)
 }
 
 // validateRequiredFields validates and populates required config fields
 func validateRequiredFields(args []string, cfg *config.Config) {
-	if cfg.Source != "" && cfg.Template != "" && cfg.Domain != "" {
-		return
+	positionalArgs := positionalArgsOf(args)
+	// GO-053: never swallow extra positionals silently — they are almost always
+	// a mistyped flag form (e.g. "--paginate 10" works, but a typo would not).
+	if len(positionalArgs) > 3 {
+		errf("⚠️  Ignoring unexpected positional arguments: %s\n",
+			strings.Join(positionalArgs[3:], " "))
 	}
-
-	// Check positional args
-	var positionalArgs []string
-	for _, arg := range args {
-		if !strings.HasPrefix(arg, "-") {
-			positionalArgs = append(positionalArgs, arg)
-		}
+	// content_sources can supply the whole site, in which case there is no
+	// primary source tree to name (CONTENT-002).
+	sourceOptional := len(cfg.ContentSources) > 0
+	if (cfg.Source != "" || sourceOptional) && cfg.Template != "" && cfg.Domain != "" {
+		return
 	}
 
 	if len(positionalArgs) >= 3 {
 		cfg.Source = positionalArgs[0]
 		cfg.Template = positionalArgs[1]
 		cfg.Domain = positionalArgs[2]
-	} else if cfg.Source == "" || cfg.Template == "" || cfg.Domain == "" {
-		printUsage()
+	} else if sourceOptional && len(positionalArgs) == 2 {
+		// ssg --content-source=docs <template> <domain>
+		cfg.Template = positionalArgs[0]
+		cfg.Domain = positionalArgs[1]
+	} else if (cfg.Source == "" && !sourceOptional) || cfg.Template == "" || cfg.Domain == "" {
+		reportMissingSettings(cfg, sourceOptional)
+		// Point at --help rather than dumping the whole thing after the error.
+		errln("   Run `ssg --help` for options, `ssg --version` for the version.")
 		os.Exit(1)
 	}
 }
 
-// setupTemplateEngine validates the template engine
-func setupTemplateEngine(cfg *config.Config) {
-	if cfg.Engine == "" {
-		return
+// reportMissingSettings names exactly which required settings are missing and
+// where they can come from, before the usage text. Printing usage alone (the
+// previous behaviour) left the reader to diff three values against a wall of
+// flags — and said nothing when a config file WAS loaded but a key in it was
+// spelled wrong or belonged to a newer ssg (UX-002).
+func reportMissingSettings(cfg *config.Config, sourceOptional bool) {
+	var missing []string
+	if cfg.Source == "" && !sourceOptional {
+		missing = append(missing, "source")
 	}
+	if cfg.Template == "" {
+		missing = append(missing, "template")
+	}
+	if cfg.Domain == "" {
+		missing = append(missing, "domain")
+	}
+	errf("❌ Missing required setting(s): %s\n", strings.Join(missing, ", "))
 
-	if _, err := engine.New(cfg.Engine); err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Error: %v\n", err)
+	if path := config.FindConfigFile(); path != "" {
+		errf("   Config file in use: %s\n", path)
+		errf("   Values it provided: source=%q template=%q domain=%q\n",
+			cfg.Source, cfg.Template, cfg.Domain)
+		if cfg.Source == "" && !sourceOptional {
+			errln("   A site with no `source:` needs `content_sources:` (ssg 1.8.10+)" +
+				" — an older ssg ignores that key, which looks exactly like this.")
+		}
+	} else {
+		errln("   No .ssg.yaml/.ssg.toml/.ssg.json found in the current directory.")
+	}
+	errf("   Pass them positionally (ssg %s) or set them in the config file.\n\n",
+		strings.Join(missing, " "))
+}
+
+// positionalArgsOf extracts positional arguments, skipping flags and the values
+// consumed by space-separated value flags so e.g. "--engine go" never leaks "go"
+// into <source>/<template>/<domain> (GO-036, GO-053).
+func positionalArgsOf(args []string) []string {
+	known := valueFlags()
+	var positional []string
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if !strings.HasPrefix(arg, "-") {
+			positional = append(positional, arg)
+			continue
+		}
+		if !strings.Contains(arg, "=") && known[arg] && i+1 < len(args) {
+			i++ // skip the flag's value (GO-036)
+		}
+	}
+	return positional
+}
+
+// setupTemplateEngine validates the template engine and deploy target, exiting on error.
+func setupTemplateEngine(cfg *config.Config) {
+	if err := validateTemplateEngine(cfg); err != nil {
+		errf("❌ Error: %v\n", err)
+		os.Exit(1)
+	}
+	if cfg.Deploy != "" && !deploy.Supported(cfg.Deploy) {
+		errf("❌ Error: unknown --deploy provider %q (supported: %s)\n",
+			cfg.Deploy, strings.Join(deploy.SupportedProviders(), ", "))
 		os.Exit(1)
 	}
 
-	if !cfg.Quiet {
+	if cfg.Engine != "" && !cfg.Quiet {
 		fmt.Printf("🔧 Using template engine: %s\n", cfg.Engine)
+	}
+}
+
+// validateTemplateEngine checks that the requested template engine is supported.
+// All four back-ends now render for real (GO-007): the generator loads the theme's
+// templates through the selected engine. Alt-engine themes must be authored in
+// that engine's syntax (pongo2/mustache/handlebars have no Go FuncMap/inheritance).
+func validateTemplateEngine(cfg *config.Config) error {
+	if cfg.Engine == "" {
+		return nil
+	}
+	switch strings.ToLower(cfg.Engine) {
+	case engine.EngineGo,
+		engine.EnginePongo2, "jinja2", "django",
+		engine.EngineMustache,
+		engine.EngineHandlebars, "hbs":
+		return nil
+	default:
+		return fmt.Errorf("unknown template engine: %s (supported: go, pongo2, mustache, handlebars)", cfg.Engine)
 	}
 }
 
@@ -261,13 +532,60 @@ func downloadOnlineTheme(cfg *config.Config) {
 	}
 
 	if err := theme.Download(cfg.OnlineTheme, themeDir); err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Error downloading theme: %v\n", err)
+		errf("❌ Error downloading theme: %v\n", err)
 		os.Exit(1)
 	}
 }
 
 // createGeneratorConfig creates generator.Config from app config
+// buildAIClient constructs the build-time AI client from config, or nil when no
+// models are declared (the [ai …] shortcode then resolves to its fallback).
+func buildAIClient(cfg config.AIConfig) *ai.Client {
+	if len(cfg.Models) == 0 {
+		return nil
+	}
+	models := make(map[string]ai.Model, len(cfg.Models))
+	for name, m := range cfg.Models {
+		models[name] = ai.Model{
+			URL: m.URL, Key: m.Key, Model: m.Model, System: m.System,
+			MaxTokens: m.MaxTok, Temperature: m.Temp,
+		}
+	}
+	agents := make(map[string]ai.Agent, len(cfg.Agents))
+	for name, a := range cfg.Agents {
+		agents[name] = ai.Agent{
+			Model: a.Model, System: a.System,
+			Rules: a.Rules, Skills: a.Skills,
+			MaxTokens: a.MaxTok, Temperature: a.Temp,
+		}
+	}
+	timeout, _ := time.ParseDuration(cfg.Timeout) // 0 on error/empty ⇒ client default
+	return ai.New(models, agents, cfg.DefaultModel, cfg.DefaultAgent, cfg.CacheDir, timeout)
+}
+
+// buildNotifier constructs the post-publish notifier, or nil when --notify is
+// off or no destinations are declared (so builds never announce by accident).
+func buildNotifier(cfg *config.Config) *notify.Notifier {
+	if !cfg.Notify || len(cfg.Notifications) == 0 {
+		return nil
+	}
+	dests := make([]notify.Dest, 0, len(cfg.Notifications))
+	for _, d := range cfg.Notifications {
+		dests = append(dests, notify.Dest{
+			Name: d.Name, URL: d.URL, Method: d.Method,
+			Headers: d.Headers, AllowPrivate: d.AllowPrivate,
+		})
+	}
+	return notify.New(dests, cfg.NotifyState)
+}
+
 func createGeneratorConfig(cfg *config.Config) generator.Config {
+	// Every build path meets here — a plain build, a watch reload and `migrate`
+	// — and it is the last point before the domain becomes every canonical URL
+	// the site publishes. Late enough that the positional argument has been
+	// applied, which the flag parser runs too early to see (#162).
+	normalizeDomain(cfg)
+
 	// Convert shortcodes from config to generator format
 	shortcodes := make([]generator.Shortcode, len(cfg.Shortcodes))
 	for i, sc := range cfg.Shortcodes {
@@ -287,39 +605,206 @@ func createGeneratorConfig(cfg *config.Config) generator.Config {
 	}
 
 	return generator.Config{
-		Source:        cfg.Source,
-		Template:      cfg.Template,
-		Domain:        cfg.Domain,
-		ContentDir:    cfg.ContentDir,
-		TemplatesDir:  cfg.TemplatesDir,
-		OutputDir:     cfg.OutputDir,
-		SitemapOff:    cfg.SitemapOff,
-		RobotsOff:     cfg.RobotsOff,
-		PrettyHTML:    cfg.PrettyHTML,
-		PostURLFormat: cfg.PostURLFormat,
-		PageFormat:    cfg.PageFormat,
-		RelativeLinks: cfg.RelativeLinks,
-		Shortcodes:    shortcodes,
-		MinifyHTML:    cfg.MinifyHTML,
-		MinifyCSS:     cfg.MinifyCSS,
-		MinifyJS:      cfg.MinifyJS,
-		SourceMap:     cfg.SourceMap,
-		Clean:         cfg.Clean,
-		Quiet:         cfg.Quiet,
-		Engine:        cfg.Engine,
+		Source:                 cfg.Source,
+		Template:               cfg.Template,
+		Domain:                 cfg.Domain,
+		ContentDir:             cfg.ContentDir,
+		TemplatesDir:           cfg.TemplatesDir,
+		OutputDir:              cfg.OutputDir,
+		SitemapOff:             cfg.SitemapOff,
+		RobotsOff:              cfg.RobotsOff,
+		RobotsRules:            robotsRulesOf(cfg),
+		NotFoundOff:            cfg.NotFoundOff,
+		Deploy:                 cfg.Deploy,
+		PrettyHTML:             cfg.PrettyHTML,
+		PostURLFormat:          cfg.PostURLFormat,
+		PageFormat:             cfg.PageFormat,
+		RelativeLinks:          cfg.RelativeLinks,
+		Shortcodes:             shortcodes,
+		ShortcodeBrackets:      cfg.ShortcodeBrackets,
+		MinifyHTML:             cfg.MinifyHTML,
+		MinifyCSS:              cfg.MinifyCSS,
+		MinifyJS:               cfg.MinifyJS,
+		SourceMap:              cfg.SourceMap,
+		Clean:                  cfg.Clean,
+		Quiet:                  cfg.Quiet,
+		Engine:                 cfg.Engine,
+		Variables:              cfg.Variables,
+		PagesPath:              cfg.PagesPath,
+		PostsPath:              cfg.PostsPath,
+		StaticDir:              cfg.StaticDir,
+		DataDir:                cfg.DataDir,
+		RewriteMdLinks:         cfg.RewriteMdLinks == nil || *cfg.RewriteMdLinks, // default on (#1.8.15)
+		StripMdLinkText:        cfg.StripMdLinkText,
+		MarkdownPublish:        cfg.MarkdownPublish,
+		CleanSpecialChars:      cfg.CleanSpecialChars,
+		OutputEncoding:         cfg.OutputEncoding,
+		OutputEncodingSections: cfg.OutputEncodingSections,
+		HomePagesLimit:         cfg.HomePagesLimit,
+		HomePostsLimit:         cfg.HomePostsLimit,
+		PreserveSlugCase:       cfg.PreserveSlugCase,
+		Permalinks:             cfg.Permalinks,
+		LastmodFromGit:         cfg.LastmodFromGit,
+		Fingerprint:            cfg.Fingerprint,
+		SCSS:                   cfg.SCSS,
+		SassBinary:             cfg.SassBinary,
+		Timezone:               cfg.Timezone,
+		LanguageTimezones:      cfg.LanguageTimezones,
+		Math:                   cfg.Math,
+		Paginate:               cfg.Paginate,
+		Languages:              cfg.Languages,
+		DefaultLanguage:        cfg.DefaultLanguage,
+		LanguageConfigs:        cfg.LanguageConfigs,
+		LanguageSections:       cfg.LanguageSections,
+		I18n:                   cfg.I18n,
+		Taxonomies:             cfg.Taxonomies,
+		ExternalSources:        cfg.ExternalSources,
+		Hooks:                  cfg.Hooks,
+		Feed:                   cfg.Feed,
+		FeedItems:              cfg.FeedItems,
+		FeedFullContent:        cfg.FeedFullContent,
+		Highlight:              cfg.Highlight,
+		HighlightStyle:         cfg.HighlightStyle,
+		HighlightLineNumbers:   cfg.HighlightLineNumbers,
+		Mermaid:                cfg.Mermaid,
+		MermaidTheme:           cfg.MermaidTheme,
+		MermaidBackground:      cfg.MermaidBackground,
+		TOC:                    cfg.TOC,
+		TOCDepth:               cfg.TOCDepth,
+		SEO:                    cfg.SEO,
+		Analytics:              cfg.Analytics,
+		DateArchives:           cfg.DateArchives,
+		TypeArchives:           cfg.TypeArchives,
+		SanitizeOutput:         cfg.SanitizeOutput,
+		ImageMetadata:          cfg.ImageMetadata,
+		Schema:                 cfg.Schema,
+		SchemaDefaults:         cfg.SchemaDefaults,
+		ContentSchemas:         cfg.ContentSchemas,
+		Strict:                 cfg.Strict,
+		RouteManifest:          cfg.RouteManifest,
+		BuildWorkers:           resolveBuildWorkers(cfg.BuildWorkers),
+		AI:                     buildAIClient(cfg.AI),
+		Notify:                 buildNotifier(cfg),
+		CheckLinks:             cfg.CheckLinks,
+		PostsPage:              cfg.PostsPage,
+		Title:                  cfg.Title,
+		Description:            cfg.Description,
+		Colors:                 cfg.Colors,
+		CheckImages:            cfg.CheckImages,
+		CheckMarkup:            cfg.CheckMarkup,
+		CheckMeta:              cfg.CheckMeta,
+		CheckSchema:            cfg.CheckSchema,
+		CheckOrphans:           cfg.CheckOrphans,
+		CheckRedirects:         cfg.CheckRedirects,
+		PrettyURLs:             cfg.PrettyURLs,
+		ContentExclude:         cfg.ContentExclude,
+		SitemapPruneCanonical:  cfg.SitemapPruneCanonical,
+		StaticSources:          cfg.StaticSources,
+		Feeds:                  cfg.Feeds,
+		FeedAutodiscovery:      cfg.FeedAutodiscovery,
+		MetaLimits:             cfg.MetaLimits,
+		Bundles:                cfg.Bundles,
+		Outputs:                cfg.Outputs,
+		SearchIndex:            cfg.SearchIndex,
+		WebMCP:                 cfg.WebMCP,
+		SanitizeHTML:           cfg.SanitizeHTML,
+		ShortcodeErrors:        cfg.ShortcodeErrors,
+		ContentSources:         contentSourcesOf(cfg),
+		LinkRewrites:           cfg.LinkRewrites,
+		AutoExcerpt:            cfg.AutoExcerpt,
+		FlatPosts:              cfg.FlatPosts,
+		Headers:                cfg.Headers,
+		HeadersDefaultsOff:     cfg.HeadersDefaultsOff,
+		Redirects:              redirectsOf(cfg),
+		// aliases produce meta-refresh stubs by default; alias_stubs: false
+		// keeps only the _redirects 301s (GO-063).
+		AliasStubsOff: cfg.AliasStubs != nil && !*cfg.AliasStubs,
+		Workers:       workersOf(cfg),
 		Mddb: generator.MddbConfig{
-			Enabled:       cfg.Mddb.Enabled,
-			URL:           cfg.Mddb.URL,
-			Protocol:      cfg.Mddb.Protocol,
-			APIKey:        cfg.Mddb.APIKey,
-			Collection:    cfg.Mddb.Collection,
-			Lang:          cfg.Mddb.Lang,
-			Timeout:       cfg.Mddb.Timeout,
-			BatchSize:     cfg.Mddb.BatchSize,
-			Watch:         cfg.Mddb.Watch,
-			WatchInterval: cfg.Mddb.WatchInterval,
+			Enabled:    cfg.Mddb.Enabled,
+			URL:        cfg.Mddb.URL,
+			Protocol:   cfg.Mddb.Protocol,
+			APIKey:     cfg.Mddb.APIKey,
+			Collection: cfg.Mddb.Collection,
+			Lang:       cfg.Mddb.Lang,
+			Timeout:    cfg.Mddb.Timeout,
+			BatchSize:  cfg.Mddb.BatchSize,
+			AllowHTTP:  cfg.Mddb.AllowHTTP,
 		},
 	}
+}
+
+// redirectsOf converts config redirect rules into the generator's own type,
+// keeping the two packages decoupled (same pattern as contentSourcesOf) (GO-063).
+func redirectsOf(cfg *config.Config) []generator.RedirectRule {
+	if len(cfg.Redirects) == 0 {
+		return nil
+	}
+	out := make([]generator.RedirectRule, 0, len(cfg.Redirects))
+	for _, r := range cfg.Redirects {
+		out = append(out, generator.RedirectRule{From: r.From, To: r.To, Status: r.Status, Force: r.Force})
+	}
+	return out
+}
+
+// workersOf converts the resolved worker list (plural `workers:`, or the
+// singular `worker:` for back-compat) into the generator's type, keeping the
+// two packages decoupled (same pattern as contentSourcesOf) (GO-065, GO-076).
+func workersOf(cfg *config.Config) []generator.WorkerConfig {
+	resolved := cfg.ResolvedWorkers()
+	if len(resolved) == 0 {
+		return nil
+	}
+	out := make([]generator.WorkerConfig, 0, len(resolved))
+	for _, w := range resolved {
+		out = append(out, generator.WorkerConfig{
+			Name:           w.Name,
+			Dir:            w.Dir,
+			Source:         w.Source,
+			Auth:           fetch.Auth(w.Auth),
+			Mode:           w.Mode,
+			RoutesInclude:  w.RoutesInclude,
+			RoutesExclude:  w.RoutesExclude,
+			WranglerConfig: w.WranglerConfig,
+		})
+	}
+	return out
+}
+
+// contentSourcesOf converts the configured extra Markdown roots into the
+// generator's own type, keeping the two packages free of a shared dependency
+// (the same pattern as MddbConfig above). CONTENT-002.
+func contentSourcesOf(cfg *config.Config) []generator.ContentSource {
+	if len(cfg.ContentSources) == 0 {
+		return nil
+	}
+	out := make([]generator.ContentSource, 0, len(cfg.ContentSources))
+	for _, src := range cfg.ContentSources {
+		out = append(out, generator.ContentSource{
+			Path:     src.Path,
+			Type:     src.Type,
+			Category: src.Category,
+		})
+	}
+	return out
+}
+
+// robotsRulesOf converts the config's robots rules into the generator's own
+// type, keeping the two packages decoupled (same pattern as contentSourcesOf).
+func robotsRulesOf(cfg *config.Config) []generator.RobotsRule {
+	if len(cfg.RobotsRules) == 0 {
+		return nil
+	}
+	out := make([]generator.RobotsRule, 0, len(cfg.RobotsRules))
+	for _, r := range cfg.RobotsRules {
+		out = append(out, generator.RobotsRule{
+			UserAgent:  r.UserAgent,
+			Allow:      r.Allow,
+			Disallow:   r.Disallow,
+			CrawlDelay: r.CrawlDelay,
+		})
+	}
+	return out
 }
 
 func parseFlags(args []string, cfg *config.Config) {
@@ -335,47 +820,85 @@ func parseFlags(args []string, cfg *config.Config) {
 		}
 		i += parseValueFlags(args, i, cfg)
 	}
+	if cfg.WatchRunner != "" {
+		cfg.Watch = true
+	}
+	warnUnknownFlags(args, cfg)
 }
 
-// parseBoolFlags handles boolean flags, returns true if flag was handled
+// parseBoolFlags handles boolean flags, returns true if flag was handled. Simple
+// on/off toggles are table-driven (name → target field) to keep this small and DRY.
 func parseBoolFlags(arg string, cfg *config.Config) bool {
-	switch arg {
-	case "--zip", "-zip":
-		cfg.Zip = true
-	case "--webp", "-webp":
-		cfg.WebP = true
-	case "--reconvert-images":
-		cfg.ReconvertImages = true
-	case "--watch", "-watch":
-		cfg.Watch = true
-	case "--http", "-http":
-		cfg.HTTP = true
-	case "--sitemap-off":
-		cfg.SitemapOff = true
-	case "--robots-off":
-		cfg.RobotsOff = true
-	case "--pretty-html", "--pretty":
-		cfg.PrettyHTML = true
-	case "--relative-links":
-		cfg.RelativeLinks = true
-	case "--minify-all":
-		cfg.MinifyAll = true
-	case "--minify-html":
-		cfg.MinifyHTML = true
-	case "--minify-css":
-		cfg.MinifyCSS = true
-	case "--minify-js":
-		cfg.MinifyJS = true
-	case "--sourcemap":
-		cfg.SourceMap = true
-	case "--clean":
-		cfg.Clean = true
-	case "--quiet", "-q":
-		cfg.Quiet = true
-	default:
-		return false
+	if arg == "--auto-reload" || arg == "--no-auto-reload" { // *bool: on by default in --watch
+		v := arg == "--auto-reload"
+		cfg.AutoReload = &v
+		return true
 	}
-	return true
+	if arg == "--wrangler" || arg == "-wrangler" {
+		selectWatchRunner(cfg, "wrangler", "", "")
+		return true
+	}
+	if arg == "--workerd" || arg == "-workerd" {
+		selectWatchRunner(cfg, "workerd", "", "")
+		return true
+	}
+	if arg == "--check-links" { // the one toggle that sets a string mode, not a bool
+		cfg.CheckLinks = "warn"
+		return true
+	}
+	if arg == "--check-images" { // same shape: bare form means warn (#75)
+		cfg.CheckImages = "warn"
+		return true
+	}
+	if arg == "--check-meta" { // same shape: bare form means warn (#76)
+		cfg.CheckMeta = "warn"
+		return true
+	}
+	if arg == "--no-check-markup" { // the one check that is on by default (#127)
+		cfg.CheckMarkup = ""
+		return true
+	}
+	if arg == "--check-schema" { // same shape: bare form means warn (#111)
+		cfg.CheckSchema = "warn"
+		return true
+	}
+	if arg == "--check-orphans" { // same shape: bare form means warn (#77)
+		cfg.CheckOrphans = "warn"
+		return true
+	}
+	if arg == "--check-redirects" { // same shape: bare form means warn (#87)
+		cfg.CheckRedirects = "warn"
+		return true
+	}
+	if arg == "--seo-off" { // deprecated no-op: SEO injection is opt-in since v1.8.2
+		cfg.SEO = false
+		return true
+	}
+	toggles := boolFlagTargets(cfg)
+	if target, ok := toggles[arg]; ok {
+		*target = true
+		return true
+	}
+	return false
+}
+
+// selectWatchRunner enables watch mode for a runner, optionally recording where
+// the runner's config file lives (field "config") or which directory it runs in
+// (field "dir"). An empty value leaves any previously configured one untouched,
+// so --wrangler-config=X --wrangler stays coherent whatever the flag order,
+// and --wrangler-dir + --wrangler-config combine (GO-054).
+func selectWatchRunner(cfg *config.Config, runner, field, value string) {
+	cfg.WatchRunner = runner
+	cfg.Watch = true
+	if value == "" {
+		return
+	}
+	switch field {
+	case "config":
+		cfg.WatchRunnerConfig = value
+	case "dir":
+		cfg.WatchRunnerDir = value
+	}
 }
 
 // parseSpecialFlags handles --version and --help
@@ -409,179 +932,293 @@ func parseValueFlags(args []string, i int, cfg *config.Config) int {
 	return skip
 }
 
-// parseEqualFlags handles --flag=value format
-func parseEqualFlags(arg string, cfg *config.Config) {
-	switch {
-	case strings.HasPrefix(arg, "--webp-quality="):
-		if q, err := strconv.Atoi(strings.TrimPrefix(arg, "--webp-quality=")); err == nil && q >= 1 && q <= 100 {
-			cfg.WebPQuality = q
+// parseIntList parses a comma-separated list of positive integers (e.g. "480,960").
+// Invalid or non-positive entries are skipped.
+func parseIntList(s string) []int {
+	var out []int
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
 		}
+		if n, err := strconv.Atoi(part); err == nil && n > 0 {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// splitCSV splits a comma-separated string into trimmed, non-empty tokens.
+func splitCSV(s string) []string {
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// setPermalink records a permalink pattern for a content type, initializing the map.
+func setPermalink(cfg *config.Config, typ, pattern string) {
+	if pattern == "" {
+		return
+	}
+	if cfg.Permalinks == nil {
+		cfg.Permalinks = make(map[string]string)
+	}
+	cfg.Permalinks[typ] = pattern
+}
+
+// stringEqualFlags maps simple "--flag=" prefixes to the string field they set,
+// keeping parseEqualFlags free of one near-identical case per plain string option.
+func stringEqualFlags(cfg *config.Config) map[string]*string {
+	return map[string]*string{
+		"--host=":             &cfg.Host,
+		"--tls-cert=":         &cfg.TLSCert,
+		"--tls-key=":          &cfg.TLSKey,
+		"--tls-domain=":       &cfg.TLSDomain,
+		"--mem-limit=":        &cfg.MemLimit,
+		"--content-dir=":      &cfg.ContentDir,
+		"--templates-dir=":    &cfg.TemplatesDir,
+		"--output-dir=":       &cfg.OutputDir,
+		"--static-dir=":       &cfg.StaticDir,
+		"--data-dir=":         &cfg.DataDir,
+		"--image-sizes-attr=": &cfg.ImageSizesAttr,
+		"--sass-binary=":      &cfg.SassBinary,
+		"--highlight-style=":  &cfg.HighlightStyle,
+		"--default-language=": &cfg.DefaultLanguage,
+		"--timezone=":         &cfg.Timezone,
+		"--engine=":           &cfg.Engine,
+		"--online-theme=":     &cfg.OnlineTheme,
+		"--post-url-format=":  &cfg.PostURLFormat,
+		"--deploy=":           &cfg.Deploy,
+		"--deploy-project=":   &cfg.DeployProject,
+		"--deploy-branch=":    &cfg.DeployBranch,
+		"--deploy-target=":    &cfg.DeployTarget,
+		"--mddb-key=":         &cfg.Mddb.APIKey,
+		"--mddb-collection=":  &cfg.Mddb.Collection,
+		"--mddb-lang=":        &cfg.Mddb.Lang,
+		"--external-source=":  &cfg.ExternalSources.Only,
+		"--watch-runner=":     &cfg.WatchRunner,
+		// Runner-agnostic spellings; --wrangler-config/--wrangler-dir (and the
+		// workerd pair) are the convenience forms that also select the runner.
+		"--watch-runner-config=": &cfg.WatchRunnerConfig,
+		"--watch-runner-dir=":    &cfg.WatchRunnerDir,
+	}
+}
+
+// setIntEqual parses "--flag=N"; when arg carries prefix it applies the value if it
+// passes the [minVal, maxVal] range (maxVal <= 0 means no upper bound) and returns
+// true to signal the flag was recognised.
+func setIntEqual(arg, prefix string, minVal, maxVal int, apply func(int)) bool {
+	if !strings.HasPrefix(arg, prefix) {
+		return false
+	}
+	if n, err := strconv.Atoi(strings.TrimPrefix(arg, prefix)); err == nil && n >= minVal && (maxVal <= 0 || n <= maxVal) {
+		apply(n)
+	}
+	return true
+}
+
+// parseEqualFlags handles --flag=value format, dispatching to focused helpers so no
+// single function carries the whole option table.
+func parseEqualFlags(arg string, cfg *config.Config) {
+	for prefix, target := range stringEqualFlags(cfg) {
+		if strings.HasPrefix(arg, prefix) {
+			*target = strings.TrimPrefix(arg, prefix)
+			return
+		}
+	}
+	if parseIntEqualFlags(arg, cfg) || parseMddbEqualFlags(arg, cfg) {
+		return
+	}
+	parseMiscEqualFlags(arg, cfg)
+}
+
+// parseIntEqualFlags handles numeric --flag=N options; returns true when recognised.
+func parseIntEqualFlags(arg string, cfg *config.Config) bool {
+	switch {
+	case setIntEqual(arg, "--avif-quality=", 1, 100, func(n int) { cfg.AVIFQuality = n }):
+	case setIntEqual(arg, "--webp-quality=", 1, 100, func(n int) { cfg.WebPQuality = n }):
+	case setIntEqual(arg, "--max-conns=", 0, 0, func(n int) { cfg.MaxConns = n }):
+	case setIntEqual(arg, "--workers=", 0, 0, func(n int) { cfg.BuildWorkers = &n }):
+	case setIntEqual(arg, "--paginate=", 0, 0, func(n int) { cfg.Paginate = n }):
+	case setIntEqual(arg, "--feed-items=", 1, 0, func(n int) { cfg.FeedItems = n }):
+	case setIntEqual(arg, "--toc-depth=", 1, 0, func(n int) { cfg.TOCDepth = n }):
 	case strings.HasPrefix(arg, "--port="):
 		if port, err := strconv.Atoi(strings.TrimPrefix(arg, "--port=")); err == nil {
 			cfg.Port = port
 		}
-	case strings.HasPrefix(arg, "--content-dir="):
-		cfg.ContentDir = strings.TrimPrefix(arg, "--content-dir=")
-	case strings.HasPrefix(arg, "--templates-dir="):
-		cfg.TemplatesDir = strings.TrimPrefix(arg, "--templates-dir=")
-	case strings.HasPrefix(arg, "--output-dir="):
-		cfg.OutputDir = strings.TrimPrefix(arg, "--output-dir=")
-	case strings.HasPrefix(arg, "--engine="):
-		cfg.Engine = strings.TrimPrefix(arg, "--engine=")
-	case strings.HasPrefix(arg, "--online-theme="):
-		cfg.OnlineTheme = strings.TrimPrefix(arg, "--online-theme=")
-	case strings.HasPrefix(arg, "--post-url-format="):
-		cfg.PostURLFormat = strings.TrimPrefix(arg, "--post-url-format=")
-	case strings.HasPrefix(arg, "--page-format="):
-		pf := strings.TrimPrefix(arg, "--page-format=")
-		if pf == "directory" || pf == "flat" || pf == "both" {
-			cfg.PageFormat = pf
-		}
-	// MDDB flags
+	default:
+		return false
+	}
+	return true
+}
+
+// parseMddbEqualFlags handles the --mddb-* options; returns true when recognised.
+func parseMddbEqualFlags(arg string, cfg *config.Config) bool {
+	switch {
+	case setIntEqual(arg, "--mddb-timeout=", 1, 0, func(n int) { cfg.Mddb.Timeout = n }):
+	case setIntEqual(arg, "--mddb-batch-size=", 1, 0, func(n int) { cfg.Mddb.BatchSize = n }):
+	case setIntEqual(arg, "--mddb-watch-interval=", 1, 0, func(n int) { cfg.Mddb.WatchInterval = n }):
+	// --mddb-watch is a boolean toggle handled by parseBoolFlags; a case here was
+	// unreachable because only args containing "=" ever get this far (GO-018).
 	case strings.HasPrefix(arg, "--mddb-url="):
 		cfg.Mddb.URL = strings.TrimPrefix(arg, "--mddb-url=")
 		cfg.Mddb.Enabled = true
-	case strings.HasPrefix(arg, "--mddb-key="):
-		cfg.Mddb.APIKey = strings.TrimPrefix(arg, "--mddb-key=")
-	case strings.HasPrefix(arg, "--mddb-collection="):
-		cfg.Mddb.Collection = strings.TrimPrefix(arg, "--mddb-collection=")
-	case strings.HasPrefix(arg, "--mddb-lang="):
-		cfg.Mddb.Lang = strings.TrimPrefix(arg, "--mddb-lang=")
-	case strings.HasPrefix(arg, "--mddb-timeout="):
-		if t, err := strconv.Atoi(strings.TrimPrefix(arg, "--mddb-timeout=")); err == nil && t > 0 {
-			cfg.Mddb.Timeout = t
-		}
-	case strings.HasPrefix(arg, "--mddb-batch-size="):
-		if b, err := strconv.Atoi(strings.TrimPrefix(arg, "--mddb-batch-size=")); err == nil && b > 0 {
-			cfg.Mddb.BatchSize = b
-		}
 	case strings.HasPrefix(arg, "--mddb-protocol="):
-		protocol := strings.TrimPrefix(arg, "--mddb-protocol=")
-		if protocol == "http" || protocol == "grpc" {
-			cfg.Mddb.Protocol = protocol
+		if p := strings.TrimPrefix(arg, "--mddb-protocol="); p == "http" || p == "grpc" {
+			cfg.Mddb.Protocol = p
 		}
-	case arg == "--mddb-watch":
-		cfg.Mddb.Watch = true
-	case strings.HasPrefix(arg, "--mddb-watch-interval="):
-		if i, err := strconv.Atoi(strings.TrimPrefix(arg, "--mddb-watch-interval=")); err == nil && i > 0 {
-			cfg.Mddb.WatchInterval = i
+	default:
+		return false
+	}
+	return true
+}
+
+// parseMiscEqualFlags handles the remaining validated/list --flag=value options.
+func parseMiscEqualFlags(arg string, cfg *config.Config) {
+	switch {
+	case strings.HasPrefix(arg, "--image-sizes="):
+		cfg.ImageSizes = parseIntList(strings.TrimPrefix(arg, "--image-sizes="))
+	case strings.HasPrefix(arg, "--image-formats="):
+		// Preference order, so --image-formats=avif,webp offers AVIF first.
+		cfg.ImageFormats = splitContentList(strings.TrimPrefix(arg, "--image-formats="))
+	case strings.HasPrefix(arg, "--permalink-post="):
+		setPermalink(cfg, "post", strings.TrimPrefix(arg, "--permalink-post="))
+	case strings.HasPrefix(arg, "--permalink-page="):
+		setPermalink(cfg, "page", strings.TrimPrefix(arg, "--permalink-page="))
+	case strings.HasPrefix(arg, "--check-links="):
+		if v := strings.TrimPrefix(arg, "--check-links="); v == "warn" || v == "strict" {
+			cfg.CheckLinks = v
 		}
+	case strings.HasPrefix(arg, "--check-images="):
+		// strict-decorative additionally reports alt="" (#75).
+		if v := strings.TrimPrefix(arg, "--check-images="); v == "warn" || v == "strict" || v == "strict-decorative" {
+			cfg.CheckImages = v
+		}
+	case strings.HasPrefix(arg, "--check-markup="):
+		// "" / "off" disable the default warn; strict fails the build (#127).
+		if v := strings.TrimPrefix(arg, "--check-markup="); v == "warn" || v == "strict" || v == "off" || v == "" {
+			cfg.CheckMarkup = v
+		}
+	case strings.HasPrefix(arg, "--check-meta="):
+		if v := strings.TrimPrefix(arg, "--check-meta="); v == "warn" || v == "strict" {
+			cfg.CheckMeta = v
+		}
+	case strings.HasPrefix(arg, "--check-schema="):
+		if v := strings.TrimPrefix(arg, "--check-schema="); v == "warn" || v == "strict" {
+			cfg.CheckSchema = v
+		}
+	case strings.HasPrefix(arg, "--check-orphans="):
+		if v := strings.TrimPrefix(arg, "--check-orphans="); v == "warn" || v == "strict" {
+			cfg.CheckOrphans = v
+		}
+	case strings.HasPrefix(arg, "--check-redirects="):
+		if v := strings.TrimPrefix(arg, "--check-redirects="); v == "warn" || v == "strict" {
+			cfg.CheckRedirects = v
+		}
+	// Repeatable: each --content-source adds one root. The CLI form takes the
+	// path only; type/category need the config file (CONTENT-002).
+	case strings.HasPrefix(arg, "--content-source="):
+		if p := strings.TrimSpace(strings.TrimPrefix(arg, "--content-source=")); p != "" {
+			cfg.ContentSources = append(cfg.ContentSources, config.ContentSource{Path: p})
+		}
+	case strings.HasPrefix(arg, "--shortcode-errors="):
+		if v := strings.TrimPrefix(arg, "--shortcode-errors="); v == "drop" || v == "keep" || v == "strict" {
+			cfg.ShortcodeErrors = v
+		}
+	case strings.HasPrefix(arg, "--outputs="):
+		cfg.Outputs = splitCSV(strings.TrimPrefix(arg, "--outputs="))
+	case strings.HasPrefix(arg, "--languages="):
+		cfg.Languages = splitCSV(strings.TrimPrefix(arg, "--languages="))
+	case strings.HasPrefix(arg, "--page-format="):
+		if pf := strings.TrimPrefix(arg, "--page-format="); pf == "directory" || pf == "flat" || pf == "both" {
+			cfg.PageFormat = pf
+		}
+	// Naming the runner's config or directory also selects that runner, so a
+	// single flag is enough: --wrangler-dir=booking/apps/api implies --wrangler
+	// (GO-054, issue #35).
+	case strings.HasPrefix(arg, "--wrangler-config="):
+		selectWatchRunner(cfg, "wrangler", "config", strings.TrimPrefix(arg, "--wrangler-config="))
+	case strings.HasPrefix(arg, "--workerd-config="):
+		selectWatchRunner(cfg, "workerd", "config", strings.TrimPrefix(arg, "--workerd-config="))
+	case strings.HasPrefix(arg, "--wrangler-dir="):
+		selectWatchRunner(cfg, "wrangler", "dir", strings.TrimPrefix(arg, "--wrangler-dir="))
+	case strings.HasPrefix(arg, "--workerd-dir="):
+		selectWatchRunner(cfg, "workerd", "dir", strings.TrimPrefix(arg, "--workerd-dir="))
 	}
 }
 
-// parseSeparateValueFlags handles --flag value format, returns skip count
+// extraEqualValueFlags lists the "--flag=value" options handled outside the
+// stringEqualFlags table (the int/mddb/misc dispatchers in parseEqualFlags).
+// Together with stringEqualFlags they form the complete set of value-taking
+// flags (GO-053). --check-links is absent by design: its bare form is a
+// boolean toggle, so only the "=" spelling can carry a mode.
+var extraEqualValueFlags = []string{
+	"--webp-quality", "--avif-quality", "--image-formats",
+	"--max-conns", "--workers", "--paginate", "--feed-items", "--toc-depth",
+	"--port", "--mddb-timeout", "--mddb-batch-size", "--mddb-watch-interval",
+	"--mddb-url", "--mddb-protocol", "--image-sizes", "--permalink-post",
+	"--permalink-page", "--outputs", "--languages", "--page-format",
+	"--wrangler-config", "--workerd-config", "--wrangler-dir", "--workerd-dir",
+	"--shortcode-errors", "--content-source",
+}
+
+// valueFlags returns every flag that consumes a value, in bare (no "=") form —
+// the single source of truth shared by the space-form parser and the
+// positional scanner, so a value like "--deploy cloudflare" is parsed instead
+// of leaking into <source>/<template>/<domain> (GO-036, GO-053).
+var valueFlags = sync.OnceValue(func() map[string]bool {
+	names := map[string]bool{configFlag: true}
+	var cfg config.Config
+	for prefix := range stringEqualFlags(&cfg) {
+		names[strings.TrimSuffix(prefix, "=")] = true
+	}
+	for _, name := range extraEqualValueFlags {
+		names[name] = true
+	}
+	return names
+})
+
+// parseSeparateValueFlags handles the "--flag value" form by delegating to the
+// "=" parser, so both spellings share one implementation and every value flag
+// accepts both (GO-053). Returns the number of extra args consumed. A known
+// value flag with nothing left to consume warns instead of failing silently.
 func parseSeparateValueFlags(args []string, i int, cfg *config.Config) int {
 	arg := args[i]
+	if !valueFlags()[arg] {
+		return 0
+	}
 	if i+1 >= len(args) {
-		return handleConfigSkip(arg)
+		errf("⚠️  Flag %s expects a value (%s=<value> or %s <value>)\n", arg, arg, arg)
+		return 0
 	}
-
-	nextArg := args[i+1]
-	switch arg {
-	case "--webp-quality":
-		if q, err := strconv.Atoi(nextArg); err == nil && q >= 1 && q <= 100 {
-			cfg.WebPQuality = q
-		}
-		return 1
-	case "--port":
-		if port, err := strconv.Atoi(nextArg); err == nil {
-			cfg.Port = port
-		}
-		return 1
-	case "--content-dir":
-		cfg.ContentDir = nextArg
-		return 1
-	case "--templates-dir":
-		cfg.TemplatesDir = nextArg
-		return 1
-	case "--output-dir":
-		cfg.OutputDir = nextArg
-		return 1
-	case "--engine":
-		cfg.Engine = nextArg
-		return 1
-	case "--online-theme":
-		cfg.OnlineTheme = nextArg
-		return 1
-	case "--post-url-format":
-		cfg.PostURLFormat = nextArg
-		return 1
-	case "--page-format":
-		if nextArg == "directory" || nextArg == "flat" || nextArg == "both" {
-			cfg.PageFormat = nextArg
-		}
-		return 1
-	case "--config":
-		return 1 // Skip, already processed
-	// MDDB flags
-	case "--mddb-url":
-		cfg.Mddb.URL = nextArg
-		cfg.Mddb.Enabled = true
-		return 1
-	case "--mddb-key":
-		cfg.Mddb.APIKey = nextArg
-		return 1
-	case "--mddb-collection":
-		cfg.Mddb.Collection = nextArg
-		return 1
-	case "--mddb-lang":
-		cfg.Mddb.Lang = nextArg
-		return 1
-	case "--mddb-timeout":
-		if t, err := strconv.Atoi(nextArg); err == nil && t > 0 {
-			cfg.Mddb.Timeout = t
-		}
-		return 1
-	case "--mddb-batch-size":
-		if b, err := strconv.Atoi(nextArg); err == nil && b > 0 {
-			cfg.Mddb.BatchSize = b
-		}
-		return 1
-	case "--mddb-protocol":
-		if nextArg == "http" || nextArg == "grpc" {
-			cfg.Mddb.Protocol = nextArg
-		}
-		return 1
-	case "--mddb-watch-interval":
-		if i, err := strconv.Atoi(nextArg); err == nil && i > 0 {
-			cfg.Mddb.WatchInterval = i
-		}
-		return 1
+	if arg == configFlag {
+		return 1 // value already consumed by loadConfig
 	}
-	return 0
+	parseEqualFlags(arg+"="+args[i+1], cfg)
+	return 1
 }
 
-// handleConfigSkip handles --config at end of args
-func handleConfigSkip(arg string) int {
-	if arg == "--config" {
-		return 0 // No next arg to skip
+// resolveListenAddr computes the dev-server bind address and a user-facing URL.
+// SEC-012: it defaults to loopback and flags exposure when an all-interfaces
+// address is requested. net.JoinHostPort brackets IPv6 literals so --host=::1
+// yields a valid listen address (GO-034).
+func resolveListenAddr(host string, port int) (addr, url string, exposed bool) {
+	if host == "" {
+		host = "127.0.0.1"
 	}
-	return 0
-}
-
-func startServer(dir string, port int, quiet bool) {
-	addr := fmt.Sprintf(":%d", port)
-	if !quiet {
-		fmt.Printf("🌐 Starting HTTP server at http://localhost%s\n", addr)
-		fmt.Printf("   Serving files from: %s/\n", dir)
+	portStr := strconv.Itoa(port)
+	addr = net.JoinHostPort(host, portStr)
+	display := host
+	if host == "0.0.0.0" || host == "::" {
+		display = "127.0.0.1"
+		exposed = true
 	}
-
-	fs := http.FileServer(http.Dir(dir))
-	mux := http.NewServeMux()
-	mux.Handle("/", fs)
-
-	server := &http.Server{
-		Addr:              addr,
-		Handler:           mux,
-		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      30 * time.Second,
-		IdleTimeout:       120 * time.Second,
-	}
-
-	if err := server.ListenAndServe(); err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Server error: %v\n", err)
-	}
+	url = fmt.Sprintf("http://%s", net.JoinHostPort(display, portStr))
+	return addr, url, exposed
 }
 
 func build(genCfg generator.Config, cfg *config.Config) error {
@@ -589,49 +1226,218 @@ func build(genCfg generator.Config, cfg *config.Config) error {
 	if err != nil {
 		return fmt.Errorf("initializing generator: %w", err)
 	}
-
 	if err := gen.Generate(); err != nil {
 		return fmt.Errorf("generating site: %w", err)
 	}
+	if err := emitEndpoints(cfg); err != nil {
+		return err
+	}
+	runImagesGC(gen, cfg)
+	if err := runWebP(cfg); err != nil {
+		return err
+	}
+	if err := runArchives(cfg); err != nil {
+		return err
+	}
+	return runDeploy(cfg)
+}
 
-	// Convert images to WebP if requested (using native Go library)
-	if cfg.WebP {
-		opts := webp.ConvertOptions{
-			Quality: cfg.WebPQuality,
-			Quiet:   cfg.Quiet,
-			Force:   cfg.ReconvertImages,
-		}
+// runImagesGC prunes image-cache entries not referenced by this build when
+// --images-gc / --images-gc-dry is set (GO-057). Best-effort: a GC failure
+// warns without failing the build that just succeeded.
+func runImagesGC(gen *generator.Generator, cfg *config.Config) {
+	if !cfg.ImagesGC && !cfg.ImagesGCDry {
+		return
+	}
+	dry := cfg.ImagesGCDry
+	files, bytes, err := gen.ImagesGC(dry)
+	if err != nil {
+		errf("⚠️  Image cache GC: %v\n", err)
+		return
+	}
+	if cfg.Quiet {
+		return
+	}
+	verb := "removed"
+	if dry {
+		verb = "would remove"
+	}
+	fmt.Printf("   🧹 Image cache GC: %s %d file(s), %d bytes\n", verb, files, bytes)
+}
 
-		converted, saved, err := webp.ConvertDirectory(cfg.OutputDir, opts)
-		if err != nil {
-			return fmt.Errorf("converting to WebP: %w", err)
-		}
+// resolveBuildWorkers turns the configured --workers value into a concrete pool
+// size: unset ⇒ one per CPU (the whole machine), an explicit 0 (or negative) ⇒ 1
+// (parallelism off / sequential), N ⇒ exactly N (#63… build parallelism).
+func resolveBuildWorkers(n *int) int {
+	if n == nil {
+		return runtime.NumCPU()
+	}
+	if *n < 1 {
+		return 1
+	}
+	return *n
+}
 
-		if err := webp.UpdateReferences(cfg.OutputDir); err != nil {
-			return fmt.Errorf("updating image references: %w", err)
-		}
-
-		if !cfg.Quiet && converted > 0 {
-			savedMB := float64(saved) / (1024 * 1024)
-			fmt.Printf("   📊 Converted %d images, saved %.1f MB\n", converted, savedMB)
+// runWebP converts output images to WebP and rewrites references when --webp is set.
+func runWebP(cfg *config.Config) error {
+	if !cfg.WebP && !wantsFormat(cfg, "webp") && !wantsFormat(cfg, "avif") {
+		return nil
+	}
+	// AVIF first: it encodes from the originals, and the WebP pass below
+	// replaces them in place unless webp_keep_original is set (#178).
+	if err := runAVIF(cfg); err != nil {
+		return err
+	}
+	opts := webp.ConvertOptions{
+		Quality:      cfg.WebPQuality,
+		Quiet:        cfg.Quiet,
+		Force:        cfg.ReconvertImages,
+		Sizes:        cfg.ImageSizes,
+		KeepOriginal: cfg.WebPKeepOriginal,
+		Workers:      resolveBuildWorkers(cfg.BuildWorkers),
+	}
+	converted, saved, err := webp.ConvertDirectory(cfg.OutputDir, opts)
+	if err != nil {
+		return fmt.Errorf("converting to WebP: %w", err)
+	}
+	if err := webp.UpdateReferences(cfg.OutputDir); err != nil {
+		return fmt.Errorf("updating image references: %w", err)
+	}
+	// Emit responsive srcset/sizes for images that have variants (ASSET-004).
+	if err := webp.EmitSrcset(cfg.OutputDir, cfg.ImageSizes, cfg.ImageSizesAttr); err != nil {
+		return fmt.Errorf("emitting responsive srcset: %w", err)
+	}
+	if !cfg.Quiet && converted > 0 {
+		fmt.Printf("   📊 Converted %d images, saved %.1f MB\n", converted, float64(saved)/(1024*1024))
+	}
+	// The <picture> wrap comes last: it needs the <img src=".webp"> that
+	// UpdateReferences and EmitSrcset have just produced.
+	if wantsFormat(cfg, "avif") && webp.AVIFAvailable() {
+		if err := webp.EmitPicture(cfg.OutputDir); err != nil {
+			return fmt.Errorf("offering AVIF via <picture>: %w", err)
 		}
 	}
+	return nil
+}
 
-	// Create ZIP if requested
-	if cfg.Zip {
-		zipFileName := fmt.Sprintf("%s.zip", cfg.Domain)
-		if err := createZip(cfg.OutputDir, zipFileName); err != nil {
-			return fmt.Errorf("creating ZIP: %w", err)
+// wantsFormat reports whether image_formats names a format.
+func wantsFormat(cfg *config.Config, name string) bool {
+	for _, f := range cfg.ImageFormats {
+		if strings.EqualFold(strings.TrimSpace(f), name) {
+			return true
 		}
+	}
+	return false
+}
 
+// runAVIF emits the site-level AVIF derivatives and offers them via <picture>
+// (#178). A no-op unless image_formats asks for avif.
+//
+// A missing encoder is a warning rather than a failure: the site still has its
+// WebP and its originals, and stopping a build over an optional tool would make
+// the format unusable on exactly the machines most likely to lack it.
+func runAVIF(cfg *config.Config) error {
+	if !wantsFormat(cfg, "avif") {
+		return nil
+	}
+	if !webp.AVIFAvailable() {
 		if !cfg.Quiet {
-			if info, err := os.Stat(zipFileName); err == nil { // #nosec G703 -- CLI tool checks user's output
-				sizeMB := float64(info.Size()) / (1024 * 1024)
-				fmt.Printf("📦 Created deployment package: %s (%.1f MB)\n", zipFileName, sizeMB)
-				if sizeMB > 25 {
-					fmt.Printf("⚠️  Warning: File exceeds Cloudflare Pages 25MB limit!\n")
-				}
-			}
+			fmt.Println("   ⚠️  image_formats lists avif but avifenc is not installed — skipping it.")
+			fmt.Println("      Debian/Ubuntu: apt install libavif-bin · Alpine: apk add libavif-apps · macOS: brew install libavif")
+			fmt.Println("      The site still publishes WebP and the originals.")
+		}
+		return nil
+	}
+	made, err := webp.ConvertDirectoryAVIF(cfg.OutputDir, webp.AVIFOptions{
+		Quality: cfg.AVIFQuality,
+		Sizes:   cfg.ImageSizes,
+		Force:   cfg.ReconvertImages,
+		Quiet:   cfg.Quiet,
+		Workers: resolveBuildWorkers(cfg.BuildWorkers),
+	})
+	if err != nil {
+		return fmt.Errorf("converting to AVIF: %w", err)
+	}
+	if !cfg.Quiet && made > 0 {
+		fmt.Println(webp.AVIFSummary(made))
+	}
+	return nil
+}
+
+// runArchives creates the requested deployment archives (ZIP, tar.gz, tar.xz).
+func runArchives(cfg *config.Config) error {
+	if cfg.Zip {
+		if err := createZipArchive(cfg); err != nil {
+			return err
+		}
+	}
+	if cfg.TarGz {
+		if err := makeArchive(cfg, "tar.gz", createTarGz); err != nil {
+			return err
+		}
+	}
+	if cfg.TarXz {
+		if err := makeArchive(cfg, "tar.xz", createTarXz); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// createZipArchive builds <domain>.zip and reports its size (warning past 25 MB).
+func createZipArchive(cfg *config.Config) error {
+	zipFileName := fmt.Sprintf("%s.zip", cfg.Domain)
+	if err := createZip(cfg.OutputDir, zipFileName); err != nil {
+		return fmt.Errorf("creating ZIP: %w", err)
+	}
+	if cfg.Quiet {
+		return nil
+	}
+	info, err := os.Stat(zipFileName) // #nosec G703 -- CLI tool checks its own output
+	if err != nil {
+		return nil
+	}
+	sizeMB := float64(info.Size()) / (1024 * 1024)
+	fmt.Printf("📦 Created deployment package: %s (%.1f MB)\n", zipFileName, sizeMB)
+	if sizeMB > 25 {
+		fmt.Printf("⚠️  Warning: File exceeds Cloudflare Pages 25MB limit!\n")
+	}
+	return nil
+}
+
+// runDeploy publishes the output tree to the configured provider (v1.8.1). No-op when
+// --deploy is unset.
+func runDeploy(cfg *config.Config) error {
+	if cfg.Deploy == "" {
+		return nil
+	}
+	url, err := deploy.Run(context.Background(), deploy.Options{
+		Provider: cfg.Deploy,
+		Dir:      cfg.OutputDir,
+		Project:  cfg.DeployProject,
+		Branch:   cfg.DeployBranch,
+		Target:   cfg.DeployTarget,
+		Quiet:    cfg.Quiet,
+	})
+	if err != nil {
+		return fmt.Errorf("deploy to %s: %w", cfg.Deploy, err)
+	}
+	if !cfg.Quiet && url != "" {
+		fmt.Printf("🚀 Deployed to %s\n", url)
+	}
+	return nil
+}
+
+// makeArchive builds a <domain>.<ext> archive from the output directory and reports
+// its size (v1.8.1).
+func makeArchive(cfg *config.Config, ext string, fn func(src, out string) error) error {
+	name := fmt.Sprintf("%s.%s", cfg.Domain, ext)
+	if err := fn(cfg.OutputDir, name); err != nil {
+		return fmt.Errorf("creating %s: %w", ext, err)
+	}
+	if !cfg.Quiet {
+		if info, err := os.Stat(name); err == nil { // #nosec G703 -- CLI checks its own output
+			fmt.Printf("📦 Created deployment package: %s (%.1f MB)\n", name, float64(info.Size())/(1024*1024))
 		}
 	}
 	return nil
@@ -659,66 +1465,85 @@ func hasChanges(dirs []string, lastBuild time.Time) bool {
 	return changed
 }
 
+// createZip builds a ZIP archive of sourceDir at zipFileName. Errors from the
+// writer Close (which emits the ZIP central directory) and from the file Close
+// are propagated so a corrupt archive is never reported as success (GO-024).
 func createZip(sourceDir, zipFileName string) error {
 	zipFile, err := os.Create(zipFileName) // #nosec G304,G703 -- CLI tool creates user's output file
 	if err != nil {
 		return fmt.Errorf("creating zip file: %w", err)
 	}
-	defer func() { _ = zipFile.Close() }()
+	if err := writeZip(sourceDir, zipFile); err != nil {
+		_ = zipFile.Close()
+		return err
+	}
+	if err := zipFile.Close(); err != nil {
+		return fmt.Errorf("closing zip file: %w", err)
+	}
+	return nil
+}
 
-	zipWriter := zip.NewWriter(zipFile)
-	defer func() { _ = zipWriter.Close() }()
+// writeZip streams every entry under sourceDir into a ZIP archive written to w.
+// The central directory is written by zip.Writer.Close, so its error must be
+// returned — swallowing it would deploy a truncated archive with exit code 0
+// (GO-024).
+func writeZip(sourceDir string, w io.Writer) error {
+	zipWriter := zip.NewWriter(w)
 
-	err = filepath.Walk(sourceDir, func(path string, info os.FileInfo, err error) error { // #nosec G703 -- CLI tool walks user's output dir
+	err := filepath.Walk(sourceDir, func(path string, info os.FileInfo, err error) error { // #nosec G703 -- CLI tool walks user's output dir
 		if err != nil {
 			return err
 		}
-
 		if path == sourceDir {
 			return nil
 		}
-
-		relPath, err := filepath.Rel(sourceDir, path)
-		if err != nil {
-			return fmt.Errorf("getting relative path: %w", err)
-		}
-
-		relPath = strings.ReplaceAll(relPath, string(os.PathSeparator), "/")
-
-		header, err := zip.FileInfoHeader(info)
-		if err != nil {
-			return fmt.Errorf("creating file header: %w", err)
-		}
-		header.Name = relPath
-
-		if info.IsDir() {
-			header.Name += "/"
-			_, err = zipWriter.CreateHeader(header)
-			return err
-		}
-
-		header.Method = zip.Deflate
-
-		writer, err := zipWriter.CreateHeader(header)
-		if err != nil {
-			return fmt.Errorf("creating zip entry: %w", err)
-		}
-
-		file, err := os.Open(path) // #nosec G304,G122 -- CLI tool reads user's output files
-		if err != nil {
-			return fmt.Errorf("opening file: %w", err)
-		}
-		defer func() { _ = file.Close() }()
-
-		_, err = io.Copy(writer, file)
-		return err
+		return zipAddEntry(zipWriter, sourceDir, path, info)
 	})
-
 	if err != nil {
+		_ = zipWriter.Close()
 		return fmt.Errorf("walking directory: %w", err)
 	}
-
+	if err := zipWriter.Close(); err != nil {
+		return fmt.Errorf("finalizing zip: %w", err)
+	}
 	return nil
+}
+
+// zipAddEntry writes one file or directory entry (relative to sourceDir) into zw.
+func zipAddEntry(zw *zip.Writer, sourceDir, path string, info os.FileInfo) error {
+	relPath, err := filepath.Rel(sourceDir, path)
+	if err != nil {
+		return fmt.Errorf("getting relative path: %w", err)
+	}
+	relPath = strings.ReplaceAll(relPath, string(os.PathSeparator), "/")
+
+	header, err := zip.FileInfoHeader(info)
+	if err != nil {
+		return fmt.Errorf("creating file header: %w", err)
+	}
+	header.Name = relPath
+
+	if info.IsDir() {
+		header.Name += "/"
+		_, err = zw.CreateHeader(header)
+		return err
+	}
+
+	header.Method = zip.Deflate
+
+	writer, err := zw.CreateHeader(header)
+	if err != nil {
+		return fmt.Errorf("creating zip entry: %w", err)
+	}
+
+	file, err := os.Open(path) // #nosec G304,G122 -- CLI tool reads user's output files
+	if err != nil {
+		return fmt.Errorf("opening file: %w", err)
+	}
+	defer func() { _ = file.Close() }()
+
+	_, err = io.Copy(writer, file)
+	return err
 }
 
 func printUsage() {
@@ -733,13 +1558,24 @@ func printUsage() {
 	fmt.Println("  template  - Template name (inside templates-dir)")
 	fmt.Println("  domain    - Target domain for the generated site")
 	fmt.Println("")
+	fmt.Println("Subcommands:")
+	fmt.Println("  ssg init [name]        - Scaffold a new site")
+	fmt.Println("  ssg new worker <kind>  - Scaffold a Pages Functions worker")
+	fmt.Println("  ssg new wrangler       - Generate a starter wrangler.toml")
+	fmt.Println("  ssg import redirects   - Convert a Next.js redirects() rule set")
+	fmt.Println("  ssg migrate <src> <url> - Migrate a live site (see 'ssg migrate --help')")
+	fmt.Println("  ssg repair [--fix]     - Find (and fix) markup a migration left indented")
+	fmt.Println("  ssg mcp                - Development MCP server for AI-assisted editing")
+	fmt.Println("                           (designer + content manager; see 'ssg mcp --help')")
+	fmt.Println("")
 	fmt.Println("Configuration:")
 	fmt.Println("  --config=FILE          - Load config from YAML/TOML/JSON file")
 	fmt.Println("                           Auto-detects: .ssg.yaml, .ssg.toml, .ssg.json")
 	fmt.Println("")
 	fmt.Println("Template Engine:")
 	fmt.Println("  --engine=ENGINE        - Template engine (default: go)")
-	fmt.Println("                           Available: go, pongo2 (jinja2), mustache, handlebars")
+	fmt.Println("                           Supported: go, pongo2, mustache, handlebars")
+	fmt.Println("                           (alt engines load the theme's own templates verbatim)")
 	fmt.Println("  --online-theme=URL     - Download theme from URL (GitHub, GitLab, or direct ZIP)")
 	fmt.Println("                           Example: --online-theme=https://github.com/user/hugo-theme")
 	fmt.Println("")
@@ -757,14 +1593,40 @@ func printUsage() {
 	fmt.Println("  --mddb-watch-interval=SEC - Watch interval in seconds (default: 30)")
 	fmt.Println("")
 	fmt.Println("Server & Development:")
-	fmt.Println("  --http                 - Start built-in HTTP server")
+	fmt.Println("  --http                 - Start built-in HTTP server (also serves configured endpoints:)")
+	fmt.Println("  --host=ADDR            - Dev server bind address (default: 127.0.0.1; use 0.0.0.0 to expose)")
 	fmt.Println("  --port=PORT            - HTTP server port (default: 8888)")
 	fmt.Println("  --watch                - Watch for changes and rebuild automatically")
 	fmt.Println("  --clean                - Clean output directory before build")
 	fmt.Println("")
+	fmt.Println("Watch runners (spawned alongside --watch):")
+	fmt.Println("  --wrangler                  - Run `npx wrangler dev` in the background")
+	fmt.Println("  --workerd                   - Run `workerd serve` in the background")
+	fmt.Println("  --watch-runner=CMD          - Run a custom command in the background")
+	fmt.Println("  --wrangler-config=FILE      - wrangler config outside the project (implies --wrangler)")
+	fmt.Println("  --workerd-config=FILE       - workerd config outside the project (implies --workerd)")
+	fmt.Println("  --wrangler-dir=DIR          - Run wrangler in DIR, e.g. a monorepo's Worker dir")
+	fmt.Println("  --workerd-dir=DIR           - Run workerd in DIR")
+	fmt.Println("  --watch-runner-config=FILE  - Runner-agnostic form of the *-config flags")
+	fmt.Println("  --watch-runner-dir=DIR      - Runner-agnostic form of the *-dir flags")
+	fmt.Println("")
+	fmt.Println("Public Server Hardening (TLS/HTTP2/HTTP3, opt-in):")
+	fmt.Println("  --tls-cert=FILE        - TLS certificate (PEM); with --tls-key enables HTTPS + HTTP/2")
+	fmt.Println("  --tls-key=FILE         - TLS private key (PEM), paired with --tls-cert")
+	fmt.Println("  --tls-auto             - Automatic Let's Encrypt certificates (needs --tls-domain, port 443)")
+	fmt.Println("  --tls-domain=HOST      - Domain(s) for autocert (comma-separated)")
+	fmt.Println("  --http3                - Advertise & serve HTTP/3 (QUIC) alongside HTTP/2 (requires TLS)")
+	fmt.Println("  --gzip                 - gzip-compress responses when the client accepts it")
+	fmt.Println("  --max-conns=N          - Cap simultaneous connections (0 = unlimited)")
+	fmt.Println("  --workers=N            - Parallel build workers (default: one per CPU; 0 = off/sequential)")
+	fmt.Println("  --mem-limit=SIZE       - Soft memory limit, e.g. 512MiB, 1GiB (runtime GC target)")
+	fmt.Println("")
 	fmt.Println("Output Control:")
 	fmt.Println("  --sitemap-off          - Disable sitemap.xml generation")
 	fmt.Println("  --robots-off           - Disable robots.txt generation")
+	fmt.Println("  --not-found-off        - Disable the generated 404.html (a page slugged")
+	fmt.Println("                           \"404\" still wins; without either, static hosts")
+	fmt.Println("                           answer unknown paths with index.html and a 200)")
 	fmt.Println("  --pretty-html          - Prettify HTML (remove all blank lines)")
 	fmt.Println("  --relative-links       - Convert absolute URLs to relative links")
 	fmt.Println("  --post-url-format=FMT  - Post URL format: 'date' (default: /YYYY/MM/DD/slug/)")
@@ -777,30 +1639,123 @@ func printUsage() {
 	fmt.Println("  --minify-html          - Minify HTML output")
 	fmt.Println("  --minify-css           - Minify CSS output")
 	fmt.Println("  --minify-js            - Minify JS output")
-	fmt.Println("  --sourcemap            - Include source maps in output")
+	fmt.Println("  --sourcemap            - Emit v3 source maps (*.js.map/*.css.map) for minified JS/CSS")
+	fmt.Println("  --fingerprint          - Content-hash CSS/JS names + manifest for immutable caching")
+	fmt.Println("  --scss                 - Compile *.scss via dart-sass before bundling/minify (optional tool)")
+	fmt.Println("  --sass-binary=PATH     - Explicit dart-sass binary (default: `sass` from PATH)")
+	fmt.Println("  --lastmod-from-git     - Derive sitemap <lastmod> from each file's last git commit")
+	fmt.Println("  --permalink-post=PAT   - Post URL pattern, tokens :year :month :day :slug :category")
+	fmt.Println("  --permalink-page=PAT   - Page URL pattern (same tokens)")
+	fmt.Println("")
+	fmt.Println("Authoring:")
+	fmt.Println("  --math                 - Render math: inject KaTeX on pages with $$…$$ or fenced ```math blocks")
+	fmt.Println("  --highlight            - Syntax-highlight fenced code blocks (Chroma)")
+	fmt.Println("  --highlight-style=NAME - Chroma style for --highlight (default: github)")
+	fmt.Println("  --toc                  - Insert a table of contents on pages that opt in")
+	fmt.Println("  --toc-depth=N          - Max heading depth for the TOC (default: 3)")
+	fmt.Println("  --sanitize-html        - Sanitize raw HTML in markdown via bluemonday UGC policy (FE-005)")
+	fmt.Println("  --seo                  - Inject OpenGraph/Twitter/JSON-LD into pages lacking their own")
+	fmt.Println("                           (opt-in since v1.8.2; --seo-off / seo_off forces it off, deprecated)")
+	fmt.Println("  --timezone=ZONE        - IANA zone for content dates in permalinks/templates (e.g. Europe/Warsaw);")
+	fmt.Println("                           per-language overrides via language_timezones: in .ssg.yaml")
+	fmt.Println("")
+	fmt.Println("Feeds, Search & Listings:")
+	fmt.Println("  --feed                 - Generate an Atom feed (feed.xml)")
+	fmt.Println("                           (feeds: in config adds more, in atom | rss | json)")
+	fmt.Println("  --feed-items=N         - Max entries in the feed (default: 20)")
+	fmt.Println("  --search-index         - Emit search-index.json for client-side search")
+	fmt.Println("  --webmcp               - Declare the site's tools to a browser agent (WebMCP)")
+	fmt.Println("  --paginate=N           - Posts per index page; 0 disables pagination (default)")
+	fmt.Println("  --outputs=LIST         - Extra output formats per page, comma-separated (e.g. json)")
+	fmt.Println("  --check-links          - Validate internal links after build (warn mode)")
+	fmt.Println("  --check-links=MODE     - warn | strict (strict fails the build on dead links)")
+	fmt.Println("  --check-images         - Report images with no alt attribute (warn mode)")
+	fmt.Println("  --check-images=MODE    - warn | strict | strict-decorative (also reports alt=\"\")")
+	fmt.Println("  --check-meta           - Validate title/description on indexable pages (warn mode)")
+	fmt.Println("  --check-meta=MODE      - warn | strict (strict fails the build)")
+	fmt.Println("  --check-markup=MODE    - warn (default) | strict | off — report source markup")
+	fmt.Println("                           indented into a code block ('ssg repair --fix')")
+	fmt.Println("  --no-check-markup      - Turn that default check off")
+	fmt.Println("  --check-schema         - Validate emitted JSON-LD against required properties (warn)")
+	fmt.Println("  --check-schema=MODE    - warn | strict (strict fails the build)")
+	fmt.Println("  --check-orphans        - Report indexable pages with no inbound links (warn mode)")
+	fmt.Println("  --check-orphans=MODE   - warn | strict (strict fails the build)")
+	fmt.Println("  --check-redirects      - Report links the host would redirect (needs pretty_urls)")
+	fmt.Println("  --check-redirects=MODE - warn | strict (strict fails the build)")
+	fmt.Println("  --auto-excerpt         - Derive a missing excerpt from the opening paragraph")
+	fmt.Println("  --shortcode-errors=M   - drop (default) | keep | strict — what a shortcode that")
+	fmt.Println("                           fails to render leaves in the page (keep = its raw source,")
+	fmt.Println("                           strict = keep and fail the build)")
+	fmt.Println("  --strict               - Escalate every soft build problem into a hard failure")
+	fmt.Println("  --route-manifest       - Write routes.json so the route contract ships with the site")
+	fmt.Println("  --notify               - Announce new and changed posts to the configured channels")
+	fmt.Println("")
+	fmt.Println("Internationalisation (docs/I18N.md):")
+	fmt.Println("  --languages=LIST       - Build languages, comma-separated (e.g. en,pl)")
+	fmt.Println("  --default-language=LC  - Default (unprefixed) language (default: first of --languages)")
 	fmt.Println("")
 	fmt.Println("Image Processing:")
 	fmt.Println("  --webp                 - Convert images to WebP format (requires cwebp)")
 	fmt.Println("  --webp-quality=N       - WebP compression quality 1-100 (default: 60)")
+	fmt.Println("  --image-formats=a,b    - Publish images in these formats, best first")
+	fmt.Println("                           (e.g. avif,webp). AVIF needs the optional avifenc;")
+	fmt.Println("                           a missing encoder is skipped with a warning.")
+	fmt.Println("  --avif-quality=N       - AVIF quality 1-100 (default: 45)")
+	fmt.Println("  --webp-keep-original   - Keep originals next to .webp files (safe for themes")
+	fmt.Println("                           with hardcoded .png/.jpg refs); default replaces them")
 	fmt.Println("  --reconvert-images     - Force reconvert even if WebP already exists")
+	fmt.Println("  --image-sizes=A,B,C    - Responsive widths (px) → WebP variants + srcset (e.g. 480,960,1600)")
+	fmt.Println("  --image-sizes-attr=VAL - Value of the generated sizes attribute (default: 100vw)")
+	fmt.Println("  --images-gc            - After the build, delete image-cache entries it no longer references")
+	fmt.Println("  --images-gc-dry        - Report what --images-gc would delete, without deleting")
 	fmt.Println("")
 	fmt.Println("Deployment:")
-	fmt.Println("  --zip                  - Create ZIP file for Cloudflare Pages")
+	fmt.Println("  --zip                  - Create ZIP archive of the output tree")
+	fmt.Println("  --targz                - Create gzip-compressed tarball (.tar.gz) of the output tree")
+	fmt.Println("  --tarxz                - Create xz-compressed tarball (.tar.xz) of the output tree")
+	fmt.Println("")
+	fmt.Println("Publish (native deploy — credentials/secrets come from the environment):")
+	fmt.Println("  --deploy=PROVIDER      - cloudflare | github-pages | netlify | vercel | ftp | sftp")
+	fmt.Println("  --deploy-project=NAME  - Pages/site/project name (cloudflare, netlify, vercel)")
+	fmt.Println("  --deploy-branch=BRANCH - Target branch (cloudflare, github-pages; default gh-pages)")
+	fmt.Println("  --deploy-target=URL    - ftp://user@host/path, sftp://user@host/path, or a git remote")
+	fmt.Println("    cloudflare  → CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID")
+	fmt.Println("    github-pages→ GITHUB_TOKEN (https remotes) or an SSH key")
+	fmt.Println("    netlify     → NETLIFY_AUTH_TOKEN (+ site via --deploy-project/NETLIFY_SITE_ID)")
+	fmt.Println("    vercel      → VERCEL_TOKEN, VERCEL_ORG_ID (+ project via --deploy-project)")
+	fmt.Println("    ftp         → FTP_USERNAME, FTP_PASSWORD")
+	fmt.Println("    sftp        → SSH_USERNAME, SSH_PASSWORD or SSH_KEY_FILE (host in known_hosts)")
 	fmt.Println("")
 	fmt.Println("Paths:")
 	fmt.Println("  --content-dir=PATH     - Content directory (default: content)")
 	fmt.Println("  --templates-dir=PATH   - Templates directory (default: templates)")
 	fmt.Println("  --output-dir=PATH      - Output directory (default: output)")
+	fmt.Println("  --static-dir=PATH      - Static passthrough directory copied verbatim to output (default: static)")
+	fmt.Println("  --data-dir=PATH        - Data files dir (*.yaml|*.json) exposed as .Data.* (default: data)")
+	fmt.Println("  --content-source=DIR   - Extra Markdown root merged into the site; repeatable.")
+	fmt.Println("                           With one or more, <source> becomes optional. Per-source")
+	fmt.Println("                           type/category need content_sources: in the config file.")
+	fmt.Println("")
+	fmt.Println("External sources (docs/EXTERNAL_SOURCES.md):")
+	fmt.Println("  --offline                    - Serve external sources from the disk cache only")
+	fmt.Println("  --refresh-external-sources   - Force re-fetch, ignoring fresh cache entries")
+	fmt.Println("  --clear-external-cache       - Wipe the external-source disk cache before the build")
+	fmt.Println("  --external-source=NAME       - Narrow --refresh-external-sources to one source")
 	fmt.Println("")
 	fmt.Println("Other:")
 	fmt.Println("  --quiet, -q            - Suppress output (only exit codes)")
 	fmt.Println("  --version, -v          - Show version")
 	fmt.Println("  --help, -h             - Show this help")
 	fmt.Println("")
+	fmt.Println("Every value flag accepts both --flag=value and --flag value (GO-053).")
+	fmt.Println("Single-dash aliases exist for a few toggles: -zip -webp -watch -http (and --pretty for --pretty-html).")
+	fmt.Println("")
 	fmt.Println("Examples:")
 	fmt.Println("  ssg my-site simple example.com --http --watch")
-	fmt.Println("  ssg my-site krowy example.com --clean --minify-all --zip")
-	fmt.Println("  ssg my-site mytheme example.com --engine=pongo2")
+	fmt.Println("  ssg my-site krowy example.com --clean --minify-all --zip --targz --tarxz")
+	fmt.Println("  ssg my-site simple example.com --http --port=443 --tls-cert=cert.pem --tls-key=key.pem --http3 --gzip")
+	fmt.Println("  ssg my-site simple example.com --http --port=443 --tls-auto --tls-domain=example.com --max-conns=1024 --mem-limit=512MiB")
+	fmt.Println("  ssg my-site mytheme example.com --engine=go")
 	fmt.Println("  ssg my-site themename example.com --online-theme=https://github.com/user/hugo-theme")
 	fmt.Println("  ssg --config .ssg.yaml --http --watch")
 	fmt.Println("")
@@ -814,4 +1769,279 @@ func printUsage() {
 	fmt.Println("  # With language filter and API key")
 	fmt.Println("  ssg --mddb-url=https://mddb.example.com --mddb-collection=site \\")
 	fmt.Println("      --mddb-lang=en_US --mddb-key=secret krowy example.com")
+}
+
+// watchRunnerCommand resolves a runner name (or a full custom command line) plus
+// an optional config-file path into the program and arguments to execute.
+// runnerConfig lets the runner's own config live anywhere on disk instead of
+// next to the project: wrangler and custom commands take `--config <path>`,
+// workerd takes the config as its positional argument (GO-054).
+// Returns an empty name when the runner is blank.
+func watchRunnerCommand(runner, runnerConfig string) (string, []string) {
+	switch runner {
+	case "wrangler":
+		args := []string{"wrangler", "dev"}
+		if runnerConfig != "" {
+			args = append(args, "--config", runnerConfig)
+		}
+		return "npx", args
+	case "workerd":
+		args := []string{"serve"}
+		if runnerConfig != "" {
+			args = append(args, runnerConfig)
+		}
+		return "workerd", args
+	default:
+		parts := strings.Fields(runner)
+		if len(parts) == 0 {
+			return "", nil
+		}
+		args := parts[1:]
+		if runnerConfig != "" {
+			args = append(args, "--config", runnerConfig)
+		}
+		return parts[0], args
+	}
+}
+
+// watchRunnerSpec describes the background process to spawn: which runner, the
+// config file it should read, and the directory it runs in. Dir covers the
+// monorepo layout where the Worker sits in a subdirectory while content and
+// templates stay at the repo root (GO-054).
+type watchRunnerSpec struct {
+	Runner string
+	Config string
+	Dir    string
+	Quiet  bool
+}
+
+// resolveRunnerConfig makes a config path absolute when the runner starts in
+// another directory, so the path stays relative to where ssg was invoked rather
+// than silently re-anchoring to the runner's Dir. Missing files only warn: the
+// runner's own error message is more precise than anything guessed here.
+func resolveRunnerConfig(spec watchRunnerSpec) string {
+	path := spec.Config
+	if path == "" {
+		return ""
+	}
+	if spec.Dir != "" && !filepath.IsAbs(path) {
+		if abs, err := filepath.Abs(path); err == nil {
+			path = abs
+		}
+	}
+	if _, err := os.Stat(path); err != nil {
+		errf("⚠️  Watch-runner config %q not found: %v\n", path, err)
+	}
+	return path
+}
+
+// startWatchRunner spawns a background watch runner process (e.g. wrangler,
+// workerd, or a custom command) per spec.
+func startWatchRunner(spec watchRunnerSpec) *exec.Cmd {
+	runnerConfig := resolveRunnerConfig(spec)
+
+	cmdName, cmdArgs := watchRunnerCommand(spec.Runner, runnerConfig)
+	if cmdName == "" {
+		return nil
+	}
+	if spec.Dir != "" {
+		if _, err := os.Stat(spec.Dir); err != nil {
+			errf("⚠️  Watch-runner directory %q not usable: %v\n", spec.Dir, err)
+			return nil
+		}
+	}
+	if !spec.Quiet {
+		where := ""
+		if spec.Dir != "" {
+			where = fmt.Sprintf(" (in %s)", spec.Dir)
+		}
+		fmt.Printf("⚡ Starting watch runner%s: %s %s...\n", where, cmdName, strings.Join(cmdArgs, " "))
+	}
+
+	// #nosec G204 -- the runner command, its config path and its directory come
+	// from this user's own --watch-runner/--*-config/--*-dir flags or config file;
+	// running them is the feature
+	cmd := exec.Command(cmdName, cmdArgs...)
+	cmd.Dir = spec.Dir
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Start(); err != nil {
+		errf("⚠️  Failed to start watch runner %q: %v\n", spec.Runner, err)
+		return nil
+	}
+
+	// Clean up child process on exit signals
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigs
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+		os.Exit(0)
+	}()
+
+	return cmd
+}
+
+// warnUnknownFlags names an option ssg does not accept instead of ignoring it
+// (#152). `--output=public` reads like it should work — the config key is
+// `output_dir` and the flag is `--output-dir` — and the build then wrote to
+// output/ and said nothing, which looks like the flag was honoured and the
+// site was built somewhere else.
+//
+// It warns rather than fails: a script that passes an option a future ssg will
+// understand keeps working, and the operator still sees the line.
+func warnUnknownFlags(args []string, cfg *config.Config) {
+	known := knownFlagNames(cfg)
+	for _, arg := range args {
+		if !strings.HasPrefix(arg, "-") || arg == "-" || arg == "--" {
+			continue
+		}
+		name := arg
+		if i := strings.Index(name, "="); i >= 0 {
+			name = name[:i]
+		}
+		if known[name] {
+			continue
+		}
+		msg := fmt.Sprintf("⚠️  Unknown option %s — ignored", name)
+		if near := nearestFlag(name, known); near != "" {
+			msg += fmt.Sprintf(" (did you mean %s?)", near)
+		}
+		errln(msg + "; run `ssg --help` for the list")
+	}
+}
+
+// knownFlagNames is every option the parsers accept, gathered from the same
+// tables they read, so a new flag cannot be added without this knowing it.
+func knownFlagNames(cfg *config.Config) map[string]bool {
+	names := map[string]bool{}
+	for name := range valueFlags() {
+		names[name] = true
+	}
+	for prefix := range stringEqualFlags(cfg) {
+		names[strings.TrimSuffix(prefix, "=")] = true
+	}
+	for _, name := range boolFlagNames(cfg) {
+		names[name] = true
+	}
+	for _, name := range standaloneFlagNames {
+		names[name] = true
+	}
+	return names
+}
+
+// standaloneFlagNames are the options handled outside the tables: the ones with
+// their own branch in parseBoolFlags/parseSpecialFlags.
+var standaloneFlagNames = []string{
+	"--help", "-h", "--version", "-v", "--auto-reload", "--no-auto-reload",
+	"--check-links", "--check-images", "--check-meta", "--check-schema",
+	"--check-orphans", "--check-redirects", "--seo-off", "--no-check-markup",
+}
+
+// nearestFlag returns the known option closest to what was typed, so a
+// near-miss points at the right one instead of at the whole help text. Only a
+// clear neighbour qualifies: a prefix match, or one edit away.
+func nearestFlag(typed string, known map[string]bool) string {
+	best, bestScore := "", 0
+	for name := range known {
+		score := 0
+		switch {
+		case strings.HasPrefix(name, typed):
+			score = 3
+		case strings.HasPrefix(typed, name):
+			score = 2
+		case editDistanceAtMostOne(typed, name):
+			score = 1
+		}
+		if score > bestScore || (score == bestScore && score > 0 && name < best) {
+			best, bestScore = name, score
+		}
+	}
+	return best
+}
+
+// editDistanceAtMostOne reports whether two options differ by a single
+// character — one typo, the case worth guessing about.
+func editDistanceAtMostOne(a, b string) bool {
+	if a == b {
+		return true
+	}
+	if len(a) > len(b) {
+		a, b = b, a
+	}
+	if len(b)-len(a) > 1 {
+		return false
+	}
+	for i := 0; i < len(a); i++ {
+		if a[i] == b[i] {
+			continue
+		}
+		if len(a) == len(b) {
+			return a[i+1:] == b[i+1:]
+		}
+		return a[i:] == b[i+1:]
+	}
+	return true
+}
+
+// boolFlagTargets maps every on/off option to the field it sets. Extracted from
+// parseBoolFlags so the unknown-option check reads the same table the parser
+// does, rather than a hand-kept copy that would drift (#152).
+func boolFlagTargets(cfg *config.Config) map[string]*bool {
+	return map[string]*bool{
+		"--zip": &cfg.Zip, "-zip": &cfg.Zip,
+		"--targz": &cfg.TarGz, "--tarxz": &cfg.TarXz,
+		"--tls-auto": &cfg.TLSAuto, "--gzip": &cfg.Gzip, "--http3": &cfg.HTTP3,
+		"--sanitize-html": &cfg.SanitizeHTML,
+		"--auto-excerpt":  &cfg.AutoExcerpt,
+		"--webp":          &cfg.WebP, "-webp": &cfg.WebP,
+		"--webp-keep-original": &cfg.WebPKeepOriginal,
+		"--reconvert-images":   &cfg.ReconvertImages,
+		"--images-gc":          &cfg.ImagesGC, "--images-gc-dry": &cfg.ImagesGCDry,
+		"--watch": &cfg.Watch, "-watch": &cfg.Watch,
+		"--http": &cfg.HTTP, "-http": &cfg.HTTP,
+		"--sitemap-off": &cfg.SitemapOff, "--robots-off": &cfg.RobotsOff,
+		"--not-found-off": &cfg.NotFoundOff,
+		"--pretty-html":   &cfg.PrettyHTML, "--pretty": &cfg.PrettyHTML,
+		"--relative-links": &cfg.RelativeLinks,
+		"--minify-all":     &cfg.MinifyAll,
+		"--minify-html":    &cfg.MinifyHTML, "--minify-css": &cfg.MinifyCSS, "--minify-js": &cfg.MinifyJS,
+		"--sourcemap": &cfg.SourceMap, "--fingerprint": &cfg.Fingerprint,
+		"--scss":             &cfg.SCSS,
+		"--lastmod-from-git": &cfg.LastmodFromGit,
+		"--math":             &cfg.Math, "--feed": &cfg.Feed,
+		"--highlight": &cfg.Highlight, "--toc": &cfg.TOC,
+		"--search-index": &cfg.SearchIndex, "--seo": &cfg.SEO,
+		"--webmcp": &cfg.WebMCP,
+		"--strict": &cfg.Strict, "--route-manifest": &cfg.RouteManifest, // #62
+		"--notify":     &cfg.Notify,     // #1.8.16 announce new/changed posts
+		"--mddb-watch": &cfg.Mddb.Watch, // bool flag, not an =value flag (GO-018)
+		"--clean":      &cfg.Clean,
+		"--quiet":      &cfg.Quiet, "-q": &cfg.Quiet,
+		// External sources (docs/EXTERNAL_SOURCES.md)
+		"--offline":                  &cfg.ExternalSources.Offline,
+		"--refresh-external-sources": &cfg.ExternalSources.Refresh,
+		"--clear-external-cache":     &cfg.ExternalSources.ClearCache,
+	}
+}
+
+// boolFlagNames lists the toggles by name.
+func boolFlagNames(cfg *config.Config) []string {
+	names := make([]string, 0, 64)
+	for name := range boolFlagTargets(cfg) {
+		names = append(names, name)
+	}
+	return names
+}
+
+// logRunningVersion announces the build's own version. Silent under --quiet,
+// which exists so a build emits nothing but its exit code.
+func logRunningVersion(cfg *config.Config) {
+	if cfg.Quiet {
+		return
+	}
+	fmt.Printf("🧱 ssg %s\n", Version)
 }

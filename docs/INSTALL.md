@@ -2,11 +2,16 @@
 
 This document provides installation instructions for SSG on all supported platforms.
 
+SSG ships as a single static binary of roughly **34 MB** (release builds,
+stripped). Since v1.8.4 it embeds pure-Go SQL drivers (MySQL/MariaDB,
+PostgreSQL, SQLite) for [external sources](EXTERNAL_SOURCES.md), which
+accounts for most of that size; no external libraries or runtimes are needed.
+
 ## Table of Contents
 
 - [Quick Install](#quick-install)
 - [Linux - Debian/Ubuntu (DEB)](#linux---debianubuntu-deb)
-- [Linux - Fedora/RHEL/CentOS (RPM)](#linux---fedorarhel-rpm)
+- [Linux - Fedora/RHEL/CentOS (RPM)](#linux---fedorarhelcentos-rpm)
 - [Linux - Snap (Ubuntu)](#linux---snap-ubuntu)
 - [macOS - Homebrew](#macos---homebrew)
 - [macOS - Binary](#macos---binary)
@@ -15,8 +20,13 @@ This document provides installation instructions for SSG on all supported platfo
 - [Windows](#windows)
 - [From Source](#from-source)
 - [Verify Installation](#verify-installation)
+- [Staying up to date](#staying-up-to-date)
 
 ---
+
+> **Upgrading an existing install?** See
+> [UPGRADING.md](UPGRADING.md) for the steps between your version and this one.
+> Most releases are drop-in; the few that are not are listed there.
 
 ## Quick Install
 
@@ -34,7 +44,7 @@ curl -sSL https://raw.githubusercontent.com/spagu/ssg/main/install.sh | bash
 
 ```bash
 # Add GPG key
-curl -fsSL https://github.com/spagu/ssg/releases/download/v1.3.0/ssg-apt.gpg | sudo gpg --dearmor -o /usr/share/keyrings/ssg-keyring.gpg
+curl -fsSL https://github.com/spagu/ssg/releases/latest/download/ssg-apt.gpg | sudo gpg --dearmor -o /usr/share/keyrings/ssg-keyring.gpg
 
 # Add repository
 echo "deb [signed-by=/usr/share/keyrings/ssg-keyring.gpg] https://apt.ssg.dev stable main" | sudo tee /etc/apt/sources.list.d/ssg.list
@@ -47,13 +57,17 @@ sudo apt install ssg
 ### Manual Download
 
 ```bash
+# Pick the version you want — see all releases (incl. previous versions):
+# https://github.com/spagu/ssg/releases
+VERSION=1.8.52
+
 # AMD64 (x86_64)
-wget https://github.com/spagu/ssg/releases/download/v1.3.0/ssg_1.3.0_amd64.deb
-sudo dpkg -i ssg_1.3.0_amd64.deb
+wget https://github.com/spagu/ssg/releases/download/v${VERSION}/ssg_${VERSION}_amd64.deb
+sudo dpkg -i ssg_${VERSION}_amd64.deb
 
 # ARM64 (aarch64)
-wget https://github.com/spagu/ssg/releases/download/v1.3.0/ssg_1.3.0_arm64.deb
-sudo dpkg -i ssg_1.3.0_arm64.deb
+wget https://github.com/spagu/ssg/releases/download/v${VERSION}/ssg_${VERSION}_arm64.deb
+sudo dpkg -i ssg_${VERSION}_arm64.deb
 
 # Install dependencies if needed
 sudo apt install -f
@@ -79,7 +93,7 @@ name=SSG Repository
 baseurl=https://rpm.ssg.dev/stable/$basearch
 enabled=1
 gpgcheck=1
-gpgkey=https://github.com/spagu/ssg/releases/download/v1.3.0/ssg-rpm.gpg
+gpgkey=https://github.com/spagu/ssg/releases/latest/download/ssg-rpm.gpg
 EOF
 
 # Install
@@ -89,13 +103,17 @@ sudo dnf install ssg
 ### Manual Download
 
 ```bash
+# Pick the version you want — see all releases (incl. previous versions):
+# https://github.com/spagu/ssg/releases
+VERSION=1.8.52
+
 # AMD64 (x86_64)
-wget https://github.com/spagu/ssg/releases/download/v1.3.0/ssg-1.3.0-1.x86_64.rpm
-sudo rpm -i ssg-1.3.0-1.x86_64.rpm
+wget https://github.com/spagu/ssg/releases/download/v${VERSION}/ssg-${VERSION}-1.x86_64.rpm
+sudo rpm -i ssg-${VERSION}-1.x86_64.rpm
 
 # ARM64 (aarch64)
-wget https://github.com/spagu/ssg/releases/download/v1.3.0/ssg-1.3.0-1.aarch64.rpm
-sudo rpm -i ssg-1.3.0-1.aarch64.rpm
+wget https://github.com/spagu/ssg/releases/download/v${VERSION}/ssg-${VERSION}-1.aarch64.rpm
+sudo rpm -i ssg-${VERSION}-1.aarch64.rpm
 ```
 
 ### Install WebP tools
@@ -111,15 +129,16 @@ sudo dnf install libwebp-tools
 ### Install from Snap Store
 
 ```bash
-sudo snap install ssg
+sudo snap install static-site-generator
 ```
 
-### Or from local snap file
+### Create short alias
 
 ```bash
-wget https://github.com/spagu/ssg/releases/download/v1.3.0/ssg_1.3.0_amd64.snap
-sudo snap install --classic ssg_1.3.0_amd64.snap
+sudo snap alias static-site-generator ssg
 ```
+
+Now you can use `ssg` instead of `static-site-generator`.
 
 ---
 
@@ -155,13 +174,13 @@ brew install webp
 
 ```bash
 # Apple Silicon (M1/M2/M3)
-curl -LO https://github.com/spagu/ssg/releases/download/v1.3.0/ssg-1.3.0-darwin-arm64.tar.gz
-tar -xzf ssg-1.3.0-darwin-arm64.tar.gz
+curl -LO https://github.com/spagu/ssg/releases/latest/download/ssg-darwin-arm64.tar.gz
+tar -xzf ssg-darwin-arm64.tar.gz
 sudo mv ssg /usr/local/bin/
 
 # Intel
-curl -LO https://github.com/spagu/ssg/releases/download/v1.3.0/ssg-1.3.0-darwin-amd64.tar.gz
-tar -xzf ssg-1.3.0-darwin-amd64.tar.gz
+curl -LO https://github.com/spagu/ssg/releases/latest/download/ssg-darwin-amd64.tar.gz
+tar -xzf ssg-darwin-amd64.tar.gz
 sudo mv ssg /usr/local/bin/
 ```
 
@@ -186,13 +205,13 @@ make install clean
 
 ```bash
 # AMD64
-fetch https://github.com/spagu/ssg/releases/download/v1.3.0/ssg-1.3.0-freebsd-amd64.tar.gz
-tar -xzf ssg-1.3.0-freebsd-amd64.tar.gz
+fetch https://github.com/spagu/ssg/releases/latest/download/ssg-freebsd-amd64.tar.gz
+tar -xzf ssg-freebsd-amd64.tar.gz
 mv ssg /usr/local/bin/
 
 # ARM64
-fetch https://github.com/spagu/ssg/releases/download/v1.3.0/ssg-1.3.0-freebsd-arm64.tar.gz
-tar -xzf ssg-1.3.0-freebsd-arm64.tar.gz
+fetch https://github.com/spagu/ssg/releases/latest/download/ssg-freebsd-arm64.tar.gz
+tar -xzf ssg-freebsd-arm64.tar.gz
 mv ssg /usr/local/bin/
 ```
 
@@ -211,13 +230,13 @@ make install
 
 ```bash
 # AMD64
-ftp https://github.com/spagu/ssg/releases/download/v1.3.0/ssg-1.3.0-openbsd-amd64.tar.gz
-tar -xzf ssg-1.3.0-openbsd-amd64.tar.gz
+ftp https://github.com/spagu/ssg/releases/latest/download/ssg-openbsd-amd64.tar.gz
+tar -xzf ssg-openbsd-amd64.tar.gz
 doas mv ssg /usr/local/bin/
 
 # ARM64
-ftp https://github.com/spagu/ssg/releases/download/v1.3.0/ssg-1.3.0-openbsd-arm64.tar.gz
-tar -xzf ssg-1.3.0-openbsd-arm64.tar.gz
+ftp https://github.com/spagu/ssg/releases/latest/download/ssg-openbsd-arm64.tar.gz
+tar -xzf ssg-openbsd-arm64.tar.gz
 doas mv ssg /usr/local/bin/
 ```
 
@@ -228,8 +247,8 @@ doas mv ssg /usr/local/bin/
 ### Download and Install
 
 1. Download the latest release:
-   - [ssg-1.3.0-windows-amd64.zip](https://github.com/spagu/ssg/releases/download/v1.3.0/ssg-1.3.0-windows-amd64.zip)
-   - [ssg-1.3.0-windows-arm64.zip](https://github.com/spagu/ssg/releases/download/v1.3.0/ssg-1.3.0-windows-arm64.zip)
+   - [ssg-windows-amd64.zip](https://github.com/spagu/ssg/releases/latest/download/ssg-windows-amd64.zip)
+   - [ssg-windows-arm64.zip](https://github.com/spagu/ssg/releases/latest/download/ssg-windows-arm64.zip)
 
 2. Extract the ZIP file
 
@@ -252,7 +271,7 @@ scoop install ssg
 
 ### Requirements
 
-- Go 1.26 or later
+- Go 1.27.0 or later
 - Git
 
 ### Build and Install
@@ -281,12 +300,61 @@ After installation, verify SSG is working:
 
 ```bash
 # Check version
-ssg --help
+ssg --version
 
 # Quick test
 mkdir -p test-site/{content/my-site,templates/simple}
 ssg my-site simple example.com --http --port=3000
 ```
+
+Every build now names the binary that produced it on its first line, so a log
+read later answers "which ssg was this?" without anyone being asked to run
+`--version` separately:
+
+```
+🧱 ssg 1.8.48
+🔄 Loading content...
+```
+
+`--quiet` suppresses it with everything else.
+
+---
+
+## Staying up to date
+
+```bash
+ssg self-update-check
+```
+
+It prints the running version, how this binary was installed, and whether a
+newer release exists:
+
+```
+🧱 ssg 1.8.30 (installed via snap)
+🆕 A newer release is out: 1.8.48 (you have 1.8.30)
+   https://github.com/spagu/ssg/releases/tag/v1.8.48
+
+   Upgrade with:
+     sudo snap refresh static-site-generator
+```
+
+The upgrade command is the one for **your** install — snap, Homebrew, apt, dnf,
+Docker, or the releases page for a downloaded binary — worked out from where the
+running executable actually sits, not from the operating system. A Homebrew ssg
+on Linux is still Homebrew's, and a binary you copied into `/usr/bin` yourself is
+nobody's to upgrade, so that one is sent to the releases page.
+
+Two things it deliberately does not do:
+
+- **It never updates anything.** It reports; you decide. A tool that rewrites
+  its own binary asks for more trust than a static site generator has any
+  business asking for.
+- **It never runs on its own.** A build does not contact the network — that
+  would be slow, would fail in air-gapped and CI environments, and nobody asked
+  for it. The check happens only when you run it.
+
+It exits 0 whether or not an update exists, so it is safe in a script; exit 1
+means the check itself could not be made.
 
 ---
 
@@ -307,7 +375,7 @@ sudo dnf remove ssg
 ### Snap
 
 ```bash
-sudo snap remove ssg
+sudo snap remove static-site-generator
 ```
 
 ### Homebrew

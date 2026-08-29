@@ -15,16 +15,24 @@ branding:
   color: "green"
 
 inputs:
+  config:
+    description: >-
+      Path to a .ssg.yaml/.toml/.json config file. Everything a real site keeps
+      there — redirects, worker, variables, the check_* validators — has no input
+      equivalent, so without this the action cannot build a config-driven site
+      (#104). When set, source/template/domain are optional: the config supplies
+      them, and repeating them here is how they drift.
+    required: false
   source:
-    description: "Content source folder name (inside content/ directory)"
-    required: true
+    description: "Content source folder name (inside content/ directory). Optional when `config` is set."
+    required: false
   template:
-    description: "Template name to use (inside templates/ directory)"
-    required: true
+    description: "Template name to use (inside templates/ directory). Optional when `config` is set."
+    required: false
     default: "simple"
   domain:
-    description: "Target domain for the generated site"
-    required: true
+    description: "Target domain for the generated site. Optional when `config` is set."
+    required: false
   version:
     description: "SSG version to use (default: latest)"
     required: false
@@ -49,6 +57,19 @@ inputs:
     description: "WebP compression quality 1-100 (default: 60)"
     required: false
     default: "60"
+  image-formats:
+    description: >-
+      Comma-separated image formats in preference order, e.g. "avif,webp".
+      Listing avif installs the AVIF encoder; leaving it out installs nothing
+      extra, because avifenc pulls a set of codecs and roughly quadruples image
+      conversion time — a cost no workflow should pay for a format it did not
+      ask for.
+    required: false
+    default: ""
+  webp-keep-original:
+    description: "Keep original images next to the .webp files instead of replacing them (true/false); safe for themes with hardcoded .png/.jpg references"
+    required: false
+    default: "false"
   zip:
     description: "Create ZIP file for Cloudflare Pages deployment (true/false)"
     required: false
@@ -62,15 +83,34 @@ inputs:
     required: false
     default: "false"
   engine:
-    description: "Template engine: go (default), pongo2, mustache, handlebars"
+    description: "Template engine: go (default), pongo2, mustache, or handlebars"
     required: false
     default: "go"
   online-theme:
     description: "Download theme from URL (GitHub, GitLab, or direct ZIP)"
     required: false
     default: ""
+  deploy:
+    description: "Native deploy provider: cloudflare | github-pages | netlify | vercel | ftp | sftp (secrets via env)"
+    required: false
+    default: ""
+  deploy-project:
+    description: "Pages/site/project name (cloudflare, netlify, vercel)"
+    required: false
+    default: ""
+  deploy-branch:
+    description: "Target branch for cloudflare/github-pages (default gh-pages)"
+    required: false
+    default: ""
+  deploy-target:
+    description: "ftp/sftp URL or git remote for github-pages"
+    required: false
+    default: ""
 
 outputs:
+  version:
+    description: "The ssg version actually used (resolved when inputs.version is 'latest')"
+    value: ${{ steps.download.outputs.version }}
   output-path:
     description: "Path to the generated site output directory"
     value: ${{ steps.generate.outputs.output-path }}
@@ -87,8 +127,17 @@ runs:
     - name: Download SSG binary
       id: download
       shell: bash
+      # SECURITY (SEC-002): pass inputs via env:, never interpolate into run:.
+      env:
+        IN_VERSION: ${{ inputs.version }}
       run: |
-        VERSION="${{ inputs.version }}"
+        set -euo pipefail
+        VERSION="$IN_VERSION"
+        # Reject anything that isn't a plausible version/tag or "latest".
+        if ! [[ "$VERSION" =~ ^(latest|v?[0-9A-Za-z._-]+)$ ]]; then
+          echo "::error::Invalid version: $VERSION"
+          exit 1
+        fi
 
         # Determine OS and architecture
         case "$RUNNER_OS" in
@@ -106,12 +155,22 @@ runs:
 
         # Get latest version if not specified
         if [[ "$VERSION" == "latest" ]]; then
-          VERSION=$(curl -sL https://api.github.com/repos/spagu/ssg/releases/latest | grep '"tag_name"' | cut -d'"' -f4)
+          # --max-time/--retry rather than a bare fetch: a stalled connection used to
+          # consume the whole 20-minute job budget and be reported as a timeout with
+          # no cause, instead of failing in seconds and trying again.
+          VERSION=$(curl --proto '=https' --proto-redir =https -sL \
+            --connect-timeout 10 --max-time 60 --retry 3 --retry-delay 2 --retry-all-errors \
+            https://api.github.com/repos/spagu/ssg/releases/latest | grep '"tag_name"' | cut -d'"' -f4)
           if [[ -z "$VERSION" ]]; then
             echo "::error::Failed to get latest version"
             exit 1
           fi
+          # Unpinned deploys silently pick up new releases; make the resolved
+          # version visible so behaviour changes are traceable, and expose it
+          # as an output. Pin inputs.version to avoid surprise upgrades.
+          echo "::notice::ssg version 'latest' resolved to ${VERSION} — pin the 'version' input to avoid surprise upgrades"
         fi
+        echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
         echo "📦 Downloading SSG $VERSION for $OS/$ARCH..."
 
@@ -126,7 +185,9 @@ runs:
 
         # Download
         echo "🔗 URL: $URL"
-        HTTP_CODE=$(curl -sL -w "%{http_code}" "$URL" -o "/tmp/$ARCHIVE")
+        HTTP_CODE=$(curl --proto '=https' --proto-redir =https -sL -w "%{http_code}" \
+          --connect-timeout 10 --max-time 300 --retry 3 --retry-delay 2 --retry-all-errors \
+          "$URL" -o "/tmp/$ARCHIVE")
 
         if [[ "$HTTP_CODE" != "200" ]]; then
           echo "::error::Failed to download SSG $VERSION. HTTP code: $HTTP_CODE"
@@ -157,81 +218,197 @@ runs:
         echo "✅ SSG $VERSION installed successfully"
         echo "version=$VERSION" >> $GITHUB_OUTPUT
 
-    - name: Install WebP tools
+    - name: Install image tools
       shell: bash
+      env:
+        IN_IMAGE_FORMATS: ${{ inputs.image-formats }}
       run: |
-        echo "📦 Installing WebP tools..."
+        echo "📦 Installing image tools..."
+        # Only what the build will actually use. avifenc pulls a set of codecs
+        # and roughly quadruples conversion time (measured: 0.27s -> 1.03s for
+        # one photograph, three derivatives), so a workflow that did not ask for
+        # AVIF must not pay for it.
+        WANT_AVIF=0
+        case ",$IN_IMAGE_FORMATS," in *,avif,*) WANT_AVIF=1 ;; esac
+        # Bounded, because an unreachable distro mirror used to hang here until
+        # the job's own 20-minute budget ran out — reported as a timeout with no
+        # cause, on a step whose only job is installing one package. Failing in
+        # five minutes and naming the reason is worth more than the extra tries.
         if [[ "$RUNNER_OS" == "Linux" ]]; then
-          sudo apt-get update && sudo apt-get install -y webp
+          if ! sudo timeout 300 apt-get update \
+                 -o Acquire::Retries=3 -o Acquire::http::Timeout=20; then
+            echo "::error::apt-get update failed or timed out — the distribution mirror is unreachable."
+            echo "::error::This is a runner/network problem, not a build failure. Re-run the job."
+            exit 1
+          fi
+          PKGS="webp"
+          if [[ "$WANT_AVIF" == "1" ]]; then PKGS="$PKGS libavif-bin"; fi
+          if ! sudo timeout 300 apt-get install -y --no-install-recommends $PKGS \
+                 -o Acquire::Retries=3 -o Acquire::http::Timeout=20; then
+            echo "::error::Installing $PKGS failed or timed out — the distribution mirror is unreachable."
+            echo "::error::This is a runner/network problem, not a build failure. Re-run the job."
+            exit 1
+          fi
         elif [[ "$RUNNER_OS" == "macOS" ]]; then
           brew install webp
+          if [[ "$WANT_AVIF" == "1" ]]; then brew install libavif; fi
         else
           echo "::warning::WebP tools not available on Windows. If you need WebP conversion, use Linux/macOS runner."
         fi
-        echo "✅ WebP tools installed"
+        if [[ "$WANT_AVIF" == "1" ]]; then
+          echo "✅ Image tools installed (webp + avif)"
+        else
+          echo "✅ Image tools installed (webp)"
+        fi
 
     - name: Generate site
       id: generate
       shell: bash
+      # SECURITY (SEC-002): all inputs are passed through env: and referenced as
+      # quoted shell variables. Never interpolate ${{ inputs.* }} directly inside
+      # run: — that lets attacker-controlled input inject shell commands.
+      env:
+        IN_CONFIG: ${{ inputs.config }}
+        IN_SOURCE: ${{ inputs.source }}
+        IN_TEMPLATE: ${{ inputs.template }}
+        IN_DOMAIN: ${{ inputs.domain }}
+        IN_CONTENT_DIR: ${{ inputs.content-dir }}
+        IN_TEMPLATES_DIR: ${{ inputs.templates-dir }}
+        IN_OUTPUT_DIR: ${{ inputs.output-dir }}
+        IN_WEBP: ${{ inputs.webp }}
+        IN_WEBP_QUALITY: ${{ inputs.webp-quality }}
+        IN_IMAGE_FORMATS: ${{ inputs.image-formats }}
+        IN_WEBP_KEEP: ${{ inputs.webp-keep-original }}
+        IN_ZIP: ${{ inputs.zip }}
+        IN_MINIFY: ${{ inputs.minify }}
+        IN_CLEAN: ${{ inputs.clean }}
+        IN_ENGINE: ${{ inputs.engine }}
+        IN_ONLINE_THEME: ${{ inputs.online-theme }}
+        IN_DEPLOY: ${{ inputs.deploy }}
+        IN_DEPLOY_PROJECT: ${{ inputs.deploy-project }}
+        IN_DEPLOY_BRANCH: ${{ inputs.deploy-branch }}
+        IN_DEPLOY_TARGET: ${{ inputs.deploy-target }}
+        ACTION_PATH: ${{ github.action_path }}
       run: |
-        # Build flags
-        FLAGS=""
-        if [[ "${{ inputs.webp }}" == "true" ]]; then
-          FLAGS="$FLAGS --webp --webp-quality=${{ inputs.webp-quality }}"
-        fi
-        if [[ "${{ inputs.zip }}" == "true" ]]; then
-          FLAGS="$FLAGS --zip"
-        fi
-        if [[ "${{ inputs.minify }}" == "true" ]]; then
-          FLAGS="$FLAGS --minify-all"
-        fi
-        if [[ "${{ inputs.clean }}" == "true" ]]; then
-          FLAGS="$FLAGS --clean"
-        fi
-        if [[ "${{ inputs.engine }}" != "go" && -n "${{ inputs.engine }}" ]]; then
-          FLAGS="$FLAGS --engine=${{ inputs.engine }}"
-        fi
-        if [[ -n "${{ inputs.online-theme }}" ]]; then
-          FLAGS="$FLAGS --online-theme=${{ inputs.online-theme }}"
-        fi
+        set -euo pipefail
 
-        # Check if content directory exists
-        if [[ ! -d "${{ inputs.content-dir }}/${{ inputs.source }}" ]]; then
-          echo "::error::Content source directory not found: ${{ inputs.content-dir }}/${{ inputs.source }}"
+        # Validate untrusted inputs before use.
+        if ! [[ "$IN_WEBP_QUALITY" =~ ^[0-9]+$ ]]; then
+          echo "::error::webp-quality must be a number, got: $IN_WEBP_QUALITY"
           exit 1
         fi
+        case "$IN_ENGINE" in
+          ""|go|pongo2|mustache|handlebars) ;;
+          *) echo "::error::Invalid engine: $IN_ENGINE"; exit 1 ;;
+        esac
+        case "$IN_DEPLOY" in
+          ""|cloudflare|github-pages|netlify|vercel|ftp|sftp) ;;
+          *) echo "::error::Invalid deploy provider: $IN_DEPLOY"; exit 1 ;;
+        esac
 
-        # Check if templates exist, copy from action repo if not
-        if [[ ! -d "${{ inputs.templates-dir }}/${{ inputs.template }}" ]]; then
-          if [[ -d "${{ github.action_path }}/templates/${{ inputs.template }}" ]]; then
-            echo "📁 Copying template '${{ inputs.template }}' from action..."
-            mkdir -p "${{ inputs.templates-dir }}"
-            cp -r "${{ github.action_path }}/templates/${{ inputs.template }}" "${{ inputs.templates-dir }}/"
-          else
-            echo "::error::Template directory not found: ${{ inputs.templates-dir }}/${{ inputs.template }}"
+        # Build flags as an array (never a space-joined string).
+        FLAGS=()
+        if [[ "$IN_WEBP" == "true" ]]; then
+          FLAGS+=(--webp --webp-quality="$IN_WEBP_QUALITY")
+          if [[ -n "$IN_IMAGE_FORMATS" ]]; then
+            FLAGS+=(--image-formats="$IN_IMAGE_FORMATS")
+          fi
+          if [[ "$IN_WEBP_KEEP" == "true" ]]; then
+            FLAGS+=(--webp-keep-original)
+          fi
+        fi
+        if [[ "$IN_ZIP" == "true" ]]; then
+          FLAGS+=(--zip)
+        fi
+        if [[ "$IN_MINIFY" == "true" ]]; then
+          FLAGS+=(--minify-all)
+        fi
+        if [[ "$IN_CLEAN" == "true" ]]; then
+          FLAGS+=(--clean)
+        fi
+        if [[ -n "$IN_ENGINE" && "$IN_ENGINE" != "go" ]]; then
+          FLAGS+=(--engine="$IN_ENGINE")
+        fi
+        if [[ -n "$IN_ONLINE_THEME" ]]; then
+          FLAGS+=(--online-theme="$IN_ONLINE_THEME")
+        fi
+        # Native deploy (secrets are read from the job environment by the ssg binary).
+        if [[ -n "$IN_DEPLOY" ]]; then
+          FLAGS+=(--deploy="$IN_DEPLOY")
+          [[ -n "$IN_DEPLOY_PROJECT" ]] && FLAGS+=(--deploy-project="$IN_DEPLOY_PROJECT")
+          [[ -n "$IN_DEPLOY_BRANCH" ]] && FLAGS+=(--deploy-branch="$IN_DEPLOY_BRANCH")
+          [[ -n "$IN_DEPLOY_TARGET" ]] && FLAGS+=(--deploy-target="$IN_DEPLOY_TARGET")
+        fi
+
+        # A config file supplies source/template/domain and the directory layout,
+        # so the checks below — which assume the positional form — do not apply
+        # and would reject a perfectly valid config-driven build (#104).
+        if [[ -n "$IN_CONFIG" ]]; then
+          if [[ ! -f "$IN_CONFIG" ]]; then
+            echo "::error::Config file not found: $IN_CONFIG"
             exit 1
+          fi
+        else
+          if [[ -z "$IN_SOURCE" || -z "$IN_DOMAIN" ]]; then
+            echo "::error::Without 'config', both 'source' and 'domain' are required."
+            exit 1
+          fi
+          # Check if content directory exists
+          if [[ ! -d "$IN_CONTENT_DIR/$IN_SOURCE" ]]; then
+            echo "::error::Content source directory not found: $IN_CONTENT_DIR/$IN_SOURCE"
+            exit 1
+          fi
+
+          # Check if templates exist, copy from action repo if not
+          if [[ ! -d "$IN_TEMPLATES_DIR/$IN_TEMPLATE" ]]; then
+            if [[ -d "$ACTION_PATH/templates/$IN_TEMPLATE" ]]; then
+              echo "📁 Copying template '$IN_TEMPLATE' from action..."
+              mkdir -p "$IN_TEMPLATES_DIR"
+              cp -r "$ACTION_PATH/templates/$IN_TEMPLATE" "$IN_TEMPLATES_DIR/"
+            else
+              echo "::error::Template directory not found: $IN_TEMPLATES_DIR/$IN_TEMPLATE"
+              exit 1
+            fi
           fi
         fi
 
         # Run generator
         echo "::group::Running SSG"
-        ssg "${{ inputs.source }}" "${{ inputs.template }}" "${{ inputs.domain }}" \
-          --content-dir="${{ inputs.content-dir }}" \
-          --templates-dir="${{ inputs.templates-dir }}" \
-          --output-dir="${{ inputs.output-dir }}" \
-          $FLAGS
+        if [[ -n "$IN_CONFIG" ]]; then
+          # Flags are passed through rather than merged here: the CLI already
+          # resolves flag-versus-config precedence, and re-implementing that in
+          # bash is how the two would disagree. Directory overrides are only
+          # forwarded when explicitly given, so the config's own paths stand.
+          CONFIG_FLAGS=()
+          [[ -n "$IN_CONTENT_DIR" ]] && CONFIG_FLAGS+=(--content-dir="$IN_CONTENT_DIR")
+          [[ -n "$IN_TEMPLATES_DIR" ]] && CONFIG_FLAGS+=(--templates-dir="$IN_TEMPLATES_DIR")
+          [[ -n "$IN_OUTPUT_DIR" ]] && CONFIG_FLAGS+=(--output-dir="$IN_OUTPUT_DIR")
+          ssg --config="$IN_CONFIG" "${CONFIG_FLAGS[@]}" "${FLAGS[@]}"
+        else
+          ssg "$IN_SOURCE" "$IN_TEMPLATE" "$IN_DOMAIN" \
+            --content-dir="$IN_CONTENT_DIR" \
+            --templates-dir="$IN_TEMPLATES_DIR" \
+            --output-dir="$IN_OUTPUT_DIR" \
+            "${FLAGS[@]}"
+        fi
         echo "::endgroup::"
 
         # Set outputs
-        echo "output-path=${{ inputs.output-dir }}" >> $GITHUB_OUTPUT
+        echo "output-path=$IN_OUTPUT_DIR" >> "$GITHUB_OUTPUT"
 
         # Handle ZIP output
-        if [[ "${{ inputs.zip }}" == "true" ]]; then
-          ZIP_FILE="${{ inputs.domain }}.zip"
+        if [[ "$IN_ZIP" == "true" ]]; then
+          # With a config file the domain lives there, not in the inputs, so the
+          # archive is found rather than assumed from a name we may not have.
+          if [[ -n "$IN_DOMAIN" ]]; then
+            ZIP_FILE="$IN_DOMAIN.zip"
+          else
+            ZIP_FILE=$(ls -1 ./*.zip 2>/dev/null | head -1)
+          fi
           if [[ -f "$ZIP_FILE" ]]; then
             ZIP_SIZE=$(stat -f%z "$ZIP_FILE" 2>/dev/null || stat --format=%s "$ZIP_FILE")
-            echo "zip-file=$ZIP_FILE" >> $GITHUB_OUTPUT
-            echo "zip-size=$ZIP_SIZE" >> $GITHUB_OUTPUT
+            echo "zip-file=$ZIP_FILE" >> "$GITHUB_OUTPUT"
+            echo "zip-size=$ZIP_SIZE" >> "$GITHUB_OUTPUT"
             echo "📦 ZIP created: $ZIP_FILE ($((ZIP_SIZE / 1024 / 1024)) MB)"
           fi
         fi

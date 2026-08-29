@@ -1,27 +1,44 @@
-// Package generator - templates.go contains default HTML templates
+// Package generator - templates.go contains the generic fallback templates
+// scaffolded when a theme has no local files and is not one of the embedded
+// starter themes (DOC-013). No external CDN references — system font stack
+// only (FE-011), neutral English copy. The document language is the page's
+// own, falling back to the site default and to "en" only when nothing says
+// otherwise — an export knows its language, and declaring every migrated
+// site English is wrong for every site that is not (#208).
 package generator
 
-// baseTemplate is the base HTML layout template with embedded content blocks
-const baseTemplate = `{{define "base"}}<!DOCTYPE html>
-<html lang="pl">
+// partialsTemplate holds the document every page template used to repeat.
+//
+// The scaffold wrote four standalone documents, so its header and footer
+// existed in four copies — the shape #208 removed a broken `base.html` for, and
+// #216 removed from the bundled theme. The difference now is that this one
+// works: Go templates cannot dispatch {{template}} on a computed name, so this
+// is a skeleton the page templates wrap themselves in rather than a base they
+// extend, which is exactly why the old base.html could never have rendered.
+const partialsTemplate = `{{/* Shared blocks. This file defines only — it
+     renders nothing on its own and is never addressed as a page template. */}}
+
+{{define "site-name"}}{{if .Site.Title}}{{.Site.Title}}{{else}}{{.Domain}}{{end}}{{end}}
+
+{{define "site-open"}}<!DOCTYPE html>
+<html lang="{{if .Ctx.Lang}}{{.Ctx.Lang}}{{else if .Ctx.Site.DefaultLanguage}}{{.Ctx.Site.DefaultLanguage}}{{else}}en{{end}}">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{{template "title" .}}</title>
-    <meta name="description" content="{{template "description" .}}">
-    <link rel="canonical" href="https://{{.Domain}}{{template "canonical" .}}">
+    <title>{{if .PageTitle}}{{.PageTitle}} - {{end}}{{template "site-name" .Ctx}}{{if .Suffix}} - {{.Suffix}}{{end}}</title>
+    <meta name="description" content="{{if .Description}}{{.Description}}{{else if .Welcome}}Welcome to {{template "site-name" .Ctx}}{{end}}">
+    <link rel="canonical" href="{{.Canonical}}">
     <link rel="stylesheet" href="/css/style.css">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif}</style>
 </head>
 <body>
+    <a href="#main-content" class="skip-link">Skip to content</a>
     <header class="site-header" id="site-header">
         <div class="container">
             <nav class="main-nav" id="main-nav">
-                <a href="/" class="logo" id="site-logo">{{.Domain}}</a>
+                <a href="/" class="logo" id="site-logo">{{template "site-name" .Ctx}}</a>
                 <div class="nav-links" id="nav-links">
-                    {{range .Site.Pages}}
+                    {{range .Ctx.Site.Pages}}
                     <a href="/{{.Slug}}/" class="nav-link">{{.Title}}</a>
                     {{end}}
                 </div>
@@ -33,12 +50,9 @@ const baseTemplate = `{{define "base"}}<!DOCTYPE html>
             </nav>
         </div>
     </header>
+{{end}}
 
-    <main class="main-content" id="main-content">
-        {{template "content" .}}
-    </main>
-
-    <footer class="site-footer" id="site-footer">
+{{define "site-close"}}    <footer class="site-footer" id="site-footer">
         <div class="container">
             <p>&copy; {{.Domain}}</p>
         </div>
@@ -48,21 +62,20 @@ const baseTemplate = `{{define "base"}}<!DOCTYPE html>
 </body>
 </html>{{end}}`
 
-// indexTemplate is the homepage template
-const indexTemplate = `{{define "index-title"}}{{.Domain}} - Strona główna{{end}}
-{{define "index-description"}}Witamy na stronie {{.Domain}}{{end}}
+const indexTemplate = `{{define "index-title"}}{{if .Site.Title}}{{.Site.Title}}{{else}}{{.Domain}}{{end}} - Home{{end}}
+{{define "index-description"}}{{if .Site.Description}}{{.Site.Description}}{{else}}Welcome to {{if .Site.Title}}{{.Site.Title}}{{else}}{{.Domain}}{{end}}{{end}}{{end}}
 {{define "index-canonical"}}/{{end}}
 {{define "index-content"}}
 <section class="hero" id="hero">
     <div class="container">
-        <h1 class="hero-title">Witamy na {{.Domain}}</h1>
-        <p class="hero-subtitle">Najnowsze artykuły i informacje</p>
+        <h1 class="hero-title">Welcome to {{if .Site.Title}}{{.Site.Title}}{{else}}{{.Domain}}{{end}}</h1>
+        <p class="hero-subtitle">Latest articles and updates</p>
     </div>
 </section>
 
 <section class="posts-section" id="posts-section">
     <div class="container">
-        <h2 class="section-title">Najnowsze wpisy</h2>
+        <h2 class="section-title">Latest posts</h2>
         <div class="posts-grid" id="posts-grid">
             {{range .Posts}}
             <article class="post-card" id="post-card-{{.Slug}}">
@@ -73,7 +86,7 @@ const indexTemplate = `{{define "index-title"}}{{.Domain}} - Strona główna{{en
                     {{.Date.Format "2 January 2006"}}
                 </time>
                 <p class="post-excerpt">{{.Excerpt}}</p>
-                <a href="/{{.Slug}}/" class="read-more">Czytaj więcej →</a>
+                <a href="/{{.Slug}}/" class="read-more">Read more →</a>
             </article>
             {{end}}
         </div>
@@ -81,49 +94,18 @@ const indexTemplate = `{{define "index-title"}}{{.Domain}} - Strona główna{{en
 </section>
 {{end}}
 
-{{define "index.html"}}<!DOCTYPE html>
-<html lang="pl">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{{.Domain}} - Strona główna</title>
-    <meta name="description" content="Witamy na stronie {{.Domain}}">
-    <link rel="canonical" href="https://{{.Domain}}/">
-    <link rel="stylesheet" href="/css/style.css">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-</head>
-<body>
-    <header class="site-header" id="site-header">
-        <div class="container">
-            <nav class="main-nav" id="main-nav">
-                <a href="/" class="logo" id="site-logo">{{.Domain}}</a>
-                <div class="nav-links" id="nav-links">
-                    {{range .Site.Pages}}
-                    <a href="/{{.Slug}}/" class="nav-link">{{.Title}}</a>
-                    {{end}}
-                </div>
-                <button class="menu-toggle" id="menu-toggle" aria-label="Toggle menu">
-                    <span></span>
-                    <span></span>
-                    <span></span>
-                </button>
-            </nav>
-        </div>
-    </header>
-
+{{define "index.html"}}{{template "site-open" (dict "Ctx" . "Suffix" "Home" "Description" .Site.Description "Welcome" true "Canonical" (printf "https://%s/" .Domain))}}
     <main class="main-content" id="main-content">
         <section class="hero" id="hero">
             <div class="container">
-                <h1 class="hero-title">Witamy na {{.Domain}}</h1>
-                <p class="hero-subtitle">Najnowsze artykuły i informacje</p>
+                <h1 class="hero-title">Welcome to {{if .Site.Title}}{{.Site.Title}}{{else}}{{.Domain}}{{end}}</h1>
+                <p class="hero-subtitle">Latest articles and updates</p>
             </div>
         </section>
 
         <section class="posts-section" id="posts-section">
             <div class="container">
-                <h2 class="section-title">Najnowsze wpisy</h2>
+                <h2 class="section-title">Latest posts</h2>
                 <div class="posts-grid" id="posts-grid">
                     {{range .Posts}}
                     <article class="post-card" id="post-card-{{.Slug}}">
@@ -134,7 +116,7 @@ const indexTemplate = `{{define "index-title"}}{{.Domain}} - Strona główna{{en
                             {{.Date.Format "2 January 2006"}}
                         </time>
                         <p class="post-excerpt">{{.Excerpt}}</p>
-                        <a href="/{{.Slug}}/" class="read-more">Czytaj więcej →</a>
+                        <a href="/{{.Slug}}/" class="read-more">Read more →</a>
                     </article>
                     {{end}}
                 </div>
@@ -142,49 +124,10 @@ const indexTemplate = `{{define "index-title"}}{{.Domain}} - Strona główna{{en
         </section>
     </main>
 
-    <footer class="site-footer" id="site-footer">
-        <div class="container">
-            <p>&copy; {{.Domain}}</p>
-        </div>
-    </footer>
-
-    <script src="/js/main.js"></script>
-</body>
-</html>{{end}}`
+{{template "site-close" .}}{{end}}`
 
 // pageTemplate is the static page template
-const pageTemplate = `{{define "page.html"}}<!DOCTYPE html>
-<html lang="pl">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{{.Page.Title}} - {{.Domain}}</title>
-    <meta name="description" content="{{.Page.Excerpt}}">
-    <link rel="canonical" href="https://{{.Domain}}/{{.Page.Slug}}/">
-    <link rel="stylesheet" href="/css/style.css">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-</head>
-<body>
-    <header class="site-header" id="site-header">
-        <div class="container">
-            <nav class="main-nav" id="main-nav">
-                <a href="/" class="logo" id="site-logo">{{.Domain}}</a>
-                <div class="nav-links" id="nav-links">
-                    {{range .Site.Pages}}
-                    <a href="/{{.Slug}}/" class="nav-link">{{.Title}}</a>
-                    {{end}}
-                </div>
-                <button class="menu-toggle" id="menu-toggle" aria-label="Toggle menu">
-                    <span></span>
-                    <span></span>
-                    <span></span>
-                </button>
-            </nav>
-        </div>
-    </header>
-
+const pageTemplate = `{{define "page.html"}}{{template "site-open" (dict "Ctx" . "PageTitle" .Page.Title "Description" .Page.Excerpt "Canonical" (or .Canonical (.Page.GetCanonical .Domain)))}}
     <main class="main-content" id="main-content">
         <article class="page-content" id="page-{{.Page.Slug}}">
             <div class="container">
@@ -198,49 +141,10 @@ const pageTemplate = `{{define "page.html"}}<!DOCTYPE html>
         </article>
     </main>
 
-    <footer class="site-footer" id="site-footer">
-        <div class="container">
-            <p>&copy; {{.Domain}}</p>
-        </div>
-    </footer>
-
-    <script src="/js/main.js"></script>
-</body>
-</html>{{end}}`
+{{template "site-close" .}}{{end}}`
 
 // postTemplate is the blog post template
-const postTemplate = `{{define "post.html"}}<!DOCTYPE html>
-<html lang="pl">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{{.Post.Title}} - {{.Domain}}</title>
-    <meta name="description" content="{{.Post.Excerpt}}">
-    <link rel="canonical" href="https://{{.Domain}}/{{.Post.Slug}}/">
-    <link rel="stylesheet" href="/css/style.css">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-</head>
-<body>
-    <header class="site-header" id="site-header">
-        <div class="container">
-            <nav class="main-nav" id="main-nav">
-                <a href="/" class="logo" id="site-logo">{{.Domain}}</a>
-                <div class="nav-links" id="nav-links">
-                    {{range .Site.Pages}}
-                    <a href="/{{.Slug}}/" class="nav-link">{{.Title}}</a>
-                    {{end}}
-                </div>
-                <button class="menu-toggle" id="menu-toggle" aria-label="Toggle menu">
-                    <span></span>
-                    <span></span>
-                    <span></span>
-                </button>
-            </nav>
-        </div>
-    </header>
-
+const postTemplate = `{{define "post.html"}}{{template "site-open" (dict "Ctx" . "PageTitle" .Post.Title "Description" .Post.Excerpt "Canonical" (or .Canonical (.Post.GetCanonical .Domain)))}}
     <main class="main-content" id="main-content">
         <article class="post-content" id="post-{{.Post.Slug}}">
             <div class="container">
@@ -266,49 +170,10 @@ const postTemplate = `{{define "post.html"}}<!DOCTYPE html>
         </article>
     </main>
 
-    <footer class="site-footer" id="site-footer">
-        <div class="container">
-            <p>&copy; {{.Domain}}</p>
-        </div>
-    </footer>
-
-    <script src="/js/main.js"></script>
-</body>
-</html>{{end}}`
+{{template "site-close" .}}{{end}}`
 
 // categoryTemplate is the category listing template
-const categoryTemplate = `{{define "category.html"}}<!DOCTYPE html>
-<html lang="pl">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{{.Category.Name}} - {{.Domain}}</title>
-    <meta name="description" content="Artykuły z kategorii {{.Category.Name}}">
-    <link rel="canonical" href="https://{{.Domain}}/category/{{.Category.Slug}}/">
-    <link rel="stylesheet" href="/css/style.css">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
-</head>
-<body>
-    <header class="site-header" id="site-header">
-        <div class="container">
-            <nav class="main-nav" id="main-nav">
-                <a href="/" class="logo" id="site-logo">{{.Domain}}</a>
-                <div class="nav-links" id="nav-links">
-                    {{range .Site.Pages}}
-                    <a href="/{{.Slug}}/" class="nav-link">{{.Title}}</a>
-                    {{end}}
-                </div>
-                <button class="menu-toggle" id="menu-toggle" aria-label="Toggle menu">
-                    <span></span>
-                    <span></span>
-                    <span></span>
-                </button>
-            </nav>
-        </div>
-    </header>
-
+const categoryTemplate = `{{define "category.html"}}{{template "site-open" (dict "Ctx" . "PageTitle" .Category.Name "Description" (printf "Posts in category %s" .Category.Name) "Canonical" (printf "https://%s/category/%s/" .Domain .Category.Slug))}}
     <main class="main-content" id="main-content">
         <section class="category-page" id="category-{{.Category.Slug}}">
             <div class="container">
@@ -328,7 +193,7 @@ const categoryTemplate = `{{define "category.html"}}<!DOCTYPE html>
                             {{.Date.Format "2 January 2006"}}
                         </time>
                         <p class="post-excerpt">{{.Excerpt}}</p>
-                        <a href="/{{.Slug}}/" class="read-more">Czytaj więcej →</a>
+                        <a href="/{{.Slug}}/" class="read-more">Read more →</a>
                     </article>
                     {{end}}
                 </div>
@@ -336,12 +201,4 @@ const categoryTemplate = `{{define "category.html"}}<!DOCTYPE html>
         </section>
     </main>
 
-    <footer class="site-footer" id="site-footer">
-        <div class="container">
-            <p>&copy; {{.Domain}}</p>
-        </div>
-    </footer>
-
-    <script src="/js/main.js"></script>
-</body>
-</html>{{end}}`
+{{template "site-close" .}}{{end}}`

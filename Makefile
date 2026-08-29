@@ -29,9 +29,16 @@ BUILD_DIR=build
 CMD_DIR=cmd/ssg
 GO=go
 GOFLAGS=-v
-LDFLAGS=-s -w
+# Single source of truth for the version (audit DOC-005).
+VERSION := $(shell cat VERSION 2>/dev/null)
+LDFLAGS=-s -w -X main.Version=$(VERSION)
 
-.PHONY: all build clean test lint run help deps tidy generate release test-action
+.PHONY: all help deps tidy version-sync version-check \
+        build build-linux build-freebsd build-darwin build-windows build-openbsd build-all \
+        package-all package-deb package-rpm package-snap \
+        test test-coverage lint security run generate generate-simple serve deploy \
+        site site-watch golden golden-update bench determinism \
+        clean install uninstall release test-action
 
 # Default target
 all: deps lint test build ## 🚀 Run all: deps, lint, test, build
@@ -55,6 +62,12 @@ tidy: ## 🧹 Tidy go modules
 	@$(GO) mod tidy
 	@echo "${GREEN}✅ Modules tidied${RESET}"
 
+version-sync: ## 🔖 Propagate ./VERSION into every file that states it (DOC-005)
+	@bash scripts/sync-version.sh
+
+version-check: ## 🔎 Fail if any file drifts from ./VERSION
+	@bash scripts/sync-version.sh --check
+
 # Build
 build: ## 🔨 Build the binary
 	@echo "${BLUE}🔨 Building $(BINARY_NAME)...${RESET}"
@@ -62,11 +75,12 @@ build: ## 🔨 Build the binary
 	@$(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY_NAME) ./$(CMD_DIR)
 	@echo "${GREEN}✅ Binary built: $(BUILD_DIR)/$(BINARY_NAME)${RESET}"
 
-build-linux: ## 🐧 Build for Linux (amd64 + arm64)
+build-linux: ## 🐧 Build for Linux (amd64 + arm64 + armv7)
 	@echo "${BLUE}🐧 Building for Linux...${RESET}"
 	@mkdir -p $(BUILD_DIR)
 	@GOOS=linux GOARCH=amd64 $(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY_NAME)-linux-amd64 ./$(CMD_DIR)
 	@GOOS=linux GOARCH=arm64 $(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY_NAME)-linux-arm64 ./$(CMD_DIR)
+	@GOOS=linux GOARCH=arm GOARM=7 $(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY_NAME)-linux-armv7 ./$(CMD_DIR)
 	@echo "${GREEN}✅ Linux binaries built${RESET}"
 
 build-freebsd: ## 😈 Build for FreeBSD (amd64 + arm64)
@@ -125,6 +139,18 @@ test: ## 🧪 Run tests
 test-coverage: test ## 📊 Run tests with coverage report
 	@echo "${BLUE}📊 Generating coverage report...${RESET}"
 	@$(GO) tool cover -html=coverage.out -o coverage.html
+
+bench: ## ⏱️  Measure build throughput on a synthetic corpus (PERF-012/013)
+	@./scripts/bench-build.sh
+
+determinism: ## 🎲 Fail if the worker count changes the generated site (BUILD-PARALLEL)
+	@./scripts/determinism.sh
+
+golden: ## 🔒 Check taxonomy output against the backward-compat golden baseline (#44)
+	@./scripts/taxonomy-golden.sh
+
+golden-update: ## 🔄 Re-baseline the taxonomy goldens (after an intended change)
+	@./scripts/taxonomy-golden.sh --update
 	@echo "${GREEN}✅ Coverage report: coverage.html${RESET}"
 
 # Linting
@@ -138,30 +164,49 @@ lint: ## 🔍 Run linter
 	fi
 	@echo "${GREEN}✅ Linting complete${RESET}"
 
+security: ## 🔒 Run SAST + vulnerability scan (gosec + govulncheck)
+	@echo "${BLUE}🔒 Running gosec...${RESET}"
+	@if command -v gosec >/dev/null 2>&1; then gosec -quiet ./...; else echo "${YELLOW}⚠️  gosec not installed (go install github.com/securego/gosec/v2/cmd/gosec@latest)${RESET}"; fi
+	@echo "${BLUE}🔒 Running govulncheck...${RESET}"
+	@if command -v govulncheck >/dev/null 2>&1; then govulncheck ./...; else echo "${YELLOW}⚠️  govulncheck not installed (go install golang.org/x/vuln/cmd/govulncheck@latest)${RESET}"; fi
+	@echo "${GREEN}✅ Security scan complete${RESET}"
+
 # Run
 run: build ## ▶️  Build and run with example
 	@echo "${BLUE}▶️  Running SSG...${RESET}"
-	@./$(BUILD_DIR)/$(BINARY_NAME) krowy.net.2026-01-13110345 krowy krowy.net
+	@./$(BUILD_DIR)/$(BINARY_NAME) test-content krowy example.com
 
 generate: build ## 🏗️  Generate site with krowy template
 	@echo "${BLUE}🏗️  Generating site...${RESET}"
-	@./$(BUILD_DIR)/$(BINARY_NAME) krowy.net.2026-01-13110345 krowy krowy.net
+	@./$(BUILD_DIR)/$(BINARY_NAME) test-content krowy example.com
 	@echo "${GREEN}✅ Site generated in output/${RESET}"
 
 generate-simple: build ## 🏗️  Generate site with simple template
 	@echo "${BLUE}🏗️  Generating site with simple template...${RESET}"
-	@./$(BUILD_DIR)/$(BINARY_NAME) krowy.net.2026-01-13110345 simple krowy.net
+	@./$(BUILD_DIR)/$(BINARY_NAME) test-content simple example.com
 	@echo "${GREEN}✅ Site generated in output/${RESET}"
 
 serve: generate ## 🌐 Generate and serve site locally
 	@echo "${BLUE}🌐 Starting local server on http://localhost:8888${RESET}"
 	@cd output && python3 -m http.server 8888
 
+# Documentation site — this repository's own docs/ rendered with the bundled
+# ssgtheme, configured by ./docs-site.yaml. No content is copied: content_sources
+# reads docs/ in place, so editing a guide and rebuilding is the whole loop.
+site: build ## 📚 Build the SSG documentation site into .site/
+	@echo "${BLUE}📚 Building documentation site...${RESET}"
+	@./$(BUILD_DIR)/$(BINARY_NAME) --config docs-site.yaml
+	@echo "${GREEN}✅ Documentation site generated in .site/${RESET}"
+
+site-watch: build ## 👀 Build the documentation site and rebuild+serve on change
+	@echo "${BLUE}👀 Watching docs/ and templates/ — http://127.0.0.1:8888${RESET}"
+	@./$(BUILD_DIR)/$(BINARY_NAME) --config docs-site.yaml --watch --http
+
 deploy: build ## ☁️  Generate site with ZIP for Cloudflare Pages deployment
 	@echo "${BLUE}☁️  Generating deployment package...${RESET}"
-	@./$(BUILD_DIR)/$(BINARY_NAME) krowy.net.2026-01-13110345 krowy krowy.net --webp --zip
-	@echo "${GREEN}✅ Deployment package created: krowy.net.zip${RESET}"
-	@echo "${YELLOW}📤 Upload krowy.net.zip to Cloudflare Pages${RESET}"
+	@./$(BUILD_DIR)/$(BINARY_NAME) test-content krowy example.com --webp --zip
+	@echo "${GREEN}✅ Deployment package created: example.com.zip${RESET}"
+	@echo "${YELLOW}📤 Upload example.com.zip to Cloudflare Pages${RESET}"
 
 # Clean
 clean: ## 🗑️  Clean build artifacts
@@ -169,7 +214,7 @@ clean: ## 🗑️  Clean build artifacts
 	@rm -rf $(BUILD_DIR)
 	@rm -rf output
 	@rm -f coverage.out coverage.html
-	@rm -f *.zip
+	@rm -f *.zip *.tar.gz *.tar.xz
 	@echo "${GREEN}✅ Cleaned${RESET}"
 
 # Install

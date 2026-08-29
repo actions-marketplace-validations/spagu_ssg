@@ -2,6 +2,8 @@ package main
 
 import (
 	"archive/zip"
+	"bytes"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -39,6 +41,7 @@ func TestParseBoolFlags(t *testing.T) {
 		{"--minify-css", func(c *config.Config) bool { return c.MinifyCSS }, true},
 		{"--minify-js", func(c *config.Config) bool { return c.MinifyJS }, true},
 		{"--sourcemap", func(c *config.Config) bool { return c.SourceMap }, true},
+		{"--mddb-watch", func(c *config.Config) bool { return c.Mddb.Watch }, true}, // GO-018
 		{"--clean", func(c *config.Config) bool { return c.Clean }, true},
 		{"--quiet", func(c *config.Config) bool { return c.Quiet }, true},
 		{"-q", func(c *config.Config) bool { return c.Quiet }, true},
@@ -125,9 +128,12 @@ func TestParseEqualFlags(t *testing.T) {
 		{"content-dir", "--content-dir=my-content", func(c *config.Config) interface{} { return c.ContentDir }, "my-content"},
 		{"templates-dir", "--templates-dir=my-templates", func(c *config.Config) interface{} { return c.TemplatesDir }, "my-templates"},
 		{"output-dir", "--output-dir=my-output", func(c *config.Config) interface{} { return c.OutputDir }, "my-output"},
+		{"static-dir", "--static-dir=my-static", func(c *config.Config) interface{} { return c.StaticDir }, "my-static"},
+		{"host", "--host=0.0.0.0", func(c *config.Config) interface{} { return c.Host }, "0.0.0.0"},
 		{"engine", "--engine=pongo2", func(c *config.Config) interface{} { return c.Engine }, "pongo2"},
 		{"online-theme", "--online-theme=https://example.com/t", func(c *config.Config) interface{} { return c.OnlineTheme }, "https://example.com/t"},
 		{"post-url-format", "--post-url-format=slug", func(c *config.Config) interface{} { return c.PostURLFormat }, "slug"},
+		{"timezone", "--timezone=Europe/Warsaw", func(c *config.Config) interface{} { return c.Timezone }, "Europe/Warsaw"},
 		{"mddb-url", "--mddb-url=http://localhost:11023", func(c *config.Config) interface{} { return c.Mddb.URL }, "http://localhost:11023"},
 		{"mddb-url enables mddb", "--mddb-url=http://localhost:11023", func(c *config.Config) interface{} { return c.Mddb.Enabled }, true},
 		{"mddb-key", "--mddb-key=secret123", func(c *config.Config) interface{} { return c.Mddb.APIKey }, "secret123"},
@@ -141,7 +147,6 @@ func TestParseEqualFlags(t *testing.T) {
 		{"mddb-protocol http", "--mddb-protocol=http", func(c *config.Config) interface{} { return c.Mddb.Protocol }, "http"},
 		{"mddb-protocol grpc", "--mddb-protocol=grpc", func(c *config.Config) interface{} { return c.Mddb.Protocol }, "grpc"},
 		{"mddb-protocol invalid", "--mddb-protocol=websocket", func(c *config.Config) interface{} { return c.Mddb.Protocol }, ""},
-		{"mddb-watch", "--mddb-watch", func(c *config.Config) interface{} { return c.Mddb.Watch }, true},
 		{"mddb-watch-interval", "--mddb-watch-interval=10", func(c *config.Config) interface{} { return c.Mddb.WatchInterval }, 10},
 		{"mddb-watch-interval zero", "--mddb-watch-interval=0", func(c *config.Config) interface{} { return c.Mddb.WatchInterval }, 0},
 	}
@@ -233,23 +238,48 @@ func TestParseSeparateValueFlagsNoNextArg(t *testing.T) {
 	}
 }
 
-func TestHandleConfigSkip(t *testing.T) {
+// TestPositionalArgsOf verifies GO-036: values consumed by space-separated
+// value flags are never counted as positional arguments, while bool flags and
+// unknown flags do not swallow the following token.
+func TestPositionalArgsOf(t *testing.T) {
 	tests := []struct {
-		arg      string
-		expected int
+		name string
+		args []string
+		want []string
 	}{
-		{"--config", 0},
-		{"--other", 0},
-		{"--port", 0},
+		{"plain positionals", []string{"src", "tmpl", "dom.com"}, []string{"src", "tmpl", "dom.com"}},
+		{"space-separated value flag", []string{"--engine", "go", "src", "tmpl", "dom.com"}, []string{"src", "tmpl", "dom.com"}},
+		{"multiple value flags", []string{"--config", "c.yaml", "src", "--port", "9000", "tmpl", "dom.com"}, []string{"src", "tmpl", "dom.com"}},
+		{"equal form not skipped", []string{"--engine=go", "src", "tmpl", "dom.com"}, []string{"src", "tmpl", "dom.com"}},
+		{"bool flag keeps next token", []string{"--watch", "src", "tmpl", "dom.com"}, []string{"src", "tmpl", "dom.com"}},
+		{"value flag at end", []string{"src", "tmpl", "dom.com", "--engine"}, []string{"src", "tmpl", "dom.com"}},
+		{"no positionals", []string{"--engine", "go", "--zip"}, nil},
 	}
 
 	for _, tt := range tests {
-		t.Run(tt.arg, func(t *testing.T) {
-			got := handleConfigSkip(tt.arg)
-			if got != tt.expected {
-				t.Errorf("handleConfigSkip(%q) = %d, want %d", tt.arg, got, tt.expected)
+		t.Run(tt.name, func(t *testing.T) {
+			got := positionalArgsOf(tt.args)
+			if len(got) != len(tt.want) {
+				t.Fatalf("positionalArgsOf(%v) = %v, want %v", tt.args, got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("positionalArgsOf(%v)[%d] = %q, want %q", tt.args, i, got[i], tt.want[i])
+				}
 			}
 		})
+	}
+}
+
+// TestValidateRequiredFieldsSkipsFlagValues covers the GO-036 defect scenario:
+// "ssg --engine go mysite simple example.com" must not treat "go" as <source>.
+func TestValidateRequiredFieldsSkipsFlagValues(t *testing.T) {
+	cfg := &config.Config{}
+	validateRequiredFields([]string{"--engine", "go", "mysite", "simple", "example.com"}, cfg)
+
+	if cfg.Source != "mysite" || cfg.Template != "simple" || cfg.Domain != "example.com" {
+		t.Errorf("got Source=%q Template=%q Domain=%q, want mysite/simple/example.com",
+			cfg.Source, cfg.Template, cfg.Domain)
 	}
 }
 
@@ -652,6 +682,7 @@ func TestCreateGeneratorConfigAllFields(t *testing.T) {
 		ContentDir:    "content",
 		TemplatesDir:  "templates",
 		OutputDir:     "output",
+		StaticDir:     "static",
 		SitemapOff:    true,
 		RobotsOff:     true,
 		PrettyHTML:    true,
@@ -697,6 +728,9 @@ func TestCreateGeneratorConfigAllFields(t *testing.T) {
 	}
 	if genCfg.OutputDir != "output" {
 		t.Error("OutputDir mismatch")
+	}
+	if genCfg.StaticDir != "static" {
+		t.Error("StaticDir mismatch")
 	}
 	if !genCfg.SitemapOff {
 		t.Error("SitemapOff mismatch")
@@ -758,12 +792,8 @@ func TestCreateGeneratorConfigAllFields(t *testing.T) {
 	if genCfg.Mddb.BatchSize != 500 {
 		t.Error("Mddb.BatchSize mismatch")
 	}
-	if !genCfg.Mddb.Watch {
-		t.Error("Mddb.Watch mismatch")
-	}
-	if genCfg.Mddb.WatchInterval != 15 {
-		t.Error("Mddb.WatchInterval mismatch")
-	}
+	// Watch/WatchInterval intentionally have no generator-side copies (GO-043):
+	// the watch loop consumes cfg.Mddb.* directly in cmd/ssg.
 }
 
 func TestCreateGeneratorConfigShortcodes(t *testing.T) {
@@ -1062,31 +1092,24 @@ func TestRunInitialBuildFailure(t *testing.T) {
 }
 
 func TestRunInitialBuildFailureVerbose(t *testing.T) {
-	oldStderr := os.Stderr
-	r, w, _ := os.Pipe()
-	os.Stderr = w
-
 	genCfg := generator.Config{
 		Source:       "nope",
 		Template:     "nope",
 		Domain:       "d.com",
 		ContentDir:   "/nonexistent",
 		TemplatesDir: "/nonexistent",
-		OutputDir:    "/tmp/ssg-fail-output",
+		OutputDir:    filepath.Join(t.TempDir(), "out"),
 	}
 	cfg := &config.Config{Quiet: false}
 
-	result := runInitialBuild(genCfg, cfg)
-
-	_ = w.Close()
-	os.Stderr = oldStderr
-	out, _ := io.ReadAll(r)
+	var result bool
+	out := captureStderr(t, func() { result = runInitialBuild(genCfg, cfg) })
 
 	if result {
 		t.Error("expected failure")
 	}
-	if !strings.Contains(string(out), "Error") {
-		t.Error("expected error message on stderr")
+	if !strings.Contains(out, "Error") {
+		t.Errorf("stderr = %q, want an error message", out)
 	}
 }
 
@@ -1177,32 +1200,24 @@ func TestRebuildOnChange(t *testing.T) {
 	}
 	cfg := &config.Config{OutputDir: outputDir, Quiet: true}
 
-	result := rebuildOnChange(genCfg, cfg)
-	if result.IsZero() {
-		t.Error("expected non-zero time from rebuildOnChange")
+	rebuildOnChange(genCfg, cfg)
+	if _, err := os.Stat(filepath.Join(outputDir, "index.html")); err != nil {
+		t.Errorf("expected rebuilt output: %v", err)
 	}
 }
 
 func TestRebuildOnChangeFailure(t *testing.T) {
-	oldStderr := os.Stderr
-	_, w, _ := os.Pipe()
-	os.Stderr = w
-
 	genCfg := generator.Config{
 		Source:       "nope",
 		ContentDir:   "/nonexistent",
 		TemplatesDir: "/nonexistent",
-		OutputDir:    "/tmp/ssg-fail",
+		OutputDir:    filepath.Join(t.TempDir(), "out"),
 	}
 	cfg := &config.Config{Quiet: false}
 
-	result := rebuildOnChange(genCfg, cfg)
-
-	_ = w.Close()
-	os.Stderr = oldStderr
-
-	if result.IsZero() {
-		t.Error("expected non-zero time even on failure")
+	// Must not panic or exit on a build failure; it reports and carries on.
+	if out := captureStderr(t, func() { rebuildOnChange(genCfg, cfg) }); out == "" {
+		t.Error("a failed rebuild must say so")
 	}
 }
 
@@ -1255,7 +1270,7 @@ func TestStartServer(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	go startServer(tmpDir, 0, true)
+	go startServer(&config.Config{OutputDir: tmpDir, Host: "127.0.0.1", Port: 0, Quiet: true})
 	time.Sleep(100 * time.Millisecond)
 }
 
@@ -1515,13 +1530,13 @@ func TestRebuildOnChangeVerbose(t *testing.T) {
 	}
 	cfg := &config.Config{OutputDir: outputDir, Quiet: false}
 
-	result := rebuildOnChange(genCfg, cfg)
+	rebuildOnChange(genCfg, cfg)
 
 	_ = w.Close()
 	os.Stdout = oldStdout
 
-	if result.IsZero() {
-		t.Error("expected non-zero time")
+	if _, err := os.Stat(filepath.Join(outputDir, "index.html")); err != nil {
+		t.Errorf("expected rebuilt output: %v", err)
 	}
 }
 
@@ -1566,7 +1581,7 @@ func TestStartServerVerbose(t *testing.T) {
 	_, w, _ := os.Pipe()
 	os.Stdout = w
 
-	go startServer(tmpDir, 0, false)
+	go startServer(&config.Config{OutputDir: tmpDir, Host: "127.0.0.1", Port: 0})
 	time.Sleep(100 * time.Millisecond)
 
 	_ = w.Close()
@@ -1939,19 +1954,9 @@ func TestBuildWithWebPAndImages(t *testing.T) {
 		Quiet:           false,
 	}
 
-	oldStdout := os.Stdout
-	oldStderr := os.Stderr
-	_, w1, _ := os.Pipe()
-	_, w2, _ := os.Pipe()
-	os.Stdout = w1
-	os.Stderr = w2
-
-	_ = build(genCfg, cfg)
-
-	_ = w1.Close()
-	_ = w2.Close()
-	os.Stdout = oldStdout
-	os.Stderr = oldStderr
+	captureStderr(t, func() {
+		_, _ = captureStdout(func() error { return build(genCfg, cfg) })
+	})
 }
 
 func TestParseFlagsIgnoresPositional(t *testing.T) {
@@ -1998,5 +2003,420 @@ func TestDownloadOnlineThemeVerbose(t *testing.T) {
 	out, _ := cmd.CombinedOutput()
 	if !strings.Contains(string(out), "Downloading theme") {
 		t.Errorf("expected download message, got: %s", out)
+	}
+}
+
+// TestSourceMapFlag verifies BLOG-007/GO-004: --sourcemap is a real, parsed flag
+// (its output is exercised end-to-end in the generator package).
+func TestSourceMapFlag(t *testing.T) {
+	cfg := config.DefaultConfig()
+	parseFlags([]string{"--sourcemap"}, cfg)
+	if !cfg.SourceMap {
+		t.Errorf("expected --sourcemap to set SourceMap=true")
+	}
+}
+
+// TestNewBuildFlags verifies the v1.8 flags parse into config.
+func TestNewBuildFlags(t *testing.T) {
+	cfg := config.DefaultConfig()
+	parseFlags([]string{
+		"--fingerprint", "--lastmod-from-git", "--math",
+		"--paginate=10", "--image-sizes=480,960", "--image-sizes-attr=50vw",
+		"--permalink-post=/:year/:slug/", "--data-dir=mydata",
+		"--languages=pl,en", "--default-language=pl",
+	}, cfg)
+	if !cfg.Fingerprint || !cfg.LastmodFromGit || !cfg.Math {
+		t.Errorf("expected fingerprint/lastmod/math to be enabled")
+	}
+	if cfg.Paginate != 10 {
+		t.Errorf("expected Paginate=10, got %d", cfg.Paginate)
+	}
+	if len(cfg.ImageSizes) != 2 || cfg.ImageSizes[0] != 480 || cfg.ImageSizes[1] != 960 {
+		t.Errorf("expected ImageSizes=[480 960], got %v", cfg.ImageSizes)
+	}
+	if cfg.ImageSizesAttr != "50vw" {
+		t.Errorf("expected ImageSizesAttr=50vw, got %q", cfg.ImageSizesAttr)
+	}
+	if cfg.Permalinks["post"] != "/:year/:slug/" {
+		t.Errorf("expected post permalink, got %q", cfg.Permalinks["post"])
+	}
+	if cfg.DataDir != "mydata" {
+		t.Errorf("expected DataDir=mydata, got %q", cfg.DataDir)
+	}
+	if len(cfg.Languages) != 2 || cfg.DefaultLanguage != "pl" {
+		t.Errorf("expected languages pl,en default pl, got %v / %q", cfg.Languages, cfg.DefaultLanguage)
+	}
+}
+
+// TestResolveListenAddr verifies SEC-012 (loopback default, exposure flag for
+// all-interfaces binds) and GO-034 (IPv6 literals are bracketed via
+// net.JoinHostPort so --host=::1 produces a valid listen address).
+func TestResolveListenAddr(t *testing.T) {
+	tests := []struct {
+		name        string
+		host        string
+		port        int
+		wantAddr    string
+		wantURL     string
+		wantExposed bool
+	}{
+		{"empty defaults to loopback", "", 8888, "127.0.0.1:8888", "http://127.0.0.1:8888", false},
+		{"explicit loopback", "127.0.0.1", 3000, "127.0.0.1:3000", "http://127.0.0.1:3000", false},
+		{"all interfaces flagged", "0.0.0.0", 8080, "0.0.0.0:8080", "http://127.0.0.1:8080", true},
+		{"custom host", "192.168.1.5", 9000, "192.168.1.5:9000", "http://192.168.1.5:9000", false},
+		{"IPv6 loopback bracketed", "::1", 8888, "[::1]:8888", "http://[::1]:8888", false},
+		{"IPv6 all interfaces flagged", "::", 8443, "[::]:8443", "http://127.0.0.1:8443", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			addr, url, exposed := resolveListenAddr(tt.host, tt.port)
+			if addr != tt.wantAddr || url != tt.wantURL || exposed != tt.wantExposed {
+				t.Errorf("resolveListenAddr(%q,%d) = (%q,%q,%v), want (%q,%q,%v)",
+					tt.host, tt.port, addr, url, exposed, tt.wantAddr, tt.wantURL, tt.wantExposed)
+			}
+		})
+	}
+}
+
+// TestParseFlagsMddbWatch verifies GO-018: the bare --mddb-watch flag (no "=")
+// reaches parseBoolFlags through the full parser and enables MDDB watch mode.
+func TestParseFlagsMddbWatch(t *testing.T) {
+	cfg := &config.Config{}
+	parseFlags([]string{"--mddb-url=http://localhost:11023", "--mddb-watch"}, cfg)
+
+	if !cfg.Mddb.Watch {
+		t.Error("--mddb-watch (space form) must set cfg.Mddb.Watch (GO-018)")
+	}
+	if !cfg.Mddb.Enabled {
+		t.Error("--mddb-url must enable MDDB mode")
+	}
+}
+
+// TestWatchIterationDetectsMidBuildEdit verifies GO-025: lastBuild is stamped
+// BEFORE the rebuild runs, so a file saved while the build is in progress is
+// still newer than lastBuild and triggers the next iteration.
+func TestWatchIterationDetectsMidBuildEdit(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.md"), []byte("one"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	dirs := []string{dir}
+
+	newBuild, newSig := watchIteration(dirs, newFileSigCache(), time.Now().Add(-time.Hour), "stale", func() {
+		// Simulate an edit landing while the (slow) rebuild is running.
+		time.Sleep(10 * time.Millisecond)
+		if err := os.WriteFile(filepath.Join(dir, "b.md"), []byte("mid-build edit"), 0644); err != nil {
+			t.Error(err)
+		}
+	})
+
+	if newSig == "stale" {
+		t.Error("signature should be refreshed after a rebuild")
+	}
+	if !hasChanges(dirs, newBuild) {
+		t.Error("edit made during the rebuild must be detected on the next poll (GO-025)")
+	}
+}
+
+// TestWatchIterationNoDoubleRebuild verifies that the change which triggered a
+// rebuild does not re-trigger one, and that quiet polls rebuild nothing.
+func TestWatchIterationNoDoubleRebuild(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.md"), []byte("one"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	dirs := []string{dir}
+	time.Sleep(5 * time.Millisecond) // ensure the file mtime precedes buildStart
+
+	builds := 0
+	lastBuild, lastSig := watchIteration(dirs, newFileSigCache(), time.Now().Add(-time.Hour), "stale", func() { builds++ })
+	if builds != 1 {
+		t.Fatalf("expected exactly one rebuild, got %d", builds)
+	}
+	if hasChanges(dirs, lastBuild) {
+		t.Error("the triggering change must not re-trigger a rebuild")
+	}
+
+	// A poll without changes must not rebuild and must keep lastBuild/lastSig.
+	b2, s2 := watchIteration(dirs, newFileSigCache(), lastBuild, lastSig, func() { builds++ })
+	if builds != 1 {
+		t.Errorf("no rebuild expected without changes, got %d", builds)
+	}
+	if !b2.Equal(lastBuild) || s2 != lastSig {
+		t.Error("lastBuild/lastSig must be unchanged on a quiet poll")
+	}
+}
+
+// TestWatchIterationTouchOnlySkipsRebuild verifies the PLAT-006 gate inside the
+// extracted iteration: an mtime bump with identical bytes advances lastBuild
+// without rebuilding.
+func TestWatchIterationTouchOnlySkipsRebuild(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "a.md")
+	if err := os.WriteFile(file, []byte("one"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	dirs := []string{dir}
+	sig := newFileSigCache().signature(dirs)
+
+	// Touch: same bytes, newer mtime than lastBuild.
+	now := time.Now()
+	if err := os.Chtimes(file, now, now); err != nil {
+		t.Fatal(err)
+	}
+
+	builds := 0
+	newBuild, newSig := watchIteration(dirs, newFileSigCache(), now.Add(-time.Hour), sig, func() { builds++ })
+	if builds != 0 {
+		t.Errorf("touch-only event must not rebuild, got %d builds", builds)
+	}
+	if newSig != sig {
+		t.Error("signature must be unchanged for a touch-only event")
+	}
+	if !newBuild.After(now.Add(-time.Hour)) {
+		t.Error("lastBuild must advance after a touch-only event")
+	}
+}
+
+// failWriter always fails, simulating a full disk during archive finalization.
+type failWriter struct{}
+
+func (failWriter) Write([]byte) (int, error) { return 0, errors.New("disk full") }
+
+// TestWriteZipCloseError verifies GO-024: an error from zip.Writer.Close (which
+// writes the ZIP central directory) is propagated instead of being swallowed.
+func TestWriteZipCloseError(t *testing.T) {
+	// An empty tree writes no entries during the walk; the only write happens in
+	// Close (end-of-central-directory record), so the error must come from there.
+	if err := writeZip(t.TempDir(), failWriter{}); err == nil {
+		t.Error("expected an error from zip finalization on a failing writer (GO-024)")
+	}
+}
+
+// TestWriteZipHappyPath verifies writeZip against a real buffer.
+func TestWriteZipHappyPath(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("<html></html>"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := writeZip(dir, &buf); err != nil {
+		t.Fatalf("writeZip: %v", err)
+	}
+	zr, err := zip.NewReader(bytes.NewReader(buf.Bytes()), int64(buf.Len()))
+	if err != nil {
+		t.Fatalf("reading zip: %v", err)
+	}
+	if len(zr.File) != 1 || zr.File[0].Name != "index.html" {
+		t.Errorf("unexpected zip contents: %+v", zr.File)
+	}
+}
+
+// TestParseFlagsWatchRunner verifies parsing of --wrangler, --workerd,
+// --watch-runner and the *-config flags that point a runner at an out-of-tree
+// config file (GO-054).
+func TestParseFlagsWatchRunner(t *testing.T) {
+	tests := []struct {
+		args       []string
+		wantWatch  bool
+		wantRunner string
+		wantConfig string
+	}{
+		{[]string{"--wrangler"}, true, "wrangler", ""},
+		{[]string{"-wrangler"}, true, "wrangler", ""},
+		{[]string{"--workerd"}, true, "workerd", ""},
+		{[]string{"-workerd"}, true, "workerd", ""},
+		{[]string{"--watch-runner=wrangler"}, true, "wrangler", ""},
+		{[]string{"--watch-runner", "workerd"}, true, "workerd", ""},
+		{[]string{"--watch-runner", "custom command"}, true, "custom command", ""},
+		// A config path alone is enough: it selects the matching runner.
+		{[]string{"--wrangler-config=deploy/wrangler.toml"}, true, "wrangler", "deploy/wrangler.toml"},
+		{[]string{"--wrangler-config", "deploy/wrangler.toml"}, true, "wrangler", "deploy/wrangler.toml"},
+		{[]string{"--workerd-config=deploy/workerd.capnp"}, true, "workerd", "deploy/workerd.capnp"},
+		{[]string{"--workerd-config", "deploy/workerd.capnp"}, true, "workerd", "deploy/workerd.capnp"},
+		// Flag order must not matter: the bare toggle keeps an earlier path.
+		{[]string{"--wrangler-config=a.toml", "--wrangler"}, true, "wrangler", "a.toml"},
+		{[]string{"--wrangler", "--wrangler-config=a.toml"}, true, "wrangler", "a.toml"},
+		// Runner-agnostic spelling pairs with any runner, including custom ones.
+		{[]string{"--watch-runner=custom cmd", "--watch-runner-config=x.json"}, true, "custom cmd", "x.json"},
+		{[]string{"--watch-runner-config", "x.json"}, false, "", "x.json"},
+	}
+
+	for _, tc := range tests {
+		cfg := &config.Config{}
+		parseFlags(tc.args, cfg)
+		if cfg.WatchRunnerDir != "" {
+			t.Errorf("parseFlags(%v) set WatchRunnerDir = %q, want empty", tc.args, cfg.WatchRunnerDir)
+		}
+		if cfg.Watch != tc.wantWatch {
+			t.Errorf("parseFlags(%v) cfg.Watch = %v, want %v", tc.args, cfg.Watch, tc.wantWatch)
+		}
+		if cfg.WatchRunner != tc.wantRunner {
+			t.Errorf("parseFlags(%v) cfg.WatchRunner = %q, want %q", tc.args, cfg.WatchRunner, tc.wantRunner)
+		}
+		if cfg.WatchRunnerConfig != tc.wantConfig {
+			t.Errorf("parseFlags(%v) cfg.WatchRunnerConfig = %q, want %q", tc.args, cfg.WatchRunnerConfig, tc.wantConfig)
+		}
+	}
+}
+
+// TestParseFlagsWatchRunnerDir verifies the *-dir flags, which point a runner at
+// a subdirectory (monorepo Worker) and select the runner on their own (issue #35).
+// TestParseFlagsShortcodeErrors verifies the --shortcode-errors mode flag,
+// including that an unrecognised mode leaves the default (drop) in place so a
+// typo cannot silently change how a build treats broken shortcodes (issue #37).
+func TestParseFlagsShortcodeErrors(t *testing.T) {
+	tests := []struct {
+		args []string
+		want string
+	}{
+		{[]string{"--shortcode-errors=drop"}, "drop"},
+		{[]string{"--shortcode-errors=keep"}, "keep"},
+		{[]string{"--shortcode-errors=strict"}, "strict"},
+		{[]string{"--shortcode-errors", "strict"}, "strict"},
+		{[]string{"--shortcode-errors=bogus"}, ""},
+		{nil, ""},
+	}
+
+	for _, tc := range tests {
+		cfg := &config.Config{}
+		parseFlags(tc.args, cfg)
+		if cfg.ShortcodeErrors != tc.want {
+			t.Errorf("parseFlags(%v) cfg.ShortcodeErrors = %q, want %q", tc.args, cfg.ShortcodeErrors, tc.want)
+		}
+	}
+}
+
+func TestParseFlagsWatchRunnerDir(t *testing.T) {
+	tests := []struct {
+		args       []string
+		wantRunner string
+		wantDir    string
+		wantConfig string
+	}{
+		{[]string{"--wrangler-dir=booking/apps/api"}, "wrangler", "booking/apps/api", ""},
+		{[]string{"--wrangler-dir", "booking/apps/api"}, "wrangler", "booking/apps/api", ""},
+		{[]string{"--workerd-dir=api"}, "workerd", "api", ""},
+		{[]string{"--watch-runner=custom", "--watch-runner-dir=api"}, "custom", "api", ""},
+		// dir and config combine, in either order.
+		{[]string{"--wrangler-dir=api", "--wrangler-config=api/wrangler.jsonc"}, "wrangler", "api", "api/wrangler.jsonc"},
+		{[]string{"--wrangler-config=api/wrangler.jsonc", "--wrangler-dir=api"}, "wrangler", "api", "api/wrangler.jsonc"},
+	}
+
+	for _, tc := range tests {
+		cfg := &config.Config{}
+		parseFlags(tc.args, cfg)
+		if !cfg.Watch {
+			t.Errorf("parseFlags(%v) cfg.Watch = false, want true", tc.args)
+		}
+		if cfg.WatchRunner != tc.wantRunner {
+			t.Errorf("parseFlags(%v) cfg.WatchRunner = %q, want %q", tc.args, cfg.WatchRunner, tc.wantRunner)
+		}
+		if cfg.WatchRunnerDir != tc.wantDir {
+			t.Errorf("parseFlags(%v) cfg.WatchRunnerDir = %q, want %q", tc.args, cfg.WatchRunnerDir, tc.wantDir)
+		}
+		if cfg.WatchRunnerConfig != tc.wantConfig {
+			t.Errorf("parseFlags(%v) cfg.WatchRunnerConfig = %q, want %q", tc.args, cfg.WatchRunnerConfig, tc.wantConfig)
+		}
+	}
+}
+
+// TestWatchRunnerCommand verifies how a runner name plus an optional config path
+// map onto the process that gets spawned (GO-054).
+func TestWatchRunnerCommand(t *testing.T) {
+	tests := []struct {
+		name         string
+		runner       string
+		runnerConfig string
+		wantCmd      string
+		wantArgs     []string
+	}{
+		{"wrangler default", "wrangler", "", "npx", []string{"wrangler", "dev"}},
+		{"wrangler with config", "wrangler", "deploy/wrangler.toml", "npx", []string{"wrangler", "dev", "--config", "deploy/wrangler.toml"}},
+		{"workerd default", "workerd", "", "workerd", []string{"serve"}},
+		{"workerd with config", "workerd", "deploy/workerd.capnp", "workerd", []string{"serve", "deploy/workerd.capnp"}},
+		{"custom command", "node server.js", "", "node", []string{"server.js"}},
+		{"custom with config", "node server.js", "cfg.json", "node", []string{"server.js", "--config", "cfg.json"}},
+		{"empty runner", "", "", "", nil},
+		{"blank runner", "   ", "cfg.json", "", nil},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotCmd, gotArgs := watchRunnerCommand(tc.runner, tc.runnerConfig)
+			if gotCmd != tc.wantCmd {
+				t.Errorf("watchRunnerCommand(%q, %q) cmd = %q, want %q", tc.runner, tc.runnerConfig, gotCmd, tc.wantCmd)
+			}
+			if strings.Join(gotArgs, " ") != strings.Join(tc.wantArgs, " ") {
+				t.Errorf("watchRunnerCommand(%q, %q) args = %v, want %v", tc.runner, tc.runnerConfig, gotArgs, tc.wantArgs)
+			}
+		})
+	}
+}
+
+// TestStartWatchRunner covers the spawn path: a blank runner starts nothing, a
+// missing config file only warns, a missing directory aborts, and a real command
+// is started in the requested directory and killable.
+func TestStartWatchRunner(t *testing.T) {
+	if cmd := startWatchRunner(watchRunnerSpec{Quiet: true}); cmd != nil {
+		t.Errorf("startWatchRunner with empty runner = %v, want nil", cmd)
+	}
+	if cmd := startWatchRunner(watchRunnerSpec{Runner: "ssg-no-such-binary-xyz", Quiet: true}); cmd != nil {
+		t.Errorf("startWatchRunner with missing binary = %v, want nil", cmd)
+	}
+	if cmd := startWatchRunner(watchRunnerSpec{Runner: "sleep 30", Dir: "no/such/dir", Quiet: true}); cmd != nil {
+		t.Errorf("startWatchRunner with missing dir = %v, want nil", cmd)
+	}
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "wrangler.toml")
+	if err := os.WriteFile(cfgPath, []byte("name = \"test\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// "sleep" exists on every supported platform; the config path is only warned
+	// about when absent, so pass an existing one to cover the happy branch.
+	cmd := startWatchRunner(watchRunnerSpec{Runner: "sleep 30", Config: cfgPath, Dir: dir})
+	if cmd == nil {
+		t.Fatal("startWatchRunner(sleep 30) = nil, want a running command")
+	}
+	if cmd.Dir != dir {
+		t.Errorf("cmd.Dir = %q, want %q", cmd.Dir, dir)
+	}
+	if cmd.Process == nil {
+		t.Fatal("started command has no process")
+	}
+	if err := cmd.Process.Kill(); err != nil {
+		t.Errorf("killing watch runner: %v", err)
+	}
+	_ = cmd.Wait()
+
+	// Missing config path: still starts, with a warning on stderr.
+	cmd2 := startWatchRunner(watchRunnerSpec{Runner: "sleep 30", Config: filepath.Join(dir, "missing.toml"), Quiet: true})
+	if cmd2 == nil {
+		t.Fatal("startWatchRunner with missing config = nil, want a running command")
+	}
+	_ = cmd2.Process.Kill()
+	_ = cmd2.Wait()
+}
+
+// TestResolveRunnerConfig verifies that a relative config path is anchored to
+// ssg's own working directory when the runner starts elsewhere (GO-054).
+func TestResolveRunnerConfig(t *testing.T) {
+	if got := resolveRunnerConfig(watchRunnerSpec{}); got != "" {
+		t.Errorf("resolveRunnerConfig(empty) = %q, want \"\"", got)
+	}
+	// No Dir: the path is passed through verbatim, relative or not.
+	if got := resolveRunnerConfig(watchRunnerSpec{Config: "rel/wrangler.toml"}); got != "rel/wrangler.toml" {
+		t.Errorf("resolveRunnerConfig without dir = %q, want the path unchanged", got)
+	}
+	// With Dir: relative paths become absolute so they keep pointing at the file
+	// the user meant, not at one under the runner's directory.
+	got := resolveRunnerConfig(watchRunnerSpec{Config: "rel/wrangler.toml", Dir: t.TempDir()})
+	if !filepath.IsAbs(got) {
+		t.Errorf("resolveRunnerConfig with dir = %q, want an absolute path", got)
+	}
+	abs := filepath.Join(t.TempDir(), "wrangler.toml")
+	if got := resolveRunnerConfig(watchRunnerSpec{Config: abs, Dir: t.TempDir()}); got != abs {
+		t.Errorf("resolveRunnerConfig(abs) = %q, want %q", got, abs)
 	}
 }

@@ -5,10 +5,25 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"path"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
+
+	"github.com/spagu/ssg/internal/i18n"
 )
+
+type TranslationLink struct {
+	Lang      string
+	Locale    string
+	Title     string
+	URL       string
+	Canonical string
+	IsCurrent bool
+}
 
 // FlexInt is an int that can be unmarshaled from either int or string JSON
 type FlexInt int
@@ -52,21 +67,83 @@ type Page struct {
 	Link       string    `yaml:"link"`
 	Author     int       `yaml:"author"`
 	Categories []int     `yaml:"categories,omitempty"`
-	Excerpt    string    `yaml:"-"`
-	Content    string    `yaml:"-"`
-	URLFormat  string    `yaml:"-"` // URL format: "date" or "slug" (set by generator)
-	PageFormat string    `yaml:"-"` // Page output format: "directory", "flat", or "both" (set by generator)
-	SourceDir  string    `yaml:"-"` // Source directory path (for co-located asset copying)
+
+	// Raw fields for flexible parsing (string or int values before resolution)
+	AuthorRaw     interface{}   `yaml:"-" json:"-"` // Unresolved author (int or string)
+	CategoriesRaw []interface{} `yaml:"-" json:"-"` // Unresolved categories (int or string values)
+	Excerpt       string        `yaml:"-"`
+	Content       string        `yaml:"-"`
+	URLFormat     string        `yaml:"-"` // URL format: "date" or "slug" (set by generator)
+	PageFormat    string        `yaml:"-"` // Page output format: "directory", "flat", or "both" (set by generator)
+	SourceDir     string        `yaml:"-"` // Source directory path (for co-located asset copying)
+	SourceFile    string        `yaml:"-"` // Source filename (e.g. "AUTHENTICATION.md") for .md link rewriting
 
 	// SEO and metadata fields
-	Description   string   `yaml:"description"`
-	Keywords      string   `yaml:"keywords"`
-	Lang          string   `yaml:"lang"`
-	Canonical     string   `yaml:"canonical"`
-	Robots        string   `yaml:"robots"`
-	FeaturedImage string   `yaml:"featured_image"`
-	Tags          []string `yaml:"tags,omitempty"`
-	Category      string   `yaml:"category"`
+	Description    string            `yaml:"description"`
+	Keywords       string            `yaml:"keywords"`
+	Lang           string            `yaml:"lang"`
+	Locale         string            `yaml:"-"`
+	TranslationKey string            `yaml:"translation_key"`
+	Translations   []TranslationLink `yaml:"-"`
+	Canonical      string            `yaml:"canonical"`
+	Robots         string            `yaml:"robots"`
+	Sitemap        string            `yaml:"sitemap"`
+	FeaturedImage  string            `yaml:"featured_image"`
+	Tags           []string          `yaml:"tags,omitempty"`
+	Category       string            `yaml:"category"`
+
+	// Sticky pins a post to the top of the listings that sort by date — the
+	// index, the posts page and term archives — the way an editor pinned it in
+	// the source CMS (#155). Pinned posts keep their own order among
+	// themselves; everything else follows by date.
+	Sticky bool `yaml:"sticky,omitempty"`
+
+	// Aliases are old paths that should redirect here. Each generates a
+	// meta-refresh + canonical redirect stub excluded from the sitemap (SEO-002).
+	Aliases []string `yaml:"aliases,omitempty"`
+
+	// AliasStubs overrides the site-wide alias_stubs default for this page's
+	// aliases: false emits only the 301 in _redirects (no meta-refresh copy),
+	// true forces stubs even when the site disables them; nil inherits (#65).
+	AliasStubs *bool `yaml:"alias_stubs,omitempty"`
+
+	// Schema overrides or extends the page's generated JSON-LD structured data;
+	// its keys are deep-merged over the derived data, per-page winning (#61).
+	Schema map[string]interface{} `yaml:"schema,omitempty"`
+
+	// TaxonomiesFM is the raw frontmatter `taxonomies:` map (taxonomies-feature.md);
+	// Taxonomies is the resolved form filled by the generator after merging the
+	// map, direct fields and legacy category/tags/series by priority.
+	TaxonomiesFM map[string]interface{} `yaml:"-" json:"-"`
+	Taxonomies   map[string][]string    `yaml:"-"`
+
+	// Series groups posts into an ordered set with a landing page and prev/next
+	// navigation (AX-005). The neighbour fields are computed by the generator.
+	Series          string `yaml:"series,omitempty"`
+	SeriesPrevURL   string `yaml:"-"`
+	SeriesPrevTitle string `yaml:"-"`
+	SeriesNextURL   string `yaml:"-"`
+	SeriesNextTitle string `yaml:"-"`
+
+	// Computed reading metadata, exposed to templates as .WordCount / .ReadingTime
+	// (BLOG-006). Set by ComputeReadingStats; not read from frontmatter.
+	WordCount   int `yaml:"-"`
+	ReadingTime int `yaml:"-"` // Estimated minutes at wordsPerMinute
+
+	// HasMath marks pages containing math delimiters so KaTeX assets are injected
+	// only where needed (AX-004). Set by the generator when math is enabled.
+	HasMath bool `yaml:"-"`
+
+	// PermalinkPath is a pre-expanded, sanitized relative output path (SEO-001).
+	// When set by the generator from a configured permalink pattern it overrides
+	// the default date/slug path for both URL and output-path computation. The
+	// frontmatter Link field still takes priority over this.
+	PermalinkPath string `yaml:"-"`
+
+	// LangPrefix is a language segment (e.g. "en") prepended to the URL/output path
+	// for non-default languages in multilingual builds (PLAT-005). Not applied when
+	// an explicit Link is set.
+	LangPrefix string `yaml:"-"`
 
 	// Template selection
 	Layout   string `yaml:"layout"`   // Custom layout template (e.g., "blog-hub", "landing")
@@ -90,6 +167,13 @@ func (p Page) GetURL() string {
 			if !strings.HasPrefix(path, "/") {
 				path = "/" + path
 			}
+			// A link that already names a file is final: it is the highest-precedence
+			// URL source, so decorating it further contradicts what it declares.
+			// Appending a slash turned "/validator.html" into "/validator.html/",
+			// which is a directory, not the file the author asked for (#81).
+			if HasPageExtension(path) {
+				return path
+			}
 			if !strings.HasSuffix(path, "/") {
 				path = path + "/"
 			}
@@ -104,8 +188,22 @@ func (p Page) GetURL() string {
 	return basePath + "/"
 }
 
-// getBasePath returns the base URL path without trailing slash or extension
+// getBasePath returns the base URL path without trailing slash or extension,
+// applying any language prefix (PLAT-005).
 func (p Page) getBasePath() string {
+	base := p.getBasePathRaw()
+	if p.LangPrefix != "" {
+		return "/" + p.LangPrefix + base
+	}
+	return base
+}
+
+// getBasePathRaw computes the language-agnostic base path.
+func (p Page) getBasePathRaw() string {
+	// Configured permalink pattern (SEO-001) overrides the default date/slug path.
+	if p.PermalinkPath != "" {
+		return "/" + strings.Trim(SanitizeRelPath(p.PermalinkPath), "/")
+	}
 	if p.Type == "post" {
 		if p.URLFormat == "slug" {
 			return fmt.Sprintf("/%s", p.Slug)
@@ -122,16 +220,32 @@ func (p Page) GetCanonical(domain string) string {
 }
 
 // GetOutputPath returns the filesystem path for this page/post
-// Link field from frontmatter ALWAYS takes priority
+// Link field from frontmatter ALWAYS takes priority.
+//
+// The returned sub-path is always sanitized (see SanitizeRelPath) so that
+// untrusted slug/link values — e.g. supplied by a remote mddb server — can
+// never escape the output directory via path traversal (SEC-001).
 func (p Page) GetOutputPath() string {
-	// Link field ALWAYS takes priority (for both posts and pages)
+	// Link field ALWAYS takes priority (for both posts and pages); no language prefix.
 	if p.Link != "" {
 		if u, err := url.Parse(p.Link); err == nil {
-			path := u.Path
-			return strings.Trim(path, "/")
+			return SanitizeRelPath(u.Path)
 		}
 	}
 
+	sub := p.getOutputSubPath()
+	if p.LangPrefix != "" {
+		return SanitizeRelPath(p.LangPrefix + "/" + sub)
+	}
+	return SanitizeRelPath(sub)
+}
+
+// getOutputSubPath computes the language-agnostic output sub-path (SEO-001).
+func (p Page) getOutputSubPath() string {
+	// Configured permalink pattern (SEO-001) overrides the default date/slug path.
+	if p.PermalinkPath != "" {
+		return p.PermalinkPath
+	}
 	if p.Type == "post" {
 		// URLFormat="slug" uses slug-only path
 		if p.URLFormat == "slug" {
@@ -141,9 +255,135 @@ func (p Page) GetOutputPath() string {
 		return fmt.Sprintf("%d/%02d/%02d/%s",
 			p.Date.Year(), p.Date.Month(), p.Date.Day(), p.Slug)
 	}
-
 	// Pages: use slug
 	return p.Slug
+}
+
+// HasPageExtension reports whether a path already names an HTML-ish file, in
+// which case page_format must not decorate it further (#81). Only the handful of
+// extensions a page is actually served under count — a slug that merely contains
+// a dot ("v1.0") is still a directory.
+func HasPageExtension(p string) bool {
+	ext := strings.ToLower(path.Ext(strings.TrimSuffix(p, "/")))
+	switch ext {
+	case ".html", ".htm", ".xml", ".json", ".txt":
+		return true
+	}
+	return false
+}
+
+// SanitizeRelPath returns a cleaned, relative sub-path that cannot escape its
+// root. Untrusted input (slug/link from mddb) may contain "..", absolute paths
+// or Windows separators; anchoring at "/" before path.Clean collapses any such
+// traversal, and the leading separator is then stripped to yield a safe
+// relative path. Guards against path traversal / arbitrary write (SEC-001).
+func SanitizeRelPath(p string) string {
+	// Normalize Windows separators so "\.." cannot bypass the cleaning.
+	p = strings.ReplaceAll(p, "\\", "/")
+	// Anchor at root: path.Clean("/"+"../../etc") == "/etc", never above root.
+	cleaned := path.Clean("/" + p)
+	// Strip the leading slash to produce a relative path ("" stays "").
+	return strings.TrimPrefix(cleaned, "/")
+}
+
+// wordsPerMinute is the assumed silent-reading speed used for ReadingTime (BLOG-006).
+const wordsPerMinute = 200
+
+// markupStripRe is the markup this counter ignores so word counts reflect prose,
+// not tags/shortcodes: HTML tags (<...>), brace shortcodes ({{...}}) and bracket
+// shortcodes ([name ...]). countProseWords implements exactly this pattern by
+// hand; the expression is kept as the specification it is checked against
+// (TestCountProseWordsMatchesRegex).
+var markupStripRe = regexp.MustCompile(`<[^>]*>|{{[^}]*}}|\[/?[a-zA-Z][^\]]*\]`)
+
+// ComputeReadingStats computes WordCount and ReadingTime from Content (BLOG-006).
+// Markup is skipped so the count reflects readable prose. ReadingTime is
+// ceil(words / wordsPerMinute), at least 1 minute for any non-empty text and 0
+// for empty content. Safe to call multiple times (idempotent).
+func (p *Page) ComputeReadingStats() {
+	words := countProseWords(p.Content)
+	p.WordCount = words
+	if words == 0 {
+		p.ReadingTime = 0
+		return
+	}
+	minutes := (words + wordsPerMinute - 1) / wordsPerMinute
+	if minutes < 1 {
+		minutes = 1
+	}
+	p.ReadingTime = minutes
+}
+
+// countProseWords counts whitespace-separated words in s, treating each markup
+// token (see markupStripRe) as a separator rather than as text.
+//
+// This is the hot path of a large build: it used to strip markup with a regex
+// ReplaceAllString and then call strings.Fields, which ran the regex engine over
+// every page and allocated two throwaway strings per page — on a 2000-post corpus
+// that was roughly half the build. Scanning once, counting word boundaries in
+// place, allocates nothing (PERF-013). Behaviour is identical by construction and
+// checked against the regex on random input.
+func countProseWords(s string) int {
+	words := 0
+	inWord := false
+	for i := 0; i < len(s); {
+		if n := markupTokenLen(s, i); n > 0 {
+			inWord = false // markup separates words, as replacing it with " " did
+			i += n
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		switch {
+		case unicode.IsSpace(r):
+			inWord = false
+		case !inWord:
+			inWord = true
+			words++
+		}
+		i += size
+	}
+	return words
+}
+
+// markupTokenLen returns the byte length of the markup token starting at s[i], or
+// 0 when none starts there. The three forms mirror markupStripRe; each needs its
+// closing delimiter, so an unterminated "<" is ordinary text, exactly as the
+// regex treats it.
+func markupTokenLen(s string, i int) int {
+	switch s[i] {
+	case '<': // <[^>]*>
+		if j := strings.IndexByte(s[i+1:], '>'); j >= 0 {
+			return j + 2
+		}
+	case '{': // {{[^}]*}}
+		if i+1 < len(s) && s[i+1] == '{' {
+			k := i + 2
+			for k < len(s) && s[k] != '}' {
+				k++
+			}
+			if k+1 < len(s) && s[k] == '}' && s[k+1] == '}' {
+				return k + 2 - i
+			}
+		}
+	case '[': // \[/?[a-zA-Z][^\]]*\]
+		k := i + 1
+		if k < len(s) && s[k] == '/' {
+			k++
+		}
+		if k < len(s) && isASCIILetter(s[k]) {
+			for k < len(s) && s[k] != ']' {
+				k++
+			}
+			if k < len(s) {
+				return k + 1 - i
+			}
+		}
+	}
+	return 0
+}
+
+func isASCIILetter(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
 }
 
 // HasValidCategories returns true if post has categories other than "Bez kategorii" (ID 1)
@@ -194,20 +434,253 @@ type Title struct {
 	Rendered string `json:"rendered"`
 }
 
-// Metadata represents the full metadata.json structure
+// Metadata represents the full metadata.json structure. Unconsumed export
+// fields (e.g. exported_at) are simply not declared — the JSON decoder skips
+// them (GO-042).
 type Metadata struct {
 	Categories []Category  `json:"categories"`
-	ExportedAt string      `json:"exported_at"`
 	Media      []MediaItem `json:"media"`
 	Users      []Author    `json:"users"`
+	// Tags mirrors the WordPress export's tag terms (id/name/slug), used to
+	// resolve numeric tag ids in frontmatter the same way users resolves
+	// author ids (issue #27). The Category shape fits tag terms as-is.
+	Tags []Category `json:"tags"`
+
+	// Marketing and Analytics carry the site's own wiring as discovered by an
+	// exporter's crawl (wpexporter >= 1.8.1): brand assets, social identity,
+	// search-console verification and tracking ids. A migration cannot
+	// reconstruct these afterwards — they live in the source theme, not in the
+	// content — so they travel with the content and reach the templates.
+	Marketing Marketing    `json:"marketing"`
+	Analytics AnalyticsIDs `json:"analytics"`
+
+	// Site is what the source CMS calls itself: the name and tagline shown in
+	// its own settings, its canonical URL, its locale and timezone. A migration
+	// that drops these starts the new project as "example.com" with no title,
+	// which is exactly the data the export already had (#128).
+	Site SiteInfo `json:"site"`
+
+	// Menus is the navigation an editor arranged in the CMS — the one part of
+	// a site that cannot be derived from its content (#132). Absent when the
+	// export ran without credentials: WordPress gates menus behind
+	// edit_theme_options.
+	Menus []Menu `json:"menus"`
+
+	// CustomTypes is what the source CMS registered beyond pages and posts —
+	// Services, Portfolio, Realizacje. The field that matters here is
+	// HasArchive: a type's archive is a listing the CMS renders, not a document,
+	// so it cannot travel with the content and the generator has to be told
+	// whether the source served one (#165). Absent from exports that predate the
+	// field, in which case `type_archives` in the config is the only answer.
+	CustomTypes []CustomType `json:"custom_types"`
+}
+
+// CustomType describes one content type the source CMS registered.
+type CustomType struct {
+	Slug string `json:"slug"`
+	Name string `json:"name"`
+	// HasArchive is whether the source served a listing at the type's own
+	// section. It is not derivable from the content: a site can register a type
+	// whose entries are addressable while its section 404s, and the reported
+	// case had one of each.
+	HasArchive bool `json:"has_archive"`
+	// ArchiveLink is the address the source published that listing at, as a
+	// root-relative path — "/realizacje/", or "/nasze-prace/" when the type's
+	// archive does not sit at its own slug. WordPress lets `has_archive` BE a
+	// slug, so assuming the type slug would build the section at an address
+	// nothing links to while the real one stayed a 404. Empty means the type's
+	// own slug (wpexporter 1.8.15+ always fills it when HasArchive is true).
+	ArchiveLink string `json:"archive_link"`
+}
+
+// SiteInfo is the source site's self-description, straight from its settings.
+// Every field is best-effort: an export that did not report one leaves it empty.
+type SiteInfo struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	URL         string `json:"url"`
+	HomeURL     string `json:"home_url"`
+	Timezone    string `json:"timezone"`
+	Language    string `json:"language"`
+}
+
+// Marketing is the site-level identity a migrated site would otherwise lose:
+// verification tokens, social defaults, profile links and brand assets. Every
+// field is best-effort — an absent one is empty, never invented.
+type Marketing struct {
+	Verification   map[string]string `json:"verification"`
+	SocialProfiles map[string]string `json:"social_profiles"`
+	OGSiteName     string            `json:"og_site_name"`
+	OGImage        string            `json:"og_image"`
+	TwitterSite    string            `json:"twitter_site"`
+	Favicon        string            `json:"favicon"`
+	AppleTouchIcon string            `json:"apple_touch_icon"`
+	Logo           string            `json:"logo"`
+	ThemeColor     string            `json:"theme_color"`
+	// Colors is the source theme's palette by role ("primary", "secondary",
+	// "accent", "text", "background", "link"), read by the exporter from the
+	// theme's own CSS custom properties (wpexporter >= 1.8.2). It is the one
+	// part of a site's look a migration can carry verbatim (#128).
+	Colors map[string]string `json:"colors"`
+}
+
+// Empty reports whether nothing was discovered, so callers can skip the whole
+// block rather than emit empty markup.
+func (m Marketing) Empty() bool {
+	return len(m.Verification) == 0 && len(m.SocialProfiles) == 0 && len(m.Colors) == 0 &&
+		m.OGSiteName == "" && m.OGImage == "" && m.TwitterSite == "" &&
+		m.Favicon == "" && m.AppleTouchIcon == "" && m.Logo == "" && m.ThemeColor == ""
 }
 
 // SiteData holds all parsed content for template rendering
 type SiteData struct {
-	Domain     string
+	Domain string
+	// Title and Description are the site's own name and tagline, reaching
+	// templates as .Site.Title / .Site.Description. Configuration wins; a
+	// migrated site falls back to what its export recorded (#128).
+	Title       string
+	Description string
+	// Colors is the site palette by role, as .Site.Colors.primary and as CSS
+	// custom properties in the head.
+	Colors     map[string]string
 	Pages      []Page
 	Posts      []Page
 	Categories map[int]Category
 	Media      map[int]MediaItem
 	Authors    map[int]Author
+	// Tags maps WordPress tag term ids to their name/slug (issue #27).
+	Tags map[int]Category
+	// TagSlugs maps lowercased tag names RESOLVED FROM NUMERIC IDS to the
+	// export's canonical slug. Only id-resolved tags get canonical slugs, so
+	// hand-written tag names keep their historical derived URLs (issue #27,
+	// backward compatible by construction).
+	TagSlugs map[string]string
+	// Marketing and Analytics reach templates as .Site.Marketing /
+	// .Site.Analytics, so a theme can render the site's icons, social
+	// identity and tracking without the author retyping what the migration
+	// already found.
+	Marketing Marketing
+	Analytics map[string]string
+	// Menus reaches templates as .Site.Menus.<location> (or .<slug>), each with
+	// .Items already nested and ordered as the source site rendered them.
+	Menus map[string]Menu
+	// CustomTypes is what the source CMS registered beyond pages and posts, as
+	// recorded by the export. HasArchive decides whether /<type>/ is built (#165);
+	// a theme can also read the list to render its own section index.
+	CustomTypes []CustomType
+	// Comments are the readers' comments a migration carried across, keyed by
+	// the page URL they belong to. A page's own thread reaches its template as
+	// .Comments (#142).
+	Comments        map[string][]Comment
+	Language        i18n.LanguageConfig
+	Languages       []i18n.LanguageConfig
+	DefaultLanguage string
+	LanguagePages   []Page
+	LanguagePosts   []Page
+}
+
+// ResolveFlexibleFields resolves raw author/category strings to integer IDs
+// using reverse-lookup maps built from loaded metadata.
+// Call this after all metadata (authors, categories) has been loaded.
+func (sd *SiteData) ResolveFlexibleFields() {
+	authorByName := make(map[string]int)
+	authorBySlug := make(map[string]int)
+	for _, a := range sd.Authors {
+		authorByName[strings.ToLower(a.Name)] = a.ID
+		authorBySlug[strings.ToLower(a.Slug)] = a.ID
+	}
+
+	catByName := make(map[string]int)
+	catBySlug := make(map[string]int)
+	for _, c := range sd.Categories {
+		catByName[strings.ToLower(c.Name)] = c.ID
+		catBySlug[strings.ToLower(c.Slug)] = c.ID
+	}
+
+	if sd.TagSlugs == nil {
+		sd.TagSlugs = make(map[string]string)
+	}
+	resolvePages := func(pages []Page) {
+		for i := range pages {
+			resolveAuthor(&pages[i], authorByName, authorBySlug)
+			resolveCategories(&pages[i], catByName, catBySlug)
+			resolveTags(&pages[i], sd.Tags, sd.TagSlugs)
+		}
+	}
+
+	resolvePages(sd.Pages)
+	resolvePages(sd.Posts)
+}
+
+// resolveTags replaces numeric WordPress tag ids in a page's tags with the
+// term names from metadata.json `tags`, mirroring how author ids resolve via
+// `users` (issue #27). The canonical export slug is recorded ONLY for
+// id-resolved names, so hand-written tags keep their historical derived
+// slugs. Non-numeric values and unknown ids pass through.
+func resolveTags(p *Page, tags map[int]Category, tagSlugs map[string]string) {
+	if len(tags) == 0 || len(p.Tags) == 0 {
+		return
+	}
+	for i, raw := range p.Tags {
+		id, err := strconv.Atoi(strings.TrimSpace(raw))
+		if err != nil {
+			continue
+		}
+		if term, ok := tags[id]; ok && term.Name != "" {
+			p.Tags[i] = term.Name
+			if term.Slug != "" {
+				tagSlugs[strings.ToLower(term.Name)] = term.Slug
+			}
+		}
+	}
+}
+
+// resolveAuthor resolves AuthorRaw to Author ID
+func resolveAuthor(p *Page, byName, bySlug map[string]int) {
+	if p.AuthorRaw == nil || p.Author != 0 {
+		return
+	}
+	switch v := p.AuthorRaw.(type) {
+	case int:
+		p.Author = v
+	case float64:
+		p.Author = int(v)
+	case string:
+		lower := strings.ToLower(v)
+		if id, ok := byName[lower]; ok {
+			p.Author = id
+		} else if id, ok := bySlug[lower]; ok {
+			p.Author = id
+		}
+		// If still 0 — try parsing as numeric string
+		if p.Author == 0 {
+			if parsed, err := strconv.Atoi(v); err == nil {
+				p.Author = parsed
+			}
+		}
+	}
+}
+
+// resolveCategories resolves CategoriesRaw to Categories IDs
+func resolveCategories(p *Page, byName, bySlug map[string]int) {
+	if len(p.CategoriesRaw) == 0 || len(p.Categories) > 0 {
+		return
+	}
+	for _, raw := range p.CategoriesRaw {
+		switch v := raw.(type) {
+		case int:
+			p.Categories = append(p.Categories, v)
+		case float64:
+			p.Categories = append(p.Categories, int(v))
+		case string:
+			lower := strings.ToLower(v)
+			if id, ok := byName[lower]; ok {
+				p.Categories = append(p.Categories, id)
+			} else if id, ok := bySlug[lower]; ok {
+				p.Categories = append(p.Categories, id)
+			} else if parsed, err := strconv.Atoi(v); err == nil {
+				p.Categories = append(p.Categories, parsed)
+			}
+		}
+	}
 }

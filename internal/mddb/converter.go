@@ -3,10 +3,104 @@ package mddb
 
 import (
 	"fmt"
+	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/spagu/ssg/internal/models"
 )
+
+// asSlice normalizes a metadata value that may be either a scalar or a slice.
+// toDocument/protoMetaToMetadata flatten single-element meta arrays to their
+// scalar value, so a post with exactly one tag/category/alias arrives as a
+// scalar — asserting only .([]interface{}) silently drops the field (GO-014).
+func asSlice(v any) []any {
+	switch s := v.(type) {
+	case nil:
+		return nil
+	case []any:
+		return s
+	default:
+		return []any{v}
+	}
+}
+
+// asInt normalizes a numeric metadata value. HTTP/JSON delivers numbers as
+// float64, while the gRPC transport delivers every meta value as a string —
+// asserting .(float64) there silently yields 0 IDs (GO-030).
+func asInt(v any) (int, bool) {
+	switch n := v.(type) {
+	case float64:
+		return int(n), true
+	case int:
+		return n, true
+	case int64:
+		return int(n), true
+	case string:
+		if i, err := strconv.Atoi(strings.TrimSpace(n)); err == nil {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
+// stringSliceMeta returns the string elements of a metadata value that may
+// arrive as a scalar or as a slice (GO-014). Non-string elements are skipped.
+func stringSliceMeta(v any) []string {
+	var out []string
+	for _, item := range asSlice(v) {
+		if s, ok := item.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// metaBool reads a frontmatter boolean that may arrive as a native bool (YAML/
+// TOML/JSON) or as a "true"/"false" string (some external sources). The second
+// return reports whether a usable value was found, so callers can leave a
+// pointer-bool unset (inherit) when the key is absent or unparsable.
+func metaBool(v any) (bool, bool) {
+	switch t := v.(type) {
+	case bool:
+		return t, true
+	case string:
+		switch strings.ToLower(strings.TrimSpace(t)) {
+		case "true", "yes", "1":
+			return true, true
+		case "false", "no", "0":
+			return false, true
+		}
+	}
+	return false, false
+}
+
+// applyCategories resolves flexible categories metadata onto the page:
+// numeric IDs (float64 from JSON, numeric strings over gRPC, GO-030) fill
+// Categories, while any non-numeric name switches the whole list to
+// CategoriesRaw for later resolution. A single category arrives flattened to
+// a scalar (GO-014).
+func applyCategories(page *models.Page, v any) {
+	cats := asSlice(v)
+	if len(cats) == 0 {
+		return
+	}
+
+	hasNames := false
+	for _, cat := range cats {
+		if id, ok := asInt(cat); ok {
+			page.Categories = append(page.Categories, id)
+		} else if _, isString := cat.(string); isString {
+			hasNames = true
+		}
+	}
+	if hasNames {
+		// Has non-numeric name values — store raw for later resolution
+		page.Categories = nil
+		page.CategoriesRaw = cats
+	}
+}
 
 // ToPage converts an mddb Document to a models.Page
 func (d *Document) ToPage() (*models.Page, error) {
@@ -20,8 +114,9 @@ func (d *Document) ToPage() (*models.Page, error) {
 		page.Title = title
 	}
 
-	if id, ok := d.Metadata["id"].(float64); ok {
-		page.ID = int(id)
+	// IDs arrive as float64 over HTTP/JSON but as strings over gRPC (GO-030)
+	if id, ok := asInt(d.Metadata["id"]); ok {
+		page.ID = id
 	}
 
 	if slug, ok := d.Metadata["slug"].(string); ok {
@@ -42,8 +137,17 @@ func (d *Document) ToPage() (*models.Page, error) {
 		page.Link = link
 	}
 
-	if author, ok := d.Metadata["author"].(float64); ok {
-		page.Author = int(author)
+	// Flexible author: accept an ID (float64 from JSON, numeric string over
+	// gRPC, GO-030) or a name string stored raw for later resolution
+	switch authorVal := d.Metadata["author"].(type) {
+	case float64:
+		page.Author = int(authorVal)
+	case string:
+		if id, ok := asInt(authorVal); ok {
+			page.Author = id
+		} else {
+			page.AuthorRaw = authorVal
+		}
 	}
 
 	if excerpt, ok := d.Metadata["excerpt"].(string); ok {
@@ -70,14 +174,7 @@ func (d *Document) ToPage() (*models.Page, error) {
 		page.Modified = d.UpdatedAt
 	}
 
-	// Parse categories
-	if cats, ok := d.Metadata["categories"].([]interface{}); ok {
-		for _, cat := range cats {
-			if catID, ok := cat.(float64); ok {
-				page.Categories = append(page.Categories, int(catID))
-			}
-		}
-	}
+	applyCategories(page, d.Metadata["categories"])
 
 	// SEO and additional standard fields
 	if desc, ok := d.Metadata["description"].(string); ok {
@@ -95,6 +192,9 @@ func (d *Document) ToPage() (*models.Page, error) {
 	if robots, ok := d.Metadata["robots"].(string); ok {
 		page.Robots = robots
 	}
+	if sitemap, ok := d.Metadata["sitemap"].(string); ok {
+		page.Sitemap = sitemap
+	}
 	if featuredImage, ok := d.Metadata["featured_image"].(string); ok {
 		page.FeaturedImage = featuredImage
 	}
@@ -108,13 +208,33 @@ func (d *Document) ToPage() (*models.Page, error) {
 		page.Template = template
 	}
 
-	// Parse tags
-	if tags, ok := d.Metadata["tags"].([]interface{}); ok {
-		for _, tag := range tags {
-			if tagStr, ok := tag.(string); ok {
-				page.Tags = append(page.Tags, tagStr)
-			}
-		}
+	// Parse tags — a single tag arrives flattened to a scalar (GO-014)
+	page.Tags = stringSliceMeta(d.Metadata["tags"])
+
+	// Parse aliases (old paths that redirect here, SEO-002); a single alias
+	// arrives flattened to a scalar (GO-014)
+	page.Aliases = stringSliceMeta(d.Metadata["aliases"])
+
+	// alias_stubs: false on a page emits only the 301 for its aliases (no
+	// meta-refresh copy); true forces a stub. Unset inherits the site-wide
+	// default. Overrides duplicate-page behaviour per page (#65).
+	if b, ok := metaBool(d.Metadata["alias_stubs"]); ok {
+		page.AliasStubs = &b
+	}
+
+	// schema: per-page JSON-LD override/extension, deep-merged over the derived
+	// structured data (#61).
+	if m, ok := d.Metadata["schema"].(map[string]interface{}); ok {
+		page.Schema = m
+	}
+
+	// Series grouping (AX-005)
+	if series, ok := d.Metadata["series"].(string); ok {
+		page.Series = series
+	}
+
+	if sticky, ok := d.Metadata["sticky"].(bool); ok {
+		page.Sticky = sticky
 	}
 
 	// Copy ALL remaining metadata fields to Extra for dynamic template access
@@ -123,18 +243,47 @@ func (d *Document) ToPage() (*models.Page, error) {
 		"id": true, "title": true, "slug": true, "status": true, "type": true,
 		"link": true, "author": true, "excerpt": true, "date": true, "modified": true,
 		"categories": true, "description": true, "keywords": true, "lang": true,
-		"canonical": true, "robots": true, "featured_image": true, "tags": true,
-		"category": true, "layout": true, "template": true,
+		"canonical": true, "robots": true, "sitemap": true, "featured_image": true, "tags": true,
+		"category": true, "layout": true, "template": true, "aliases": true, "series": true,
+		"alias_stubs": true, "schema": true, "sticky": true,
 	}
 
 	page.Extra = make(map[string]interface{})
 	for key, value := range d.Metadata {
 		if !knownFields[key] {
-			page.Extra[key] = value
+			// mddb's meta is flat by design, so a structured field can only
+			// travel as JSON in one string; decoding it here is what makes that
+			// arrangement work end to end (#154). A value that is not JSON is
+			// stored exactly as it arrived, so existing sites are untouched.
+			page.Extra[key] = decodeStructuredMeta(value)
 		}
 	}
 
 	return page, nil
+}
+
+// StructuredMetaWarnings names the meta fields of a document that arrived as
+// printed Go values rather than data — the shape a producer leaves behind when
+// it formats a map instead of encoding it. The value cannot be recovered, so
+// the document and the field are what a build can usefully report (#154).
+func (d *Document) StructuredMetaWarnings() []StructuredMetaWarning {
+	var out []StructuredMetaWarning
+	for _, key := range sortedMetaKeys(d.Metadata) {
+		if looksGoStringified(d.Metadata[key]) {
+			out = append(out, StructuredMetaWarning{Key: key, Value: d.Metadata[key].(string)})
+		}
+	}
+	return out
+}
+
+// sortedMetaKeys keeps the report stable between builds.
+func sortedMetaKeys(meta map[string]interface{}) []string {
+	keys := make([]string, 0, len(meta))
+	for k := range meta {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // ToPages converts multiple mddb Documents to models.Page slice
@@ -170,34 +319,16 @@ func parseDate(s string) (time.Time, error) {
 	return time.Time{}, fmt.Errorf("unable to parse date: %s", s)
 }
 
-// ToMetadata extracts models.Metadata from mddb documents
-func ToMetadata(docs []Document) (*models.Metadata, error) {
-	metadata := &models.Metadata{}
-
-	for _, doc := range docs {
-		switch doc.Collection {
-		case "categories":
-			cat := extractCategory(doc)
-			metadata.Categories = append(metadata.Categories, cat)
-		case "media":
-			media := extractMedia(doc)
-			metadata.Media = append(metadata.Media, media)
-		case "users":
-			author := extractAuthor(doc)
-			metadata.Users = append(metadata.Users, author)
-		}
-	}
-
-	return metadata, nil
-}
-
-func extractCategory(doc Document) models.Category {
+// ExtractCategory builds a models.Category from an mddb category Document.
+// Shared by the generator's mddb metadata loader (DRY, GO-006/GO-010).
+func ExtractCategory(doc Document) models.Category {
 	cat := models.Category{
 		Slug: doc.Key,
 	}
 
-	if id, ok := doc.Metadata["id"].(float64); ok {
-		cat.ID = int(id)
+	// asInt: IDs arrive as float64 over HTTP/JSON, as strings over gRPC (GO-030)
+	if id, ok := asInt(doc.Metadata["id"]); ok {
+		cat.ID = id
 	}
 	if name, ok := doc.Metadata["name"].(string); ok {
 		cat.Name = name
@@ -208,23 +339,27 @@ func extractCategory(doc Document) models.Category {
 	if link, ok := doc.Metadata["link"].(string); ok {
 		cat.Link = link
 	}
-	if count, ok := doc.Metadata["count"].(float64); ok {
-		cat.Count = int(count)
+	if count, ok := asInt(doc.Metadata["count"]); ok {
+		cat.Count = count
 	}
-	if parent, ok := doc.Metadata["parent"].(float64); ok {
-		cat.Parent = int(parent)
+	if parent, ok := asInt(doc.Metadata["parent"]); ok {
+		cat.Parent = parent
 	}
 
 	return cat
 }
 
-func extractMedia(doc Document) models.MediaItem {
+// ExtractMedia builds a models.MediaItem (including media_details) from an mddb
+// media Document. Shared by the metadata converter and the generator's mddb
+// loader (DRY, GO-006/GO-010).
+func ExtractMedia(doc Document) models.MediaItem {
 	media := models.MediaItem{
 		Slug: doc.Key,
 	}
 
-	if id, ok := doc.Metadata["id"].(float64); ok {
-		media.ID = int(id)
+	// asInt: IDs arrive as float64 over HTTP/JSON, as strings over gRPC (GO-030)
+	if id, ok := asInt(doc.Metadata["id"]); ok {
+		media.ID = id
 	}
 	if mediaType, ok := doc.Metadata["media_type"].(string); ok {
 		media.MediaType = mediaType
@@ -241,11 +376,11 @@ func extractMedia(doc Document) models.MediaItem {
 		}
 	}
 	if details, ok := doc.Metadata["media_details"].(map[string]interface{}); ok {
-		if width, ok := details["width"].(float64); ok {
-			media.MediaDetails.Width = models.FlexInt(int(width))
+		if width, ok := asInt(details["width"]); ok {
+			media.MediaDetails.Width = models.FlexInt(width)
 		}
-		if height, ok := details["height"].(float64); ok {
-			media.MediaDetails.Height = models.FlexInt(int(height))
+		if height, ok := asInt(details["height"]); ok {
+			media.MediaDetails.Height = models.FlexInt(height)
 		}
 		if file, ok := details["file"].(string); ok {
 			media.MediaDetails.File = file
@@ -255,13 +390,16 @@ func extractMedia(doc Document) models.MediaItem {
 	return media
 }
 
-func extractAuthor(doc Document) models.Author {
+// ExtractAuthor builds a models.Author from an mddb user Document.
+// Shared by the metadata converter and the generator's mddb loader (DRY, GO-010).
+func ExtractAuthor(doc Document) models.Author {
 	author := models.Author{
 		Slug: doc.Key,
 	}
 
-	if id, ok := doc.Metadata["id"].(float64); ok {
-		author.ID = int(id)
+	// asInt: IDs arrive as float64 over HTTP/JSON, as strings over gRPC (GO-030)
+	if id, ok := asInt(doc.Metadata["id"]); ok {
+		author.ID = id
 	}
 	if name, ok := doc.Metadata["name"].(string); ok {
 		author.Name = name

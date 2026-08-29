@@ -1,0 +1,291 @@
+# Documentation site for SSG itself.
+#
+# Deliberately NOT named .ssg.yaml: that filename is auto-detected by every ssg
+# invocation in this directory, so a config describing THIS site would hijack
+# any other build run from a checkout — including the action's own test jobs,
+# which is exactly what happened once the published image understood
+# content_sources. Always pass it explicitly: ssg --config docs-site.yaml
+#
+# It has no content/<source>/ tree: the pages ARE this repository's docs/ and
+# examples/ Markdown, pulled in through content_sources (CONTENT-002). Editing a
+# guide and rebuilding is the whole workflow — nothing is copied or generated
+# into a second location that could drift.
+#
+#   make site        # build into .site/
+#   make site-serve  # build and serve on http://127.0.0.1:8888
+template: ssgtheme
+domain: ssg.tradik.com
+output_dir: .site
+
+# The theme screenshots live here rather than in the repo-root static/, which
+# every build run from this directory would copy — including the golden corpora,
+# where documentation images have no business appearing.
+static_dir: docs-static
+
+content_sources:
+  - path: docs
+    type: page
+    category: Documentation
+  # Posts. Deliberately uncategorised: a category would generate a second
+  # listing at /category/blog/ with exactly the same posts as /blog/, and two
+  # self-canonical URLs holding the same content is duplicate content with
+  # extra steps. The index is pages/blog.md (layout: blog).
+  - path: blog
+    type: post
+  # Standalone pages that are not documentation — the blog index and the
+  # cookie policy the consent banner links to.
+  - path: pages
+    type: page
+
+# The docs site dogfoods the cookie-consent worker: its functions ship with the
+# build, and ssgtheme renders the banner from variables.cookie_consent below.
+workers:
+  - name: cookie-consent
+    dir: workers/cookie-consent
+    routes_include: [/api/consent/*]
+  - name: comments
+    dir: workers/comments
+    routes_include: [/api/comments, /api/comments/*]
+
+# Docs cross-link each other as CONFIGURATION.md, which only resolves in a
+# repository view; rewrite_md_links turns those into the built page URLs
+# (anchors included), and strip_md_link_text drops the ".md" from the visible
+# link text ("see CONFIGURATION" instead of "see CONFIGURATION.md").
+rewrite_md_links: true
+strip_md_link_text: true
+
+# The guides also link to repository files the site never publishes
+# (../examples/, the sample config). Point those at GitHub instead of 404ing.
+link_rewrites:
+  "../examples/": "https://github.com/spagu/ssg/tree/main/examples/"
+  "../templates/": "https://github.com/spagu/ssg/tree/main/templates/"
+  "../workers/": "https://github.com/spagu/ssg/tree/main/workers/"
+  "../.github/": "https://github.com/spagu/ssg/blob/main/.github/"
+  "../.ssg.yaml.example": "https://github.com/spagu/ssg/blob/main/.ssg.yaml.example"
+check_links: warn
+shortcode_errors: strict
+
+# docs/*.md have no "## Excerpt" section; derive one from the opening paragraph
+# so cards, feeds and meta descriptions are not blank.
+auto_excerpt: true
+
+# Posts live under /blog/, without the publication date: these are guides that
+# stay relevant, and a date in the path only makes them look stale. The
+# permalink pattern outranks post_url_format, which stays as the fallback.
+permalinks:
+  post: "/blog/:slug/"
+
+post_url_format: slug
+
+# Atom feed at /feed.xml for the 19 posts under /blog/. seo: true injects the
+# <link rel="alternate"> into every page, so readers and feed autodiscovery find
+# it without the theme having to know about it. Summaries rather than full
+# content: the posts carry mermaid diagrams and code blocks that feed readers
+# render poorly, and the excerpt is enough to decide whether to open one.
+feed: true
+feed_items: 20
+
+pretty_html: true
+sitemap_off: false
+robots_off: false
+search_index: true
+
+# Markdown for agents (GO-085): publish index.md + page.md next to every page,
+# a text/markdown <head> alternate, and a root llms.txt. Agents and LLMs that
+# read Markdown (ChatGPT Search among them) get the authored source directly.
+markdown_publish: true
+
+# Explicit crawler policy (GO-089). The AI crawlers are welcomed because the
+# published Markdown/llms.txt above is written precisely for them; Google reads
+# the standard HTML regardless.
+robots_rules:
+  - user_agent: "*"
+    allow: ["/"]
+  - user_agent: GPTBot
+    allow: ["/"]
+  - user_agent: OAI-SearchBot
+    allow: ["/"]
+  - user_agent: Google-Extended
+    allow: ["/"]
+
+# Dogfood the 1.8.14 SEO stack: seo injects the AI-first JSON-LD (BlogPosting /
+# WebPage / WebSite + BreadcrumbList) alongside the theme's own OpenGraph, and
+# schema adds a site-wide publisher to every page's structured data (#61).
+seo: true
+schema:
+  publisher:
+    "@type": Organization
+    name: SSG
+    url: https://ssg.tradik.com/
+
+# Emit routes.json so the route contract ships with the site (#62).
+route_manifest: true
+
+# Code blocks: Chroma syntax highlighting with line numbers, and Mermaid
+# diagrams rendered from ```mermaid fences (runtime injected only on pages that
+# use one).
+highlight: true
+highlight_style: github-dark
+highlight_line_numbers: true
+mermaid: true
+# Diagrams are transparent by default, so on the dark code chrome they were hard
+# to read; box each one on a white panel with the light "neutral" theme (GO-079).
+mermaid_theme: neutral
+mermaid_background: "#ffffff"
+
+# Content-address CSS/JS names, so a changed asset arrives under a new URL.
+#
+# Without this the generated _headers still marks /css/* and /js/* immutable for
+# a year, and `immutable` tells the browser not even to revalidate — so a
+# stylesheet edit stays invisible to anyone who visited before, and no change to
+# the header can reach them, because they never ask again. A content hash in the
+# name is the way out: the URL changes, so the stale copy is simply not
+# requested, and the year-long cache becomes correct rather than dangerous.
+fingerprint: true
+
+# Assets that keep a stable path — the worker widgets, served from the site root
+# and updated in place — still need to revalidate for exactly the reason above.
+headers:
+  # `immutable` is deliberately NOT used here, even though the names now carry a
+  # content hash and it would normally be exactly right.
+  #
+  # _headers matches by path pattern, not by what was actually served, so the
+  # rule also lands on a 404 fallback for a path under /css/. Ask for an asset in
+  # the window before a deploy has propagated and the edge pins that HTML page
+  # under the asset URL — for a year, unrevalidatable. That is not hypothetical:
+  # it is what took the stylesheet down on this site.
+  #
+  # A day-long cache keeps virtually all the benefit — the hash already changes
+  # the URL whenever the content does, so nothing stale is ever requested — while
+  # leaving any poisoned entry to expire on its own instead of persisting.
+  #
+  # must-revalidate is the part that actually bites: Cloudflare Pages rewrites
+  # max-age on static assets (the year comes back regardless of what is asked
+  # for here) but preserves the directives, so the directive is the only
+  # dependable lever. It forces a revalidation once stale rather than letting a
+  # wrong cached body ride out the full year.
+  /css/*:
+    Cache-Control: "public, max-age=86400, must-revalidate"
+  /js/*:
+    Cache-Control: "public, max-age=86400, must-revalidate"
+  /comments.js:
+    Cache-Control: "public, max-age=0, must-revalidate"
+  /comments.css:
+    Cache-Control: "public, max-age=0, must-revalidate"
+  /comments-admin.html:
+    Cache-Control: "public, max-age=0, must-revalidate"
+  /cookie-consent.js:
+    Cache-Control: "public, max-age=0, must-revalidate"
+  /cookie-consent.css:
+    Cache-Control: "public, max-age=0, must-revalidate"
+
+variables:
+  # Horizontal "deploys natively to" strip on the home page.
+  #
+  # The marks are the official monochrome brand paths from Simple Icons
+  # (github.com/simple-icons, CC0-1.0). They are data, not drawings: reproducing
+  # a company's mark from memory gets the proportions wrong, which misrepresents
+  # the brand worse than showing no mark at all. Each brand remains its owner's
+  # trademark; naming them to say "this deploys there" is nominative use.
+  #
+  # They live in config rather than in the theme so the theme ships no site's
+  # marketing — any site declares whatever integrations it actually has.
+  # All Simple Icons paths use a 24x24 viewBox.
+  marquee:
+    title: "Deploys natively to"
+    items:
+      - name: "Cloudflare Pages"
+        url: /deployment/#cloudflare-pages
+        icon: "M16.5088 16.8447c.1475-.5068.0908-.9707-.1553-1.3154-.2246-.3164-.6045-.499-1.0615-.5205l-8.6592-.1123a.1559.1559 0 0 1-.1333-.0713c-.0283-.042-.0351-.0986-.021-.1553.0278-.084.1123-.1484.2036-.1562l8.7359-.1123c1.0351-.0489 2.1601-.8868 2.5537-1.9136l.499-1.3013c.0215-.0561.0293-.1128.0147-.168-.5625-2.5463-2.835-4.4453-5.5499-4.4453-2.5039 0-4.6284 1.6177-5.3876 3.8614-.4927-.3658-1.1187-.5625-1.794-.499-1.2026.119-2.1665 1.083-2.2861 2.2856-.0283.31-.0069.6128.0635.894C1.5683 13.171 0 14.7754 0 16.752c0 .1748.0142.3515.0352.5273.0141.083.0844.1475.1689.1475h15.9814c.0909 0 .1758-.0645.2032-.1553l.12-.4268zm2.7568-5.5634c-.0771 0-.1611 0-.2383.0112-.0566 0-.1054.0415-.127.0976l-.3378 1.1744c-.1475.5068-.0918.9707.1543 1.3164.2256.3164.6055.498 1.0625.5195l1.8437.1133c.0557 0 .1055.0263.1329.0703.0283.043.0351.1074.0214.1562-.0283.084-.1132.1485-.204.1553l-1.921.1123c-1.041.0488-2.1582.8867-2.5527 1.914l-.1406.3585c-.0283.0713.0215.1416.0986.1416h6.5977c.0771 0 .1474-.0489.169-.126.1122-.4082.1757-.837.1757-1.2803 0-2.6025-2.125-4.727-4.7344-4.727"
+      - name: "GitHub Pages"
+        url: /deployment/#github-pages
+        icon: "M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"
+      - name: "Netlify"
+        url: /deployment/#netlify
+        icon: "M6.49 19.04h-.23L5.13 17.9v-.23l1.73-1.71h1.2l.15.15v1.2L6.5 19.04ZM5.13 6.31V6.1l1.13-1.13h.23L8.2 6.68v1.2l-.15.15h-1.2L5.13 6.31Zm9.96 9.09h-1.65l-.14-.13v-3.83c0-.68-.27-1.2-1.1-1.23-.42 0-.9 0-1.43.02l-.07.08v4.96l-.14.14H8.9l-.13-.14V8.73l.13-.14h3.7a2.6 2.6 0 0 1 2.61 2.6v4.08l-.13.14Zm-8.37-2.44H.14L0 12.82v-1.64l.14-.14h6.58l.14.14v1.64l-.14.14Zm17.14 0h-6.58l-.14-.14v-1.64l.14-.14h6.58l.14.14v1.64l-.14.14ZM11.05 6.55V1.64l.14-.14h1.65l.14.14v4.9l-.14.14h-1.65l-.14-.13Zm0 15.81v-4.9l.14-.14h1.65l.14.13v4.91l-.14.14h-1.65l-.14-.14Z"
+      - name: "Vercel"
+        url: /deployment/#vercel
+        icon: "m12 1.608 12 20.784H0Z"
+      - name: "FTP"
+        url: /deployment/#ftp
+        icon: "M12 2a1 1 0 0 1 .7.3l4 4a1 1 0 1 1-1.4 1.4L13 5.42V14a1 1 0 1 1-2 0V5.42L8.7 7.7a1 1 0 0 1-1.4-1.4l4-4A1 1 0 0 1 12 2ZM4 15a1 1 0 0 1 1 1v3h14v-3a1 1 0 1 1 2 0v4a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-4a1 1 0 0 1 1-1Z"
+      - name: "SFTP"
+        url: /deployment/#sftp
+        icon: "M12 2a1 1 0 0 1 .7.3l4 4a1 1 0 1 1-1.4 1.4L13 5.42V14a1 1 0 1 1-2 0V5.42L8.7 7.7a1 1 0 0 1-1.4-1.4l4-4A1 1 0 0 1 12 2ZM4 15a1 1 0 0 1 1 1v3h14v-3a1 1 0 1 1 2 0v4a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-4a1 1 0 0 1 1-1Z"
+
+  logo: logo.png # assets/logo.png, transparent, resized at build time
+  hero_image: river.jpg # assets/river.jpg, resized at build time
+  github_repo: spagu/ssg # enables the header star count
+  version: "1.8.52"
+
+  # Google Analytics 4 (gtag.js). ssgtheme renders it Consent-Mode-v2-aware:
+  # storage defaults to denied and the cookie-consent banner grants
+  # analytics_storage once the visitor accepts the analytics category.
+  gtag: "G-X5RRYESBTW"
+
+  # Cookie-consent banner config (rendered by ssgtheme when this is present).
+  # geoMode "always" shows it everywhere so the demo is visible without the
+  # edge geo Function; a real site would use "edge" to gate it to the EEA+UK.
+  cookie_consent:
+    version: "1"
+    policyUrl: /cookie-policy/
+    geoMode: always
+    expiryDays: 180
+    categories:
+      - id: necessary
+        required: true
+      - id: analytics
+      - id: marketing
+
+  # Comments widget on blog posts. The site key here is Cloudflare's public
+  # test key (always passes) so the demo form works without real Turnstile
+  # setup; swap it for your own. The widget needs the comments worker's D1 to
+  # actually store/list — locally that means the wrangler dev path.
+  comments:
+    # Cloudflare's public TEST key (always passes) so the demo works without
+    # setup. On deploy, the workflow overrides this from the GitHub secret
+    # `TURNSTILE_SITE_KEY` when it's set; the matching secret key rides on the
+    # Pages project as `TURNSTILE_SECRET` (from GitHub secret `TURNSTILE_SECRET_KEY`).
+    # See .github/workflows/docs-site.yml and workers/comments/README.md.
+    turnstileSiteKey: "1x00000000000000000000AA"
+    api: /api/comments
+    order: newest
+
+  # Header navigation: a fixed, hand-picked set. The footer carries the full
+  # guide directory, so this stays short whatever docs/ grows into.
+  # Sidebar order on every guide: the path a reader actually takes, rather than
+  # the alphabetical order .Site.Pages arrives in. A guide missing from this list
+  # still appears, after the ordered ones.
+  docs_nav_order:
+    - install          # first thing anyone does
+    - content          # then write something
+    - configuration    # then tune it
+    - templates        # then change how it looks
+    - template_helpers
+    - styles
+    - images
+    - taxonomies
+    - external_sources
+    - i18n
+    - workers
+    - mcp
+    - deployment       # then ship it
+    - upgrading        # and keep it current
+
+  nav:
+    - label: Docs
+      url: /#documentation
+    # Installation sits second because it is the first thing a new visitor does;
+    # the order below follows the journey — what it is, install, configure, ship.
+    - label: Install
+      url: /install/
+    - label: Configuration
+      url: /configuration/
+    - label: Blog
+      url: /blog/
+    - label: Themes
+      url: /templates/
+    - label: Deployment
+      url: /deployment/
+    - label: GitHub
+      url: https://github.com/spagu/ssg

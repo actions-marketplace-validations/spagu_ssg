@@ -9,16 +9,14 @@
     <meta name="description" content="{{.Page.Excerpt | stripHTML}}">
     <link rel="canonical" href="{{getCanonical .Page .Domain}}">
     {{template "seo-head" .}}
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="/css/style.css">
 </head>
 
 <body>
+    <a href="#main-content" class="skip-link">Skip to content</a>
     {{template "navigation.html" .}}
 
-    <main class="main-content">
+    <main id="main-content" class="main-content">
         <article class="page-content">
             <div class="container">
                 <header class="page-header">

@@ -184,7 +184,7 @@ func TestExtractCategory(t *testing.T) {
 		},
 	}
 
-	cat := extractCategory(doc)
+	cat := ExtractCategory(doc)
 
 	if cat.ID != 5 {
 		t.Errorf("cat.ID = %v, want 5", cat.ID)
@@ -217,7 +217,7 @@ func TestExtractMedia(t *testing.T) {
 		},
 	}
 
-	media := extractMedia(doc)
+	media := ExtractMedia(doc)
 
 	if media.ID != 100 {
 		t.Errorf("media.ID = %v, want 100", media.ID)
@@ -236,85 +236,28 @@ func TestExtractMedia(t *testing.T) {
 	}
 }
 
-func TestToMetadata(t *testing.T) {
-	docs := []Document{
-		{
-			Collection: "categories",
-			Key:        "tech",
-			Metadata: map[string]any{
-				"id":          float64(1),
-				"name":        "Technology",
-				"description": "Tech posts",
-				"link":        "/category/tech/",
-				"count":       float64(10),
-				"parent":      float64(0),
-			},
-		},
-		{
-			Collection: "media",
-			Key:        "img-1",
-			Metadata: map[string]any{
-				"id":         float64(100),
-				"media_type": "image",
-				"mime_type":  "image/png",
-				"source_url": "https://example.com/img.png",
-			},
-		},
-		{
-			Collection: "users",
-			Key:        "admin",
-			Metadata: map[string]any{
-				"id":   float64(1),
-				"name": "Admin",
-			},
-		},
-		{
-			Collection: "unknown",
-			Key:        "other",
-			Metadata:   map[string]any{},
-		},
+func TestExtractHelpers(t *testing.T) {
+	cat := ExtractCategory(Document{Key: "tech", Metadata: map[string]any{
+		"id": float64(1), "name": "Technology", "description": "Tech posts",
+		"link": "/category/tech/", "count": float64(10), "parent": float64(0),
+	}})
+	if cat.Name != "Technology" || cat.ID != 1 {
+		t.Errorf("ExtractCategory = %+v", cat)
 	}
 
-	metadata, err := ToMetadata(docs)
-	if err != nil {
-		t.Fatalf("ToMetadata() error = %v", err)
+	media := ExtractMedia(Document{Key: "img-1", Metadata: map[string]any{
+		"id": float64(100), "media_type": "image", "mime_type": "image/png",
+		"source_url": "https://example.com/img.png",
+	}})
+	if media.MediaType != "image" || media.ID != 100 {
+		t.Errorf("ExtractMedia = %+v", media)
 	}
 
-	if len(metadata.Categories) != 1 {
-		t.Errorf("len(Categories) = %v, want 1", len(metadata.Categories))
-	}
-	if metadata.Categories[0].Name != "Technology" {
-		t.Errorf("Categories[0].Name = %v, want Technology", metadata.Categories[0].Name)
-	}
-
-	if len(metadata.Media) != 1 {
-		t.Errorf("len(Media) = %v, want 1", len(metadata.Media))
-	}
-	if metadata.Media[0].MediaType != "image" {
-		t.Errorf("Media[0].MediaType = %v, want image", metadata.Media[0].MediaType)
-	}
-
-	if len(metadata.Users) != 1 {
-		t.Errorf("len(Users) = %v, want 1", len(metadata.Users))
-	}
-	if metadata.Users[0].Name != "Admin" {
-		t.Errorf("Users[0].Name = %v, want Admin", metadata.Users[0].Name)
-	}
-}
-
-func TestToMetadata_EmptyDocs(t *testing.T) {
-	metadata, err := ToMetadata(nil)
-	if err != nil {
-		t.Fatalf("ToMetadata() error = %v", err)
-	}
-	if len(metadata.Categories) != 0 {
-		t.Error("expected no categories")
-	}
-	if len(metadata.Media) != 0 {
-		t.Error("expected no media")
-	}
-	if len(metadata.Users) != 0 {
-		t.Error("expected no users")
+	author := ExtractAuthor(Document{Key: "admin", Metadata: map[string]any{
+		"id": float64(1), "name": "Admin",
+	}})
+	if author.Name != "Admin" || author.ID != 1 {
+		t.Errorf("ExtractAuthor = %+v", author)
 	}
 }
 
@@ -337,7 +280,7 @@ func TestExtractMedia_WithDetails(t *testing.T) {
 		},
 	}
 
-	media := extractMedia(doc)
+	media := ExtractMedia(doc)
 
 	if media.ID != 200 {
 		t.Errorf("media.ID = %v, want 200", media.ID)
@@ -365,7 +308,7 @@ func TestExtractMedia_EmptyMetadata(t *testing.T) {
 		Metadata: map[string]any{},
 	}
 
-	media := extractMedia(doc)
+	media := ExtractMedia(doc)
 
 	if media.Slug != "empty" {
 		t.Errorf("media.Slug = %v, want empty", media.Slug)
@@ -381,7 +324,7 @@ func TestExtractCategory_EmptyMetadata(t *testing.T) {
 		Metadata: map[string]any{},
 	}
 
-	cat := extractCategory(doc)
+	cat := ExtractCategory(doc)
 
 	if cat.Slug != "uncategorized" {
 		t.Errorf("cat.Slug = %v, want uncategorized", cat.Slug)
@@ -397,7 +340,7 @@ func TestExtractAuthor_EmptyMetadata(t *testing.T) {
 		Metadata: map[string]any{},
 	}
 
-	author := extractAuthor(doc)
+	author := ExtractAuthor(doc)
 
 	if author.Slug != "anon" {
 		t.Errorf("author.Slug = %v, want anon", author.Slug)
@@ -525,7 +468,7 @@ func TestExtractAuthor(t *testing.T) {
 		},
 	}
 
-	author := extractAuthor(doc)
+	author := ExtractAuthor(doc)
 
 	if author.ID != 1 {
 		t.Errorf("author.ID = %v, want 1", author.ID)
@@ -537,6 +480,112 @@ func TestExtractAuthor(t *testing.T) {
 
 	if author.Name != "John Doe" {
 		t.Errorf("author.Name = %v, want 'John Doe'", author.Name)
+	}
+}
+
+func TestDocument_ToPage_FlexibleAuthorString(t *testing.T) {
+	doc := Document{
+		Key: "test",
+		Metadata: map[string]any{
+			"author": "Jan Kowalski",
+		},
+	}
+
+	page, err := doc.ToPage()
+	if err != nil {
+		t.Fatalf("ToPage() error = %v", err)
+	}
+
+	if page.Author != 0 {
+		t.Errorf("page.Author = %v, want 0 (unresolved string)", page.Author)
+	}
+	if page.AuthorRaw != "Jan Kowalski" {
+		t.Errorf("page.AuthorRaw = %v, want 'Jan Kowalski'", page.AuthorRaw)
+	}
+}
+
+func TestDocument_ToPage_FlexibleAuthorFloat(t *testing.T) {
+	doc := Document{
+		Key: "test",
+		Metadata: map[string]any{
+			"author": float64(7),
+		},
+	}
+
+	page, err := doc.ToPage()
+	if err != nil {
+		t.Fatalf("ToPage() error = %v", err)
+	}
+
+	if page.Author != 7 {
+		t.Errorf("page.Author = %v, want 7", page.Author)
+	}
+	if page.AuthorRaw != nil {
+		t.Errorf("page.AuthorRaw = %v, want nil", page.AuthorRaw)
+	}
+}
+
+func TestDocument_ToPage_FlexibleCategoriesStrings(t *testing.T) {
+	doc := Document{
+		Key: "test",
+		Metadata: map[string]any{
+			"categories": []interface{}{"Humor", "Technology"},
+		},
+	}
+
+	page, err := doc.ToPage()
+	if err != nil {
+		t.Fatalf("ToPage() error = %v", err)
+	}
+
+	if len(page.Categories) != 0 {
+		t.Errorf("page.Categories = %v, want empty (string values)", page.Categories)
+	}
+	if len(page.CategoriesRaw) != 2 {
+		t.Errorf("page.CategoriesRaw length = %v, want 2", len(page.CategoriesRaw))
+	}
+}
+
+func TestDocument_ToPage_FlexibleCategoriesMixed(t *testing.T) {
+	doc := Document{
+		Key: "test",
+		Metadata: map[string]any{
+			"categories": []interface{}{float64(1), "Humor"},
+		},
+	}
+
+	page, err := doc.ToPage()
+	if err != nil {
+		t.Fatalf("ToPage() error = %v", err)
+	}
+
+	// Mixed values — should store raw for later resolution
+	if len(page.Categories) != 0 {
+		t.Errorf("page.Categories = %v, want empty (mixed values)", page.Categories)
+	}
+	if len(page.CategoriesRaw) != 2 {
+		t.Errorf("page.CategoriesRaw length = %v, want 2", len(page.CategoriesRaw))
+	}
+}
+
+func TestDocument_ToPage_FlexibleCategoriesInts(t *testing.T) {
+	doc := Document{
+		Key: "test",
+		Metadata: map[string]any{
+			"categories": []interface{}{float64(1), float64(5)},
+		},
+	}
+
+	page, err := doc.ToPage()
+	if err != nil {
+		t.Fatalf("ToPage() error = %v", err)
+	}
+
+	if len(page.Categories) != 2 || page.Categories[0] != 1 || page.Categories[1] != 5 {
+		t.Errorf("page.Categories = %v, want [1 5]", page.Categories)
+	}
+	if len(page.CategoriesRaw) != 0 {
+		t.Errorf("page.CategoriesRaw = %v, want empty", page.CategoriesRaw)
 	}
 }
 
@@ -658,3 +707,46 @@ func TestDocument_ToPage_SEOFields(t *testing.T) {
 		t.Errorf("Tags = %v, want [go ssg static]", page.Tags)
 	}
 }
+
+// TestToPageAliasStubs covers #65: per-page alias_stubs frontmatter parses to a
+// pointer-bool (native bool or "true"/"false" string), stays out of Extra, and
+// is left nil when absent so the page inherits the site-wide default.
+func TestToPageAliasStubs(t *testing.T) {
+	cases := []struct {
+		name string
+		val  any
+		want *bool
+	}{
+		{"bool false", false, boolPtr(false)},
+		{"bool true", true, boolPtr(true)},
+		{"string false", "false", boolPtr(false)},
+		{"string true", "true", boolPtr(true)},
+		{"unparsable", "maybe", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			doc := Document{Key: "k", Metadata: map[string]any{"title": "T", "alias_stubs": tc.val}}
+			page, err := doc.ToPage()
+			if err != nil {
+				t.Fatalf("ToPage() error = %v", err)
+			}
+			switch {
+			case tc.want == nil && page.AliasStubs != nil:
+				t.Errorf("AliasStubs = %v, want nil (inherit)", *page.AliasStubs)
+			case tc.want != nil && (page.AliasStubs == nil || *page.AliasStubs != *tc.want):
+				t.Errorf("AliasStubs = %v, want %v", page.AliasStubs, *tc.want)
+			}
+			if _, leaked := page.Extra["alias_stubs"]; leaked {
+				t.Errorf("alias_stubs must not leak into Extra")
+			}
+		})
+	}
+
+	// Absent key → nil (inherit).
+	page, _ := (&Document{Key: "k", Metadata: map[string]any{"title": "T"}}).ToPage()
+	if page.AliasStubs != nil {
+		t.Errorf("absent alias_stubs must stay nil, got %v", *page.AliasStubs)
+	}
+}
+
+func boolPtr(b bool) *bool { return &b }

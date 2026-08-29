@@ -284,9 +284,15 @@ func TestClient_GetByType(t *testing.T) {
 
 func TestClient_WithAPIKey(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		auth := r.Header.Get("Authorization")
-		if auth != "Bearer test-api-key" {
-			t.Errorf("Expected Authorization header 'Bearer test-api-key', got '%s'", auth)
+		// An API key goes in X-API-Key, not in Authorization. MDDB's middleware
+		// validates any bearer value as a JWT and never falls through to the
+		// key path, so the old expectation here was the bug written down as a
+		// requirement (#202).
+		if key := r.Header.Get("X-API-Key"); key != "test-api-key" {
+			t.Errorf("X-API-Key = %q, want the configured key", key)
+		}
+		if auth := r.Header.Get("Authorization"); auth != "" {
+			t.Errorf("an API key must not be sent as a bearer token, got %q", auth)
 		}
 
 		resp := mddbDocument{
@@ -475,8 +481,11 @@ func TestClient_Search_NoTotalCountHeader(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Search() error = %v", err)
 	}
-	if total != 1 {
-		t.Errorf("total = %v, want 1 (fallback to len)", total)
+	// GO-015: a missing header means the total is unknown (0) — the batch
+	// length must NOT be reported as the collection total, or pagination
+	// would silently stop after the first batch.
+	if total != 0 {
+		t.Errorf("total = %v, want 0 (unknown without X-Total-Count)", total)
 	}
 	if len(docs) != 1 {
 		t.Errorf("len(docs) = %v, want 1", len(docs))
@@ -719,9 +728,11 @@ func TestClient_Checksum_InvalidJSON(t *testing.T) {
 
 func TestClient_DoRequest_NoAPIKey(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		authHeader := r.Header.Get("Authorization")
-		if authHeader != "" {
+		if authHeader := r.Header.Get("Authorization"); authHeader != "" {
 			t.Errorf("expected no Authorization header, got %q", authHeader)
+		}
+		if key := r.Header.Get("X-API-Key"); key != "" {
+			t.Errorf("expected no X-API-Key header, got %q", key)
 		}
 		w.WriteHeader(http.StatusOK)
 	}))

@@ -1,6 +1,6 @@
 .\" SSG - Static Site Generator
 .\" Man page for ssg(1)
-.TH SSG 1 "2026-03-31" "1.7.4" "SSG Manual"
+.TH SSG 1 "2026-07-15" "1.8.52" "SSG Manual"
 .SH NAME
 ssg \- fast static site generator written in Go
 .SH SYNOPSIS
@@ -18,6 +18,42 @@ ssg \- fast static site generator written in Go
 .B \-\-mddb\-collection\fR=\fINAME
 .I template domain
 .RI [ options ]
+.br
+.B ssg import redirects
+.RI { file | \-\-from\-json\ file }
+.br
+.B ssg new worker
+.I template
+.br
+.B ssg init
+.RI [ source-name ]
+.RI [ \-\-domain\ example.com ]
+.br
+.B ssg cache
+.RB { stats | clean | gc }
+.RB [ \-\-namespace=\fINAME\fR ]
+.RB [ \-\-dry ]
+.br
+.B ssg mddb push-theme
+.RB [ \-\-dry ]
+.RB [ \-\-lang=\fICODE\fR ]
+.RB [ \-\-no\-validate ]
+.br
+.B ssg self-update-check
+.br
+.B ssg migrate
+.I provider url
+.RB [ \-\-content\ \fIa,b,c\fR ]
+.RB [ \-\-watch ]
+.RB [ \-\-http ]
+.br
+.B ssg repair
+.RI [ path ...]
+.RB [ \-\-fix ]
+.br
+.B ssg daemon
+.RB [ \-\-config\ \fIFILE\fR ]
+.RB [ \-\-once ]
 .SH DESCRIPTION
 .B ssg
 is a fast and flexible static site generator that converts Markdown content
@@ -38,7 +74,153 @@ MDDB content source.
 Template name (inside templates-dir).
 .TP
 .I domain
-Target domain for the generated site (e.g., example.com).
+Target domain for the generated site — the host alone, e.g. \fBexample.com\fR.
+Canonical URLs, \fBog:url\fR, the sitemap and the JSON\-LD \fB@id\fR are built as
+\fBhttps://<domain>/\fR..., so a value carrying \fBhttps://\fR or a trailing slash
+is stripped and reported rather than published into all of them.
+.SH SUBCOMMANDS
+Dispatched only on a known verb+noun pair in the first two arguments, so a
+source directory named \fInew\fR or \fIimport\fR still builds normally.
+.TP
+.B ssg import redirects \fR{\fIfile\fR | \fB\-\-from\-json\fR \fIfile\fR}
+Convert a Next.js \fBredirects()\fR rule set into a \fBredirects:\fR YAML block on
+stdout. \fB\-\-from\-json\fR reads a JSON dump of the array (reliable); a bare
+\fIfile\fR argument parses a \fBnext.config.(js|ts|mjs)\fR heuristically. Entries
+that cannot be translated (conditional \fBhas\fR/\fBmissing\fR, template-literal
+paths, regex-constrained params) are reported on stderr, never dropped silently.
+.TP
+.B ssg new worker \fItemplate\fR
+Scaffold a Cloudflare Pages Functions template into \fB./workers/\fItemplate\fR
+and print the \fBworker:\fR config block. Templates: \fBcontact-form\fR,
+\fBstripe-checkout\fR, \fBdynamic-price\fR, \fBconversions-proxy\fR.
+.TP
+.B ssg self-update-check
+Report whether a newer release exists. Prints the running version and how this
+binary was installed, and — when a newer release is out — the upgrade command
+for that install: \fBsnap refresh\fR, \fBbrew upgrade\fR, \fBdocker pull\fR,
+\fBapt\fR, \fBdnf\fR, or the releases page for a downloaded binary. It never
+updates anything itself, and it runs only when invoked \(em a build never
+contacts the network. Exits 0 whether or not an update exists; exits 1 only when
+the check could not be made.
+.TP
+.B ssg mddb push-theme \fR[\fB\-\-dry\fR] [\fB\-\-lang=\fICODE\fR] [\fB\-\-no\-validate\fR]
+Upsert every template and static asset into the MDDB collection named by
+\fBmcp.search.mddb_collection\fR, keyed by project-relative path, and delete
+documents whose file no longer exists. This is what lets \fBdesigner_find\fR
+answer a question phrased as a sentence; without it the find tools scan the
+project locally, which needs no setup. \fB\-\-dry\fR reports without writing. Each document is checked against the
+collection before it is stored (MDDB 2.12.0+), so lost structured frontmatter is
+reported while the source is still in hand rather than at the next render;
+warnings never fail the push. \fB\-\-no\-validate\fR (or \fBmcp.search.mddb_validate:
+false\fR) skips that round trip for a large batch, and a server without the
+endpoint is detected once and skipped silently.
+.TP
+.B ssg cache \fR{\fBstats\fR|\fBclean\fR|\fBgc\fR} [\fB\-\-namespace=\fINAME\fR] [\fB\-\-dry\fR]
+Operate on every SSG disk cache under \fB.ssg-cache/\fR (images,
+external-sources, ai). \fBstats\fR prints entries and size per namespace;
+\fBclean\fR removes a namespace (or all); \fBgc\fR reclaims expired
+external-source entries (image GC needs the build manifest — use
+\fB\-\-images\-gc\fR on a build). The pre-1.8.27 \fB.ai-cache\fR root is shown
+as \fBai (legacy)\fR while it exists.
+.TP
+.B ssg migrate \fIprovider\fR \fIurl\fR [\fB\-\-content\fR \fIa,b,c\fR] [\fB\-\-watch\fR] [\fB\-\-http\fR] [\fB\-\-host\fR \fIADDR\fR] [\fB\-\-port\fR \fIPORT\fR] [\fB\-\-all\-media\fR] [\fB\-\-engine\fR \fIPATH\fR] [\fB\-\-source\fR \fINAME\fR]
+Migrate a live site into a ready-to-build SSG project. The built-in
+\fBwordpress\fR provider orchestrates the optional \fBwpexporter\fR tool
+(a missing binary prints install instructions), scaffolds
+the project when none exists and builds after the pull. \fB\-\-content\fR
+selects kinds (\fBpages\fR, \fBposts\fR, \fBmedia\fR, \fBcustom\fR — a theme's own
+post types — \fBcomments\fR, \fBtags\fR, \fBusers\fR, \fBmenus\fR, \fBproducts\fR),
+and naming it at all opts every unlisted kind out; comments land in
+\fBcontent/<source>/comments.json\fR addressed by page URL (wpexporter 1.8.5+);
+only the media the
+content references is downloaded unless \fB\-\-all\-media\fR asks for the whole
+library; with \fB\-\-watch \-\-http\fR the server starts
+first and the site fills up live in the browser. \fBssg migrate \-\-list\fR
+names the providers. The verb is reserved: a source directory called
+\fImigrate\fR builds via \fB\-\-source=migrate\fR.
+.IP
+Menus and site settings are gated behind \fBedit_theme_options\fR, so an
+anonymous export arrives with no navigation: pass
+\fB\-\-auth\-user\fR/\fB\-\-auth\-pass\fR or \fB\-\-auth\-token\fR
+(an application password, never the account's own). Credentials go to the
+engine and are never written to the config. The theme's own post types are
+selected with \fB\-\-custom\-types\fR \fIslug,slug\fR or skipped with
+\fB\-\-no\-custom\-types\fR. Menus reach templates as
+\fB.Site.Menus.\fIlocation\fR.
+.IP
+The engine that runs is the newest one ssg can reach, and the report names it.
+\fB\-\-engine\fR \fIPATH\fR (or \fBSSG_WPEXPORTER\fR) chooses one outright; a
+named binary that cannot be run is an error, never a silent fall back. Otherwise
+ssg takes the highest version among \fBPATH\fR and, inside the snap, the bundled
+copy together with \fB~/go/bin\fR, \fB~/.local/bin\fR and \fB~/bin\fR — strict
+confinement can execute a real binary under your home directory, so
+\fBgo install .../cmd/wpexporter@latest\fR is picked up without waiting for the
+next snap rebuild. The \fBwpexporter snap\fR is not usable from a snap-installed
+ssg (a snap cannot execute another snap) and is reported as skipped.
+.TP
+.B ssg repair \fR[\fIpath\fR...] [\fB\-\-fix\fR] [\fB\-\-quiet\fR]
+Find source Markdown that renders as literal text instead of as the markup it
+is — the shape a page-builder export (Elementor, WPBakery, Divi) leaves behind,
+where the visitor reads \fB</div>\fR in monospace and the build reports success.
+Two ways Markdown swallows markup are found: it is \fBindented\fR four columns or
+more, which CommonMark reads as a code block, or it is \fBfenced\fR. Without
+\fB\-\-fix\fR it is a dry run that reports file, line and cause and exits 1 on
+findings, so CI can gate on it; \fB\-\-fix\fR dedents the indented blocks and
+removes the swallowing fence markers, in place. With no \fIpath\fR it scans the
+configured \fBcontent_dir\fR. The same defects are reported during every build by
+\fBcheck_markup\fR, which is on by default.
+.IP
+A fence an author meant is never touched. Only two shapes are reported: one that
+never closes before the end of the document, whose content carries markup — after
+which nothing renders correctly, whatever it holds — and a fence with \fBno
+language\fR holding markup in a document that carries raw markup outside it as
+well. A deliberate sample is written as \fB```html\fR and does not sit in a page
+otherwise made of divs. Front matter and list continuations are never touched.
+.TP
+.B ssg mcp \fR[\fB\-\-role\fR=\fIROLE\fR] [\fB\-\-listen\fR=\fIADDR\fR] [\fB\-\-token\fR=\fISECRET\fR] [\fB\-\-no\-stdio\fR] [\fB\-\-watch\fR]
+Model Context Protocol development server for AI-assisted editing. Speaks
+\fBstdio\fR by default, so an assistant launches it. \fB\-\-listen\fR additionally
+serves the MCP endpoint at \fBhttp://\fIADDR\fB/mcp\fR over Streamable HTTP, the
+current network transport; both bindings carry identical protocol semantics and
+may run at once. A bare port means localhost.
+.IP
+The server writes files and runs git, so an endpoint a web page can reach is a
+remote code execution path. The \fBOrigin\fR header is validated (\fB403\fR unless
+listed with \fB\-\-allow\-origin\fR; a request with none is a non-browser client and
+is allowed), binding is loopback unless told otherwise, and \fBevery\fR endpoint
+carries a bearer token \(em supplied with \fB\-\-token\fR, read from
+\fB$SSG_MCP_TOKEN\fR when the flag is absent, or minted and printed when neither
+is set. Prefer the variable: a command line is visible in \fBps\fR and in shell
+history. \fBGET\fR and \fBDELETE\fR answer \fB405\fR.
+.IP
+\fB\-\-watch\fR additionally polls the filesystem, so edits made outside MCP rebuild
+and reload the \fB\-\-http\fR preview as well; one process then serves the preview,
+serves the MCP endpoint and watches the tree, with every rebuild serialised. See
+\fBdocs/MCP.md\fR and \fBdocs/MCP_TRANSPORTS.md\fR.
+.TP
+.B ssg daemon \fR[\fB\-\-config\fR \fIFILE\fR] [\fB\-\-once\fR] [\fB\-\-quiet\fR]
+Watch several projects from one process. Reads \fB.ssg_projects\fR (YAML,
+override with \fB\-\-config\fR), which lists each project's directory and
+optionally its own config file, port, host and extra flags; a port implies a
+server, and \fBdisabled: true\fR keeps a project in the file without running it.
+Each project runs an ordinary \fBssg \-\-watch\fR in its own directory, with its
+output tagged by project name.
+.IP
+Editing the projects file reloads the fleet in place: a project whose settings
+did not change keeps running and keeps its port, and only what changed is
+restarted. \fBSIGHUP\fR reloads on demand; \fBSIGINT\fR and \fBSIGTERM\fR stop
+everything. A projects file that no longer parses leaves the running projects
+alone rather than stopping them over a typo. A project that exits by itself is
+restarted; one that will not start is named and skipped so the rest come up.
+\fB\-\-once\fR prints what would run and exits, which checks a projects file in
+CI. See \fBdocs/DAEMON.md\fR.
+.TP
+.B ssg init \fR[\fIsource-name\fR] [\fB\-\-domain\fR \fIexample.com\fR]
+Scaffold a ready-to-build project in the current directory — config, a content
+source tree with a sample page and post, a \fBstatic/\fR folder and a
+\fB.gitignore\fR. Existing files are never overwritten: each is kept and
+reported, so it is safe to run in a populated directory. \fIsource-name\fR
+defaults to \fBsite\fR.
 .SH OPTIONS
 .SS Configuration
 .TP
@@ -49,11 +231,11 @@ current directory.
 .SS Template Engine
 .TP
 .BR \-\-engine =\fIENGINE
-Template engine to use. Available engines:
-.BR go " (default),"
-.BR pongo2 " (Jinja2/Django-like),"
-.BR mustache ","
-.BR handlebars .
+Template engine to use:
+.BR go
+(default),
+.BR pongo2 ", " mustache " or " handlebars .
+Non-Go engines render the theme's own templates verbatim in that engine's syntax.
 .TP
 .BR \-\-online\-theme =\fIURL
 Download theme from a URL. Supports GitHub, GitLab repositories, or direct
@@ -92,19 +274,105 @@ Polling interval for MDDB watch mode in seconds (default: 30).
 .B \-\-http
 Start the built-in HTTP server after generating the site.
 .TP
+.BR \-\-host =\fIADDR
+Dev server bind address (default: \fB127.0.0.1\fR). Use \fB0.0.0.0\fR to expose
+the server on all network interfaces.
+.TP
 .BR \-\-port =\fIPORT
-HTTP server port (default: 8888).
+HTTP server port (default: 8888). The port is a preference, not a requirement:
+when it is already in use the server walks forward (8889, 8890, ...) for up to
+64 ports and prints the one it took. \fB\-\-port=0\fR asks the kernel for any
+free port. A failure a different port cannot fix — an unusable \fB\-\-host\fR,
+a privileged port, exhausted descriptors — still stops the server immediately.
 .TP
 .B \-\-watch
 Watch content and template directories for file changes and rebuild
 automatically.
 .TP
+.B \-\-wrangler
+In watch mode, launch the Cloudflare Wrangler emulator in the background (\fBnpx wrangler dev\fR). Automatically sets \fB\-\-watch\fR.
+.TP
+.B \-\-workerd
+In watch mode, launch the Cloudflare Workerd emulator in the background (\fBworkerd serve\fR). Automatically sets \fB\-\-watch\fR.
+.TP
+.BR \-\-watch\-runner =\fICMD
+Spawns a custom background runner or command during watch mode. Automatically sets \fB\-\-watch\fR.
+.TP
+.BR \-\-wrangler\-config =\fIFILE
+Point Wrangler at a config file kept outside the project (passed as
+\fB\-\-config \fIFILE\fR to \fBwrangler dev\fR). Implies \fB\-\-wrangler\fR and
+\fB\-\-watch\fR, in any flag order.
+.TP
+.BR \-\-workerd\-config =\fIFILE
+Point Workerd at a config file kept outside the project (passed as the
+positional argument to \fBworkerd serve\fR). Implies \fB\-\-workerd\fR and
+\fB\-\-watch\fR, in any flag order.
+.TP
+.BR \-\-wrangler\-dir =\fIDIR
+Start Wrangler in \fIDIR\fR rather than the current directory — the monorepo
+case, where the Worker lives in a subdirectory (e.g. \fBbooking/apps/api\fR)
+while content and templates stay at the repo root. Implies \fB\-\-wrangler\fR
+and \fB\-\-watch\fR. A relative \fB\-\-wrangler\-config\fR is resolved against
+ssg's own working directory first, so both may be combined.
+.TP
+.BR \-\-workerd\-dir =\fIDIR
+Start Workerd in \fIDIR\fR. Implies \fB\-\-workerd\fR and \fB\-\-watch\fR.
+.TP
+.BR \-\-watch\-runner\-config =\fIFILE
+Runner\-agnostic form of the \fB\-\-*\-config\fR options above: sets the
+runner's config file without selecting a runner. Custom runners receive it as
+\fB\-\-config \fIFILE\fR. A missing file is warned about, not fatal.
+.TP
+.BR \-\-watch\-runner\-dir =\fIDIR
+Runner\-agnostic form of the \fB\-\-*\-dir\fR options above. A directory that
+does not exist aborts the runner; the build and file watch continue.
+.TP
 .B \-\-clean
 Remove the output directory before building.
+.SS Public Server Hardening (TLS/HTTP2/HTTP3)
+All options below are opt-in. Enabling TLS negotiates HTTP/2 automatically (ALPN).
+Security headers and cache-control are applied by the server automatically.
+.TP
+.BR \-\-tls\-cert =\fIFILE
+PEM certificate for the built-in server. Combined with \fB\-\-tls\-key\fR this
+serves HTTPS and enables HTTP/2.
+.TP
+.BR \-\-tls\-key =\fIFILE
+PEM private key paired with \fB\-\-tls\-cert\fR.
+.TP
+.B \-\-tls\-auto
+Obtain certificates automatically from Let's Encrypt (\fBautocert\fR). Requires
+\fB\-\-tls\-domain\fR and binding port 443.
+.TP
+.BR \-\-tls\-domain =\fIHOST
+Domain(s) authorized for automatic certificates (comma-separated).
+.TP
+.B \-\-http3
+Serve HTTP/3 (QUIC) alongside HTTP/2 and advertise it via \fBAlt\-Svc\fR. Requires TLS.
+.TP
+.B \-\-gzip
+gzip-compress responses when the client sends \fBAccept\-Encoding: gzip\fR.
+.TP
+.BR \-\-max\-conns =\fIN
+Cap the number of simultaneous connections (\fB0\fR = unlimited).
+.TP
+.BR \-\-mem\-limit =\fISIZE
+Runtime GC soft memory target, e.g. \fB512MiB\fR, \fB1GiB\fR.
 .SS Output Control
 .TP
 .B \-\-sitemap\-off
 Disable sitemap.xml generation.
+.PP
+Pages and posts are automatically excluded from sitemap.xml when any of the
+following frontmatter conditions are met:
+.RS
+.IP \(bu 2
+\fBrobots\fR contains \fBnoindex\fR (e.g. \fBrobots: "noindex, follow"\fR)
+.IP \(bu 2
+\fBlayout: "redirect"\fR
+.IP \(bu 2
+\fBsitemap: "no"\fR
+.RE
 .TP
 .B \-\-robots\-off
 Disable robots.txt generation.
@@ -158,7 +426,150 @@ Minify only CSS output.
 Minify only JS output.
 .TP
 .B \-\-sourcemap
-Include source maps in output.
+Emit v3 source maps (\fB*.js.map\fR / \fB*.css.map\fR) for minified JS/CSS.
+Minification becomes line-preserving so the mappings are exact and the original
+source is embedded.
+.TP
+.B \-\-fingerprint
+Content-hash CSS/JS to \fBname.<hash8>.ext\fR, write \fBassets-manifest.json\fR and
+rewrite references in HTML and CSS (\fBurl()\fR/\fB@import\fR). Deterministic across
+builds. Runs as the terminal asset step.
+.TP
+.B \-\-scss
+Compile \fB*.scss\fR files in the output to \fB*.css\fR via the optional
+\fBdart-sass\fR CLI before bundling/minify (partials \fB_*.scss\fR are only
+resolved through @use/@import; all .scss sources are removed from the output).
+A missing binary skips the step with a warning.
+.TP
+.BR \-\-sass\-binary =\fIPATH
+Explicit dart-sass binary; default is \fBsass\fR resolved from PATH.
+.TP
+.BR \-\-paginate =\fIN
+Posts per index page; adds \fB/page/N/\fR pages and a \fB.Pager\fR context. 0 disables
+pagination (default).
+.TP
+.B \-\-lastmod\-from\-git
+Derive sitemap \fB<lastmod>\fR from each source file's last git commit (fallback:
+\fBmodified\fR/\fBdate\fR).
+.TP
+.BR \-\-permalink\-post =\fIPAT
+Post URL pattern with tokens \fB:year :month :day :slug :category\fR
+(e.g. \fB/:year/:month/:slug/\fR).
+.TP
+.BR \-\-permalink\-page =\fIPAT
+Page URL pattern (same tokens).
+.SS Authoring
+.TP
+.B \-\-math
+Opt-in math: detect \fB$$...$$\fR / \fB```math\fR blocks and inject KaTeX only on
+pages that use it.
+.TP
+.B \-\-sanitize\-html
+Sanitize raw HTML embedded in markdown through the bluemonday UGC policy
+(strips \fB<script>\fR and other unsafe markup).
+.TP
+.BR \-\-timezone =\fIZONE
+Render content dates (permalink \fB:year/:month/:day\fR tokens and the
+\fBDate\fR/\fBModified\fR template context) in the given IANA zone
+(e.g. \fBEurope/Warsaw\fR). Per-language overrides via
+\fBlanguage_timezones:\fR in the config file. Empty = no conversion.
+.TP
+.B \-\-highlight
+Syntax-highlight code blocks via Chroma.
+.TP
+.BR \-\-highlight\-style =\fINAME
+Chroma style (default: \fBgithub\fR).
+.TP
+.B \-\-toc
+Expose \fB.TOC\fR to templates; the \fB[toc]\fR marker in content always expands.
+.TP
+.BR \-\-toc\-depth =\fIN
+Maximum heading level included in the TOC (default: 3).
+.SS Feeds, SEO and Search
+.TP
+.B \-\-feed
+Generate an Atom \fBfeed.xml\fR at the root and per category/tag.
+.TP
+.BR \-\-feed\-items =\fIN
+Maximum items per feed (default: 20).
+.TP
+.BR \-\-check\-links "[=" \fIstrict ]
+Validate internal links against the output; \fBstrict\fR fails the build on a dead link.
+.TP
+.B posts_page \fR(configuration file only)
+Where the generated post listing goes, e.g. \fBposts_page: blog\fR publishes it
+at \fB/blog/\fR. A content page whose URL resolves to \fB/\fR becomes the site's
+front page; without \fBposts_page\fR the listing then has nowhere to go and is
+not generated, which the build reports.
+.TP
+.BR \-\-check\-markup =\fIwarn|strict|off\fR ", " \-\-no\-check\-markup
+Report source Markdown whose markup is indented four columns or more, which
+renders as a literal code block instead of as markup. On by default
+(\fBwarn\fR); \fBstrict\fR fails the build, \fBoff\fR (or
+\fB\-\-no\-check\-markup\fR) disables it. Fix the content with
+.BR "ssg repair \-\-fix" .
+.TP
+.BR \-\-content\-source =\fIDIR
+Merge an extra Markdown root into the site, in addition to (or instead of) the
+positional \fIsource\fR. Repeatable. Loaded recursively as pages; per\-source
+\fBtype\fR and \fBcategory\fR need \fBcontent_sources:\fR in the configuration
+file. With at least one extra source, \fIsource\fR becomes optional.
+.TP
+.B \-\-auto\-excerpt
+Derive a missing excerpt from the content's opening paragraph, so listings,
+feeds and meta descriptions are not blank for documents written without a
+\fB## Excerpt\fR section. Off by default.
+.TP
+.BR \-\-shortcode\-errors =\fIMODE
+What a shortcode whose template fails to render leaves in the page:
+.RS
+.TP
+.B drop
+Default. Print a warning and remove the shortcode from the page.
+.TP
+.B keep
+Print a warning and leave the shortcode's raw source (\fB{{promo}}\fR,
+\fB[promo a="b"]\fR) in the page, so the failure is visible instead of shipping
+as a silently missing block.
+.TP
+.B strict
+As \fBkeep\fR, and fail the build once rendering finishes, listing every
+shortcode that failed. Recommended in CI.
+.RE
+.TP
+.B \-\-search\-index
+Emit \fBsearch-index.json\fR for client-side search.
+.TP
+.B \-\-webmcp
+Declare the site's own tools to an AI agent running in the visitor's browser,
+via the WebMCP \fBnavigator.modelContext\fR API: search, list by tag, fetch a
+document, navigate. The tools answer from \fBsearch-index.json\fR, so this
+implies \fB\-\-search\-index\fR. The script feature-detects and does nothing
+where the API is absent. Distinct from \fBssg mcp\fR, which serves the author's
+assistant rather than the visitor's.
+.TP
+.BR \-\-outputs =\fILIST
+Per-page output formats, e.g. \fBhtml,json\fR (json writes index.json).
+.TP
+.B \-\-seo
+Opt in to generator-level OpenGraph/Twitter/JSON-LD injection into pages that lack
+their own tags (non-destructive). Off by default since v1.8.2; the legacy
+\fB\-\-seo\-off\fR flag and \fBseo_off\fR config key force it off and print a
+deprecation warning.
+.SS Internationalization
+.TP
+.BR \-\-languages =\fILIST
+Comma-separated languages (e.g. \fBpl,en\fR); non-default languages are emitted under
+\fB/<lang>/\fR with \fBhreflang\fR alternates.
+.TP
+.BR \-\-default\-language =\fILANG
+The default language, which is not prefixed in URLs.
+.IP
+Config-only \fBlanguage_sections:\fR assigns a language to a whole content
+section \(em keyed by content directory, longest prefix wins, \fBhome\fR for the
+site root. A page's own \fBlang:\fR still wins, and a section falls back to
+\fBdefault_language\fR. Written for migrated sites, where the language was a
+property of the directory and nothing a page carried.
 .SS Image Processing
 .TP
 .B \-\-webp
@@ -167,12 +578,73 @@ Convert images to WebP format. Requires \fBcwebp\fR to be installed.
 .BR \-\-webp\-quality =\fIN
 WebP compression quality, 1\-100 (default: 60).
 .TP
+.B \-\-webp\-keep\-original
+Emit each \fB.webp\fR next to its original instead of replacing it. Safe for
+themes with hardcoded \fB.png\fR/\fB.jpg\fR references (favicons, logos,
+og:image). The default replaces originals (historical behaviour).
+.TP
 .B \-\-reconvert\-images
 Force reconversion of images even if WebP versions already exist.
+.TP
+.BR \-\-image\-sizes =\fIA,B,C
+Responsive widths in px (e.g. \fB480,960,1600\fR): emit WebP variants and
+\fB<img srcset>\fR (no upscaling).
+.TP
+.BR \-\-image\-sizes\-attr =\fIVAL
+Value of the generated \fBsizes\fR attribute (default: \fB100vw\fR).
+.TP
+.B \-\-images\-gc
+After the build, delete image-cache entries the site no longer references.
+.TP
+.B \-\-images\-gc\-dry
+Report what \fB\-\-images\-gc\fR would delete (file count and bytes) without
+deleting anything.
 .SS Deployment
 .TP
 .B \-\-zip
-Create a ZIP deployment package for Cloudflare Pages.
+Create a ZIP archive of the output tree (Cloudflare Pages ready).
+.TP
+.B \-\-targz
+Create a gzip-compressed tarball (\fB.tar.gz\fR) of the output tree.
+.TP
+.B \-\-tarxz
+Create an xz-compressed tarball (\fB.tar.xz\fR) of the output tree.
+.SS Native Publish
+Deploy runs after the build (and after \fB\-\-webp\fR/\fB\-\-zip\fR). All secrets are
+read from the environment, never the config file.
+.TP
+.BR \-\-deploy =\fIPROVIDER
+Publish the output tree to \fIcloudflare\fR, \fIgithub-pages\fR, \fInetlify\fR,
+\fIvercel\fR, \fIftp\fR or \fIsftp\fR.
+.TP
+.BR \-\-deploy\-project =\fINAME
+Pages/site/project name (cloudflare, netlify, vercel).
+.TP
+.BR \-\-deploy\-branch =\fIBRANCH
+Target branch for cloudflare / github-pages (default \fBgh-pages\fR).
+.TP
+.BR \-\-deploy\-target =\fIURL
+An \fBftp://\fR/\fBsftp://\fR URL, or a git remote for github-pages.
+.PP
+Required environment per provider: \fBcloudflare\fR — CLOUDFLARE_API_TOKEN,
+CLOUDFLARE_ACCOUNT_ID; \fBgithub-pages\fR — GITHUB_TOKEN (https) or an SSH key;
+\fBnetlify\fR — NETLIFY_AUTH_TOKEN (+ NETLIFY_SITE_ID); \fBvercel\fR — VERCEL_TOKEN,
+VERCEL_ORG_ID; \fBftp\fR — FTP_USERNAME, FTP_PASSWORD; \fBsftp\fR — SSH_USERNAME,
+SSH_PASSWORD or SSH_KEY_FILE (the host must be present in known_hosts).
+.PP
+When a \fBcloudflare\fR deploy target's output contains a \fBfunctions/\fR
+directory (see \fBworker:\fR below), \fBssg\fR runs \fBnpx wrangler pages deploy\fR
+so Cloudflare builds the Pages Functions; a prebuilt \fB_worker.js\fR
+(\fBworker.mode: worker\fR) uses the dependency-free Direct Upload path instead.
+.SS Redirects, Headers and Workers
+Configured in the config file only (no CLI flags). \fBredirects:\fR generates a
+real Cloudflare/Netlify \fB_redirects\fR file — exact paths, \fB/old/*\fR splats
+with \fB:splat\fR, statuses 301/302/307/308/410; frontmatter \fBaliases:\fR become
+301s and exact chains are flattened to one hop. \fBalias_stubs: false\fR drops the
+meta-refresh stub pages. \fBheaders:\fR overrides or extends the generated
+\fB_headers\fR blocks per path pattern. \fBworker:\fR wires a Cloudflare Pages
+Functions directory (or a prebuilt \fB_worker.js\fR) into the output and generates
+\fB_routes.json\fR. See \fBssg\fR(1) CONFIGURATION FILE and the docs.
 .SS Paths
 .TP
 .BR \-\-content\-dir =\fIPATH
@@ -183,6 +655,15 @@ Templates directory (default: \fBtemplates\fR).
 .TP
 .BR \-\-output\-dir =\fIPATH
 Output directory (default: \fBoutput\fR).
+.TP
+.BR \-\-static\-dir =\fIPATH
+Static passthrough directory (default: \fBstatic\fR). Every file and
+subdirectory it contains is copied verbatim into the output directory during
+generation. A missing directory is a no-op.
+.TP
+.BR \-\-data\-dir =\fIPATH
+Data files directory (default: \fBdata\fR). \fB*.yaml\fR/\fB*.json\fR files are loaded
+into the \fB.Data.*\fR template namespace, nested by subdirectory.
 .SS Other
 .TP
 .BR \-\-quiet ", " \-q
@@ -211,12 +692,38 @@ pretty_html: true
 post_url_format: "slug"
 engine: "go"
 
+shortcode_brackets: true
 shortcodes:
   - name: "promo"
     template: "shortcodes/banner.html"
     title: "Special Offer"
     text: "Get 50% off!"
     url: "https://example.com"
+
+variables:
+  gtm: "GTM-XXXXXXX"
+  analytics_id: "$GA_ID"
+  api:
+    endpoint: "https://api.example.com"
+
+pages_path: "docs"
+posts_path: "articles"
+rewrite_md_links: true
+preserve_slug_case: false
+
+redirects:
+  - from: "/old-pricing"
+    to: "/pricing"
+  - from: "/blog/*"
+    to: "/articles/:splat"
+    status: 301
+headers:
+  /api/*:
+    Access-Control-Allow-Origin: "*"
+worker:
+  dir: "workers/stripe-checkout"
+  mode: "functions"
+  routes_include: ["/api/*"]
 
 mddb:
   enabled: true
@@ -228,23 +735,115 @@ mddb:
   watch_interval: 30
 .fi
 .RE
+.SH CONTENT PATHS
+By default SSG reads static pages from the \fBpages/\fR subdirectory and blog
+posts from the \fBposts/\fR subdirectory inside the content source. Both can be
+overridden:
+.TP
+.B pages_path
+Subdirectory name for static pages (default: \fBpages\fR).
+Example: \fBpages_path: "docs"\fR reads from \fBcontent/{source}/docs/\fR.
+.TP
+.B posts_path
+Subdirectory name for blog posts (default: \fBposts\fR).
+Example: \fBposts_path: "articles"\fR reads from \fBcontent/{source}/articles/\fR.
+.SH SLUG HANDLING
+Slugs are read from the \fBslug:\fR field in frontmatter. When no slug is set,
+it is automatically derived from the source filename (without the \fB.md\fR
+extension).
+.PP
+By default slugs are lowercased (\fBAPI.md\fR → \fB/api/\fR). Set
+\fBpreserve_slug_case: true\fR to keep the original casing (\fBAPI.md\fR →
+\fB/API/\fR).
+.SH MD LINK REWRITING
+When \fBrewrite_md_links: true\fR is set, relative \fB.md\fR hrefs in content
+are rewritten to their final output URLs during the build.
+.PP
+For example \fBhref="AUTHENTICATION.md"\fR becomes
+\fBhref="/authentication/"\fR (or whatever the slug resolves to).
+.PP
+Relative path prefixes (\fB./\fR, \fB../dir/\fR) are stripped — only the base
+filename is matched. Unknown \fB.md\fR links are left untouched. The feature is
+opt-in to avoid breaking sites that intentionally serve raw \fB.md\fR files.
+.SH EXTERNAL SOURCES
+The config-only \fBexternal_sources\fR block feeds templates from local files
+(YAML/JSON/TOML/CSV/XML), remote HTTP APIs (hardened client, shared disk
+cache with TTL/stale-if-error/offline), read-only SQL queries
+(MySQL/MariaDB/PostgreSQL/SQLite) and CMS imports (WordPress, Drupal,
+Movable Type; \fBmode: content\fR merges them into the site). Data is exposed
+as \fB{{.ExternalData.<name>}}\fR and via \fBgetExternal\fR; secrets come only
+from environment variables. See \fBdocs/EXTERNAL_SOURCES.md\fR.
+.TP
+.B \-\-offline
+Serve external HTTP sources from the disk cache only (no network).
+.TP
+.B \-\-refresh\-external\-sources
+Ignore fresh cache entries and re-fetch external sources.
+.TP
+.B \-\-clear\-external\-cache
+Wipe the external-source disk cache before the build.
+.TP
+.BR \-\-external\-source =\fINAME
+Narrow \fB\-\-refresh\-external\-sources\fR to one source.
+.SH SERVER ACCESS CONTROL
+Config-only options harden the built-in server: \fBserver_auth\fR (\fBbasic\fR
+with \fBserver_users\fR entries of the form \fBlogin:$PASS_ENV\fR, or
+\fBjwt\fR with an HS256 \fBjwt_secret\fR from the environment),
+\fBip_allowlist\fR/\fBip_blocklist\fR (IPs or CIDRs), and a per-IP token-bucket
+rate limiter (\fBrate_limit\fR requests/second, \fBrate_burst\fR bucket size).
+The chain runs blocklist, allowlist, rate limiter, then auth. SSO and LDAP are
+deliberately not implemented.
+.SH TAXONOMIES
+\fBcategory\fR, \fBtag\fR and \fBseries\fR are built in; additional dynamic
+taxonomies are declared in the config file under the \fBtaxonomies\fR key
+(config-only, no CLI flag). Each taxonomy gets a term index (e.g.
+\fB/technology/\fR) and per-term archives (\fB/technology/go/\fR) with
+template fallback chains, optional per-term Atom feeds, sitemap entries and
+term metadata from \fBdata/taxonomies/<name>.yaml\fR. Frontmatter sources are
+merged by priority: the \fBtaxonomies:\fR map, then the configured field, then
+the legacy fields. See \fBdocs/TAXONOMIES.md\fR for the full reference.
+.SH CONFIG VARIABLES
+Define custom variables in \fB.ssg.yaml\fR under the \fBvariables\fR key. They are
+available in every template context as \fB{{.Vars.key}}\fR and exported as
+environment variables with the \fBSSG_\fR prefix at build time.
+.PP
+Nested maps are supported: \fB{{.Vars.api.endpoint}}\fR is exported as
+\fBSSG_API_ENDPOINT\fR.
+.PP
+Values starting with \fB$\fR are resolved from the current OS environment
+(e.g. \fB"$GTM_CODE"\fR reads the \fBGTM_CODE\fR env var). If the env var is not
+set the literal value is kept unchanged.
+.PP
+Example:
+.RS
+.nf
+variables:
+  gtm: "GTM-XXXXXXX"        # {{.Vars.gtm}}, exported as SSG_GTM
+  analytics_id: "$GA_ID"    # resolved from $GA_ID at build time
+  api:
+    endpoint: "https://api.example.com"  # SSG_API_ENDPOINT
+.fi
+.RE
 .SH TEMPLATE ENGINES
-SSG supports four template engines:
+SSG supports rendering templates with four different template engines.
+Select the engine with the
+.B \-\-engine
+flag or the
+.B engine
+configuration option.
 .TP
 .B go
 Go's standard \fBhtml/template\fR package (default). Uses \fB{{ .Field }}\fR
-syntax.
+syntax. Provides the full helper FuncMap and Go block inheritance.
 .TP
 .B pongo2
-Jinja2/Django-like templates. Uses \fB{{ field }}\fR and
-\fB{% block %}\fR syntax.
+Jinja2/Django-like template syntax. Non-Go engines must contain templates authored in their respective syntax.
 .TP
 .B mustache
-Logic-less templates. Uses \fB{{field}}\fR and \fB{{#section}}\fR syntax.
+Logic-less templates using the Mustache syntax family.
 .TP
 .B handlebars
-Extension of Mustache with helpers. Uses \fB{{field}}\fR and
-\fB{{#if condition}}\fR syntax.
+Handlebars blocks and helpers.
 .SH TEMPLATE VARIABLES
 All page/post fields are available at the template root level for direct access.
 Custom metadata fields from MDDB frontmatter are also flattened to root level.
@@ -263,6 +862,18 @@ Custom metadata fields from MDDB frontmatter are also flattened to root level.
 {{ .Description }}  \- SEO description
 {{ .Keywords }}     \- SEO keywords
 {{ .Tags }}         \- Tags array
+{{ .WordCount }}    \- Word count of the content
+{{ .ReadingTime }}  \- Estimated reading time in minutes
+{{ .HasMath }}      \- True if the page contains math (with \fB\-\-math\fR)
+{{ .Series }}       \- Series name (if any)
+{{ .SeriesPrevURL }}   \- Previous-in-series URL/title
+{{ .SeriesNextURL }}   \- Next-in-series URL/title
+{{ .Pager }}        \- Pagination state on the index (Current/Total/PrevURL/NextURL)
+{{ .Data }}         \- Data files namespace (\fB.Data.site.name\fR, ...)
+{{ .Lang }}         \- Page language
+{{ .Languages }}    \- Configured languages
+{{ .Translations }} \- Language variants of this page (switcher)
+{{ .Hreflang }}     \- Ready-to-use <link rel="alternate" hreflang> markup
 .fi
 .RE
 .PP
@@ -336,11 +947,47 @@ ssg my-site simple example.com --http --watch
 .fi
 .RE
 .PP
-Build with minification and WebP conversion:
+Build with minification, WebP conversion and multiple archives:
 .PP
 .RS
 .nf
-ssg my-site krowy example.com --clean --minify-all --webp --zip
+ssg my-site krowy example.com --clean --minify-all --webp --zip --targz --tarxz
+.fi
+.RE
+.PP
+Serve publicly over HTTPS with HTTP/3, gzip and a connection cap:
+.PP
+.RS
+.nf
+ssg my-site simple example.com --http --port=443 \\
+    --tls-cert=cert.pem --tls-key=key.pem --http3 --gzip --max-conns=1024
+.fi
+.RE
+.PP
+Serve publicly with automatic Let's Encrypt certificates:
+.PP
+.RS
+.nf
+ssg my-site simple example.com --http --port=443 \\
+    --tls-auto --tls-domain=example.com --mem-limit=512MiB
+.fi
+.RE
+.PP
+Build and publish natively to Cloudflare Pages:
+.PP
+.RS
+.nf
+CLOUDFLARE_API_TOKEN=… CLOUDFLARE_ACCOUNT_ID=… \\
+    ssg my-site krowy example.com --deploy=cloudflare --deploy-project=my-site
+.fi
+.RE
+.PP
+Publish over SFTP with key-based auth:
+.PP
+.RS
+.nf
+SSH_KEY_FILE=~/.ssh/id_ed25519 \\
+    ssg my-site krowy example.com --deploy=sftp --deploy-target=sftp://deploy@example.com/var/www
 .fi
 .RE
 .PP
@@ -389,16 +1036,47 @@ Default templates directory containing theme files.
 .I output/
 Default output directory for generated HTML.
 .SH ENVIRONMENT
-SSG does not use environment variables. All configuration is done via
-command-line flags or configuration files.
+SSG uses the following environment variables:
+.TP
+.B CLOUDFLARE_API_TOKEN ", " CLOUDFLARE_ACCOUNT_ID
+Credentials for the Cloudflare Pages deployment provider.
+.TP
+.B GITHUB_TOKEN
+Authentication token for the GitHub Pages deployment provider.
+.TP
+.B NETLIFY_AUTH_TOKEN ", " NETLIFY_SITE_ID
+Credentials for the Netlify deployment provider.
+.TP
+.B VERCEL_TOKEN ", " VERCEL_ORG_ID
+Credentials for the Vercel deployment provider.
+.TP
+.B FTP_USERNAME ", " FTP_PASSWORD
+Credentials for the FTP deployment provider.
+.TP
+.B SSH_USERNAME ", " SSH_PASSWORD ", " SSH_KEY_FILE ", " SSH_KEY_PASSPHRASE ", " SSH_KNOWN_HOSTS
+Credentials and settings for the SFTP deployment provider.
+.TP
+.B SSG_OUTPUT_DIR ", " SSG_PHASE ", " SSG_PAGE_PATH
+Context variables supplied to custom build hooks during execution.
+.PP
+Additionally, any custom variables defined under the
+.B variables
+key in configuration are exported to build hooks with the
+.B SSG_
+prefix. Values starting with
+.B $
+in configuration are resolved from matching host environment variables at build time.
 .SH BUGS
 Report bugs at: https://github.com/spagu/ssg/issues
 .SH AUTHORS
 spagu <spagu@github.com>
 .SH SEE ALSO
 .BR goldmark (7),
-.BR cwebp (1)
+.BR cwebp (1),
+.BR wrangler (1)
 .PP
 Full documentation: https://github.com/spagu/ssg
+.br
+Redirects and headers: docs/DEPLOYMENT.md; Workers: docs/WORKERS.md
 .SH LICENSE
 BSD 3-Clause License. See LICENSE file for details.

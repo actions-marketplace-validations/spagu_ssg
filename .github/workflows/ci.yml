@@ -8,8 +8,34 @@ on:
     branches: [main, master]
     tags:
       - "v*"
+    paths-ignore:
+      # Content and the docs theme cannot change the binary or its tests:
+      # embedded.go embeds templates/simple and templates/krowy only, so
+      # templates/ssgtheme is site material like docs/ and blog/. The docs site
+      # has its own workflow, which builds and link-checks all of this.
+      # Tag pushes ignore path filters entirely, so releases are unaffected.
+      - "docs/**"
+      - "blog/**"
+      - "assets/**"
+      - "templates/ssgtheme/**"
+      - "docs-site.yaml"
+      - "*.md"
+      - ".github/workflows/docs-site.yml"
   pull_request:
     branches: [main, master]
+    paths-ignore:
+      # Content and the docs theme cannot change the binary or its tests:
+      # embedded.go embeds templates/simple and templates/krowy only, so
+      # templates/ssgtheme is site material like docs/ and blog/. The docs site
+      # has its own workflow, which builds and link-checks all of this.
+      # Tag pushes ignore path filters entirely, so releases are unaffected.
+      - "docs/**"
+      - "blog/**"
+      - "assets/**"
+      - "templates/ssgtheme/**"
+      - "docs-site.yaml"
+      - "*.md"
+      - ".github/workflows/docs-site.yml"
   workflow_dispatch:
     inputs:
       build_packages:
@@ -19,18 +45,40 @@ on:
         type: boolean
 
 env:
-  GO_VERSION: "1.26"
+  # Kept in step with go.mod's directive and with the pinned golangci-lint,
+  # which refuses to analyse a target newer than the Go it was built with —
+  # v2.13.1 is the first release built on 1.27, which is what allowed the
+  # directive to move here at all.
+  #
+  # Never below 1.26.7: earlier 1.26.x stdlib carries advisories govulncheck
+  # finds reachable from this code (encoding/asn1 GO-2026-5972 via the SFTP
+  # deploy, net/http GO-2026-5026 via every outbound request).
+  GO_VERSION: "1.27.0"
+  # Node.js 20 is deprecated on runners; run JS actions on Node 24 explicitly.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+# Cancel superseded runs on the same ref to save runner minutes (OPS-011).
+# Tag pushes get a unique group so release runs are never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+# Default least-privilege token for all jobs; the release job elevates to
+# contents: write where it actually needs to publish artifacts.
+permissions:
+  contents: read
 
 jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
@@ -38,14 +86,55 @@ jobs:
       - name: Download dependencies
         run: go mod download
 
+      # Fail the build if any file that states the version drifts from ./VERSION.
+      # This check existed (make version-check) but nothing ran it, so the snap
+      # sat at 1.8.6 for six releases while every publish reported success
+      # (OPS-013). It now covers the Docker image, man page, install docs, docs
+      # site and theme README too — all of which were bumped by hand.
+      - name: Verify versions are in sync
+        run: bash scripts/sync-version.sh --check
+
       - name: Run go vet
         run: go vet ./...
 
       - name: Run tests
         run: go test -v -race -coverprofile=coverage.out ./...
 
+      # A short fuzz pass on every push. Not to find something in 20 seconds —
+      # to keep the targets compiling, keep the seed corpus exercised, and grow
+      # testdata/fuzz over time. The parsers these cover read bytes ssg did not
+      # write: EXIF, JPEG marker segments, and Markdown a migration pulled from
+      # someone else's server. Both defects fixed in this release were found
+      # this way, and the second was found in code that had just been "fixed".
+      - name: Fuzz the untrusted-input parsers
+        run: |
+          set -e
+          for target in FuzzOrientationFromTIFF FuzzStripJPEG; do
+            go test ./internal/images/ -run '^$' -fuzz "$target" -fuzztime 20s
+          done
+          for target in FuzzSanitizeHTML FuzzVerbatimSpans; do
+            go test ./internal/generator/ -run '^$' -fuzz "$target" -fuzztime 20s
+          done
+
+      # Shuffled, so a test whose isolation comes from another test's t.Chdir
+      # cannot pass quietly. That ordering dependency let a leaked watcher build
+      # a site into the repository itself, and it was invisible in the default
+      # order (#191). No coverage profile here — this run is about ordering.
+      - name: Run tests in a shuffled order
+        run: go test -race -shuffle=on ./...
+
+      # The generated site must not depend on the recorded baseline drifting, nor
+      # on how many workers built it. Neither check ran in CI before, which is how
+      # four parallel-render bugs shipped: each lived on a path the unit tests
+      # never drove, so -race stayed silent and nobody rebuilt the corpora by hand.
+      - name: Check output against the golden baseline
+        run: bash scripts/taxonomy-golden.sh
+
+      - name: Check output is independent of worker count
+        run: bash scripts/determinism.sh
+
       - name: Upload coverage
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         with:
           files: ./coverage.out
           fail_ci_if_error: false
@@ -53,36 +142,38 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
 
       - name: Run golangci-lint
-        uses: golangci/golangci-lint-action@v9
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
         with:
-          version: latest
+          version: v2.13.1 # pinned for reproducible CI (OPS-013); first build on go1.27
 
   security:
     name: Security Scan
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
 
       - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.3.0 # NOSONAR S8545: pinned to an exact, reproducible version (OPS-013)
 
       - name: Run govulncheck
         run: govulncheck ./...
@@ -90,6 +181,7 @@ jobs:
   build:
     name: Build Binaries
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     needs: [test, lint, security]
     strategy:
       matrix:
@@ -101,6 +193,10 @@ jobs:
           - goos: linux
             goarch: arm64
             suffix: linux-arm64
+          - goos: linux # 32-bit ARMv7 (Raspberry Pi 2/3, older SBCs)
+            goarch: arm
+            goarm: "7"
+            suffix: linux-armv7
           # FreeBSD
           - goos: freebsd
             goarch: amd64
@@ -133,10 +229,10 @@ jobs:
             ext: .exe
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
@@ -154,6 +250,7 @@ jobs:
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
+          GOARM: ${{ matrix.goarm }}
           CGO_ENABLED: 0
         run: |
           mkdir -p dist
@@ -180,7 +277,7 @@ jobs:
           mv ssg.exe "ssg-${{ matrix.suffix }}.exe"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: ssg-${{ matrix.suffix }}
           path: dist/*
@@ -189,6 +286,7 @@ jobs:
   build-deb:
     name: Build DEB Packages
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     needs: [test, lint, security]
     if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.build_packages == 'true'
     strategy:
@@ -196,10 +294,10 @@ jobs:
         arch: [amd64, arm64]
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
@@ -259,7 +357,7 @@ jobs:
           dpkg-deb --build "${PKG_DIR}"
 
       - name: Upload DEB artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: ssg-deb-${{ matrix.arch }}
           path: "*.deb"
@@ -268,6 +366,7 @@ jobs:
   build-rpm:
     name: Build RPM Packages
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     needs: [test, lint, security]
     if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.build_packages == 'true'
     strategy:
@@ -279,10 +378,10 @@ jobs:
             rpmarch: aarch64
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Go
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
@@ -339,7 +438,7 @@ jobs:
           cp ~/rpmbuild/RPMS/${ARCH}/*.rpm .
 
       - name: Upload RPM artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: ssg-rpm-${{ matrix.rpmarch }}
           path: "*.rpm"
@@ -348,13 +447,16 @@ jobs:
   release:
     name: Create Release
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     needs: [build, build-deb, build-rpm]
     if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.build_packages == 'true'
     permissions:
       contents: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Get version
         id: version
@@ -365,8 +467,19 @@ jobs:
             echo "version=dev-$(date +%Y%m%d)" >> $GITHUB_OUTPUT
           fi
 
+      # The GitHub Action is consumed as `spagu/ssg@v1`, a floating major tag.
+      # Without moving it on release it keeps pointing at an old action.yml, so
+      # inputs added later (e.g. `config`) are silently dropped for @v1 users
+      # (#120). Re-point the major tag to this release's commit on every tag push.
+      - name: Move the major action tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          MAJOR="v$(echo "${GITHUB_REF#refs/tags/v}" | cut -d. -f1)"
+          git tag -f "$MAJOR" "$GITHUB_SHA"
+          git push -f origin "refs/tags/$MAJOR"
+
       - name: Download all artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: artifacts
 
@@ -393,7 +506,7 @@ jobs:
           ls -la
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           files: release/*
           generate_release_notes: true
@@ -418,8 +531,15 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Update Homebrew formula
-        if: success()
-        run: |
-          echo "📦 Remember to update Homebrew formula with new SHA256 checksums"
-          echo "   See: packaging/brew/ssg.rb"
+  # Publishing to Homebrew is a separate concern from publishing the release,
+  # with its own failure modes — so it is a separate job in a separate,
+  # hand-runnable workflow (OPS-012). A broken tap turns THAT workflow red
+  # while the already-published release above stays green.
+  homebrew:
+    name: Update Homebrew Tap
+    needs: [release]
+    if: startsWith(github.ref, 'refs/tags/v')
+    uses: ./.github/workflows/homebrew.yml
+    with:
+      version: ${{ needs.release.outputs.version }}
+    secrets: inherit

@@ -1,5 +1,5 @@
 Name:           ssg
-Version:        1.7.7
+Version:        1.8.52
 Release:        1%{?dist}
 Summary:        Fast static site generator written in Go
 
@@ -40,9 +40,18 @@ install -Dm644 man/ssg.1 %{buildroot}%{_mandir}/man1/ssg.1
 %{_mandir}/man1/ssg.1*
 
 %changelog
-* Mon Mar 30 2026 spagu <spagu@github.com> - 1.7.7-1
+* Wed Apr 08 2026 spagu <spagu@github.com> - 1.7.13-1
+- Fix shortcode templates missing FuncMap (safeHTML, decodeHTML, etc.)
+
+* Wed Apr 08 2026 spagu <spagu@github.com> - 1.7.12-1
+- Bracket shortcodes with attributes and closing tags
+
+* Sun Apr 06 2026 spagu <spagu@github.com> - 1.7.11-1
+- Flexible author and category fields (accept int ID or string name/slug)
+
+* Mon Mar 30 2026 spagu <spagu@github.com> - 1.7.9-1
 - Updated Go dependencies to latest versions
-- Updated Alpine base image to 3.23
+- Updated Alpine base image to 3.24
 - Updated GitHub Actions to latest versions
 - Added comprehensive man page (ssg.1)
 - Updated snapcraft base to core24

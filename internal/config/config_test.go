@@ -25,6 +25,13 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.WebPQuality != 60 {
 		t.Errorf("expected webp_quality 60, got %d", cfg.WebPQuality)
 	}
+	// SEC-012: dev server must default to loopback, not all interfaces.
+	if cfg.Host != "127.0.0.1" {
+		t.Errorf("expected default host '127.0.0.1', got '%s'", cfg.Host)
+	}
+	if cfg.StaticDir != "static" {
+		t.Errorf("expected default static_dir 'static', got '%s'", cfg.StaticDir)
+	}
 }
 
 func TestLoadYAML(t *testing.T) {
@@ -559,5 +566,39 @@ quiet: true
 	}
 	if !cfg.Quiet {
 		t.Error("quiet should be true")
+	}
+}
+
+// TestLoadTimezones verifies the I18N-001 timezone config surface: a site-wide
+// IANA zone plus per-language overrides.
+func TestLoadTimezones(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+
+	yamlContent := `
+source: "s"
+template: "t"
+domain: "d.com"
+timezone: "Europe/Warsaw"
+language_timezones:
+  en_US: "America/New_York"
+  pl_PL: "Europe/Warsaw"
+`
+	if err := os.WriteFile(configPath, []byte(yamlContent), 0644); err != nil {
+		t.Fatalf("failed to write config file: %v", err)
+	}
+
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("failed to load config: %v", err)
+	}
+	if cfg.Timezone != "Europe/Warsaw" {
+		t.Errorf("Timezone = %q, want Europe/Warsaw", cfg.Timezone)
+	}
+	if cfg.LanguageTimezones["en_US"] != "America/New_York" {
+		t.Errorf("LanguageTimezones[en_US] = %q, want America/New_York", cfg.LanguageTimezones["en_US"])
+	}
+	if len(cfg.LanguageTimezones) != 2 {
+		t.Errorf("LanguageTimezones = %v, want 2 entries", cfg.LanguageTimezones)
 	}
 }

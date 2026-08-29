@@ -1,0 +1,568 @@
+# Deployment guide
+
+SSG can package a generated site, publish it directly, or run as a GitHub
+Action. Deployment always happens after generation and enabled post-processing,
+so providers receive the final output tree.
+
+## The 404 page
+
+Static hosts answer an unmatched path by falling back to the site's
+`index.html` — with a `200` — unless the output contains a `404.html`. Every
+dead URL then looks to a crawler like another live copy of the home page, which
+is why SSG generates a minimal `404.html` when the site does not provide one.
+
+To own it, add a page slugged `404`; it renders to `/404.html` and takes
+precedence. To suppress it entirely, set `not_found_off: true`.
+
+## Production build
+
+A conservative production command is:
+
+```bash
+ssg my-blog simple example.com \
+  --clean --minify-all --fingerprint --check-links=strict
+```
+
+Review `output/` locally before enabling native deployment. Deployment does not
+replace validation of provider configuration, redirects, custom domains or DNS.
+
+## Archives
+
+Archives are written beside the project using the configured domain as their
+base filename:
+
+| Configuration | CLI | Output |
+|---|---|---|
+| `zip: true` | `--zip` | `<domain>.zip` |
+| `targz: true` | `--targz` | `<domain>.tar.gz` |
+| `tarxz: true` | `--tarxz` | `<domain>.tar.xz` |
+
+Multiple archive formats can be enabled in one build. Archives contain the
+output tree and can be uploaded manually to any static host.
+
+## Build cache in CI
+
+Every SSG disk cache lives under one root, `.ssg-cache/` — processed images,
+external-source payloads and AI answers. Persisting that directory between CI
+runs skips WebP/AVIF reconversion, re-fetching remote data inside its TTL and
+re-querying AI models. With GitHub Actions this is one step, no SSG
+configuration at all:
+
+```yaml
+- uses: actions/cache@v4
+  with:
+    path: .ssg-cache
+    key: ssg-cache-${{ runner.os }}-${{ hashFiles('content/**', '.ssg.yaml') }}
+    restore-keys: ssg-cache-${{ runner.os }}-
+```
+
+Entries are content-addressed, so a stale restore is harmless — anything
+outdated is simply not referenced, and `ssg cache gc` (or a build with
+`--images-gc`) reclaims it. Inspect what the cache holds with
+`ssg cache stats`; start fresh with `ssg cache clean`.
+
+## Native deployment model
+
+```yaml
+deploy: cloudflare
+deploy_project: my-site
+deploy_branch: main
+deploy_target: ""
+```
+
+Equivalent CLI flags are `--deploy`, `--deploy-project`, `--deploy-branch` and
+`--deploy-target`.
+
+Secrets are read from environment variables. Do not put tokens, passwords or
+private keys in `.ssg.yaml`, Markdown content, command history or a committed
+workflow.
+
+| Provider | `deploy` value | Project | Target | Credentials |
+|---|---|---|---|---|
+| Cloudflare Pages | `cloudflare` | Pages project name | — | `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` |
+| GitHub Pages | `github-pages` | — | Git remote; defaults to `origin` | `GITHUB_TOKEN` for HTTPS or normal Git/SSH credentials |
+| Netlify | `netlify` | Site ID | — | `NETLIFY_AUTH_TOKEN` |
+| Vercel | `vercel` | Project ID/name | — | `VERCEL_TOKEN`; optional `VERCEL_ORG_ID` |
+| FTP | `ftp` | — | `ftp://[user@]host[:port]/path` | `FTP_USERNAME`, `FTP_PASSWORD` |
+| SFTP | `sftp` | — | `sftp://[user@]host[:port]/path` | SSH environment described below |
+
+Accepted aliases include `cloudflare-pages`, `github`, `gh-pages` and `ssh`,
+but canonical names are recommended in durable configuration.
+
+## Cloudflare Pages
+
+Create the Pages project first and use an API token with permission to edit it:
+
+```bash
+export CLOUDFLARE_API_TOKEN=...
+export CLOUDFLARE_ACCOUNT_ID=...
+
+ssg my-blog simple example.com \
+  --deploy=cloudflare \
+  --deploy-project=my-site
+```
+
+`--deploy-branch` optionally selects the Pages branch. SSG uses Cloudflare's
+Direct Upload API, hashes the output manifest and uploads the required files; it
+does not require Wrangler.
+
+### Generated `_headers` and `_redirects`
+
+**Every build** writes `_headers` and `_redirects` into the output directory,
+whether or not you deploy to Cloudflare Pages — they are inert anywhere else.
+Pages applies them verbatim, so their content is the site's security and
+caching policy, and worth knowing before a page appears to go stale.
+
+Security headers, applied to `/*`:
+
+| Header | Value |
+|---|---|
+| `X-Content-Type-Options` | `nosniff` |
+| `X-Frame-Options` | `DENY` |
+| `X-XSS-Protection` | `1; mode=block` |
+| `Referrer-Policy` | `strict-origin-when-cross-origin` |
+| `Permissions-Policy` | `geolocation=(), microphone=(), camera=()` |
+
+Cache policy:
+
+| Path | `Cache-Control` |
+|---|---|
+| `/css/*`, `/js/*`, `/images/*`, `/media/*` | `public, max-age=31536000, immutable` |
+| `/*.html` and `/` | `public, max-age=3600` |
+
+The one-year `immutable` on assets assumes their filenames change when their
+contents do. That is exactly what `--fingerprint` and the image pipeline's
+content-addressed names guarantee. **Without fingerprinting, a CSS or JS file
+edited in place keeps its name and can be served from a browser cache for a
+year** — enable `fingerprint: true` for any site that deploys more than once,
+or override the policy with `headers:` (below).
+
+None of this applies while a preview is running. `--watch --http` and
+`ssg mcp --http` serve **every** response `Cache-Control: no-cache` and drop the
+browser's `If-None-Match` / `If-Modified-Since`, so a rebuilt stylesheet is on
+screen after a reload instead of an hour (or a year) later (#185). It is the one
+mode where a cache only costs: the file is regenerated seconds after it is
+fetched. `no-cache` still permits storing and revalidating — the preview answers
+`304` for anything genuinely unchanged.
+
+`_redirects` is generated from two sources (GO-063):
+
+- the `redirects:` config section — explicit rules; and
+- frontmatter `aliases:`, emitted as `301`s.
+
+Rules accept exact paths, `/old/*` splats (`:splat` in the destination) and the
+status codes `301`, `302`, `307`, `308` and `410`. Exact redirect **chains are
+flattened** at build time — `A → B → C` is written as `A → C` and `B → C`, so a
+visitor never takes more than one hop (the chained-redirect SEO penalty). By
+default each alias also writes a client-side meta-refresh stub page as a
+fallback for non-Cloudflare hosts; `alias_stubs: false` keeps only the
+`_redirects` entries.
+
+```yaml
+redirects:
+  - from: /old-pricing
+    to: /pricing
+    # status defaults to 301
+  - from: /blog/*
+    to: /articles/:splat
+    status: 301
+  - from: /discontinued
+    to: /
+    status: 410
+```
+
+Netlify uses the identical `_redirects` format, so the same file works there
+unchanged. Vercel needs a `vercel.json` you provide yourself; SSG does not
+generate one.
+
+#### The built-in server serves both files
+
+Since 1.8.47, `ssg --http` and `ssg serve` read `<output>/_redirects` and
+`<output>/_headers` and answer with them, re-reading both after every rebuild.
+So a redirect can be checked before it is published — which matters most where
+it is easiest to get wrong: after a migration, where every rule is a URL
+somebody else published, and where a site whose redirects are all broken looks
+perfect from the inside.
+
+Nothing new is declared for this. The files are already written on every build;
+the server simply reads what is there, the same way `endpoints:` are served from
+the same declaration the platform compiles.
+
+**The semantics are Cloudflare Pages'**, because that is what generation targets
+first:
+
+- **Redirect rules are evaluated before static assets**, so a rule shadows a
+  file sitting at the same path.
+- Within the file, **order is honoured and the first match wins** — also
+  Netlify's rule. The generator already emits exact rules before wildcard ones
+  so a wildcard cannot swallow the specific rules beneath it.
+- Exact paths, `/old/*` splats with `:splat`, `:placeholder` segments,
+  and `301` / `302` / `303` / `307` / `308` / `410`. A `410` answers `410` with
+  no `Location`.
+- A `!` force marker parses and is accepted. Under these semantics everything
+  shadows already, so it changes nothing locally.
+- **A malformed line is skipped with one warning naming it** and the rest of the
+  file stays live. A file the build wrote must never be a file the server
+  refuses to start over.
+
+For `_headers`, a response whose path matches a pattern gets that block's
+headers, first matching value winning per header name — Cloudflare's rule, which
+is why the block order in the generated file is deliberate. **The file wins over
+the server's own security headers**: that is what the deployed site would serve,
+and a preview whose headers differ from production is the gap this closes.
+
+One consequence worth stating: the default `_headers` caches `/` and `/*.html`
+for an hour, so the preview now says so too. Pages carrying the live-reload
+script are exempted — a reload served from the cache would show the previous
+build.
+
+Request order in the built-in server is: `endpoints:` → `_redirects` →
+`_headers` → the static tree.
+
+**Importing an existing rule set.** `ssg import redirects` turns a JS
+`redirects()` array (as some frameworks export in their config) into the
+`redirects:` block above:
+
+```sh
+# reliable: from a JSON dump of the array
+node -e "import('./next.config.js').then(async c => console.log(JSON.stringify(await c.default.redirects())))" > redirects.json
+ssg import redirects --from-json redirects.json
+
+# or parse the config file heuristically
+ssg import redirects next.config.ts
+```
+
+Entries it cannot translate (conditional `has`/`missing`, template-literal
+paths, regex-constrained params) are reported on stderr, never silently
+dropped — Cloudflare's `_redirects` cannot express them anyway.
+
+#### Overriding `_headers`
+
+The `headers:` config section overrides or extends the generated blocks per
+path pattern. A pattern that appears in `headers:` replaces that block's
+headers; unknown patterns are appended. `headers_defaults_off: true` drops the
+built-in security/cache blocks entirely.
+
+```yaml
+headers:
+  /*:
+    Content-Security-Policy: "default-src 'self'"
+  /api/*:
+    Access-Control-Allow-Origin: "*"
+```
+
+With an empty `headers:` the file is byte-for-byte what SSG has always
+generated.
+
+#### Dynamic endpoints beside the static site
+
+For payments, forms, dynamic pricing or server-side tracking, add a Cloudflare
+Pages Function with the `worker:` section — see [WORKERS.md](WORKERS.md). SSG
+copies the Function into the output, generates `_routes.json`, and deploys it
+(via `wrangler pages deploy` for a `functions/` tree, or Direct Upload for a
+prebuilt `_worker.js`).
+
+#### A page still shows its old content
+
+HTML is cached at the edge for an hour. After renaming a page — changing
+`post_url_format`, adding a `permalinks` pattern — the **old** URL keeps
+answering `200` from cache for up to that hour even though the new deployment
+no longer contains it, and the new URL is live immediately. Check with
+`curl -sI <url> | grep -i age` before concluding the deploy failed; purge the
+cache in the Cloudflare dashboard if you cannot wait.
+
+### This project's own documentation site
+
+`ssg.tradik.com` is built from this repository by
+[`.github/workflows/docs-site.yml`](../.github/workflows/docs-site.yml) and is
+a working example of everything above:
+
+- The site has **no content tree**. `docs-site.yaml` pulls `docs/` in through
+  `content_sources`, so editing a guide is the whole publishing workflow.
+- It is built with the `ssg` binary **from the commit being deployed**, not the
+  released action, so the site doubles as an integration test of `main` on real
+  content — and so it can use configuration keys newer than the last release.
+- `shortcode_errors: strict` and `--check-links=strict` gate the deploy: an
+  unrenderable shortcode or a dead internal link fails the run, and SSG deploys
+  only after a successful generate, so a broken page never reaches the CDN.
+- `cwebp` is installed in the runner because the hero image is encoded as WebP.
+
+Setup is two repository secrets and nothing else:
+
+| Secret / variable | Required | Purpose |
+|---|---|---|
+| `CLOUDFLARE_API_TOKEN` | yes | *Cloudflare Pages: Edit*. Attaching the custom domain additionally needs *Zone:DNS:Edit* on that zone. |
+| `CLOUDFLARE_ACCOUNT_ID` | yes | Account that owns the project |
+| `CLOUDFLARE_PAGES_PROJECT` | no | Pages project name (default `ssg-docs`) |
+| `DOCS_DOMAIN` | no | Custom domain (default `ssg.tradik.com`) |
+
+The workflow creates the Pages project and attaches the custom domain on its
+first run, and leaves both alone afterwards — there is nothing to click in the
+dashboard. Domain attachment is deliberately non-fatal: the deployment is
+already live on `<project>.pages.dev` by then, and the usual failure is a token
+without `Zone:DNS:Edit`, which is a permissions decision rather than a build
+problem. The job summary says which of the two happened.
+
+A pull request runs the same build with `--check-links=strict` and stops there:
+nothing is created in Cloudflare and nothing is uploaded, but a dead link or an
+unrenderable shortcode in a new post fails the check before review rather than
+after the merge. Only a push to the default branch deploys.
+
+`workflow_dispatch` only becomes available once the workflow file is on the
+default branch, so the first manual run happens after a merge.
+
+## GitHub Pages
+
+```bash
+export GITHUB_TOKEN=...
+
+ssg my-blog simple example.com \
+  --deploy=github-pages \
+  --deploy-target=https://github.com/example/site.git \
+  --deploy-branch=gh-pages
+```
+
+The target defaults to the current repository's `origin`, and the branch
+defaults to `gh-pages`. SSG creates an isolated Git repository inside the output
+directory, commits the generated tree and force-pushes a single commit.
+
+> `github-pages` intentionally rewrites the target branch history. Use a branch
+> dedicated to generated output, never a source or shared development branch.
+
+For HTTPS remotes, `GITHUB_TOKEN` is passed as an HTTP authorization header and
+is not embedded in the remote URL. SSH remotes use the normal Git/SSH setup.
+The `git` executable must be available.
+
+## Netlify
+
+```bash
+export NETLIFY_AUTH_TOKEN=...
+
+ssg my-blog simple example.com \
+  --deploy=netlify \
+  --deploy-project=your-site-id
+```
+
+`NETLIFY_SITE_ID` may replace `--deploy-project`. SSG declares a digest manifest
+through Netlify's deploy API and uploads only files Netlify reports missing.
+The Netlify CLI is not required.
+
+## Vercel
+
+```bash
+export VERCEL_TOKEN=...
+export VERCEL_ORG_ID=...
+
+ssg my-blog simple example.com \
+  --deploy=vercel \
+  --deploy-project=my-project
+```
+
+`VERCEL_PROJECT_ID` may replace `--deploy-project`; `VERCEL_ORG_ID` selects the
+team scope and is optional for an unscoped account. SSG uploads content-addressed
+files and creates a production deployment. The Vercel CLI is not required.
+
+## FTP
+
+```bash
+export FTP_USERNAME=deploy
+export FTP_PASSWORD=...
+
+ssg my-blog simple example.com \
+  --deploy=ftp \
+  --deploy-target=ftp://ftp.example.com/public_html
+```
+
+The username may be included in the target URL; otherwise `FTP_USERNAME` is
+used, falling back to `anonymous`. The default port is 21. SSG creates remote
+directories where possible and uploads every regular output file.
+
+FTP does not encrypt credentials or content. Prefer SFTP when the host supports
+it.
+
+## SFTP
+
+Password authentication:
+
+```bash
+export SSH_USERNAME=deploy
+export SSH_PASSWORD=...
+
+ssg my-blog simple example.com \
+  --deploy=sftp \
+  --deploy-target=sftp://server.example.com/var/www/site
+```
+
+Key authentication:
+
+```bash
+export SSH_KEY_FILE="$HOME/.ssh/id_ed25519"
+export SSH_KEY_PASSPHRASE=...
+
+ssg my-blog simple example.com \
+  --deploy=sftp \
+  --deploy-target=sftp://deploy@server.example.com/var/www/site
+```
+
+SFTP variables:
+
+| Variable | Meaning |
+|---|---|
+| `SSH_USERNAME` | Used when the URL has no username |
+| `SSH_PASSWORD` | Password authentication; takes priority over a key |
+| `SSH_KEY_FILE` | Private key; defaults to `~/.ssh/id_rsa` |
+| `SSH_KEY_PASSPHRASE` | Optional encrypted-key passphrase |
+| `SSH_KNOWN_HOSTS` | Host database; defaults to `~/.ssh/known_hosts` |
+
+The default port is 22. Host keys are always verified; unknown hosts are
+rejected. Add the expected key out of band, for example after independently
+checking its fingerprint:
+
+```bash
+ssh-keyscan server.example.com >> ~/.ssh/known_hosts
+```
+
+## GitHub Action
+
+Use the stable major reference to receive compatible v1 updates:
+
+```yaml
+name: Build site
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build with SSG
+        id: ssg
+        uses: spagu/ssg@v1
+        with:
+          source: my-blog
+          template: simple
+          domain: example.com
+          clean: "true"
+          minify: "true"
+```
+
+Pin a full released tag instead of `@v1` when reproducibility is more important
+than automatic compatible updates. Use `@main` only to test unreleased changes.
+
+**Pin the binary too.** The action's `version` input defaults to `latest`, so
+every deploy silently picks up the newest ssg release the moment it ships —
+including behaviour changes. For production sites, pin it:
+
+```yaml
+- uses: spagu/ssg@v1
+  with:
+    version: v1.8.5   # exact ssg release used for the build
+```
+
+Since v1.8.5 the action logs the resolved version on every run (a `::notice::`
+when `latest` was used) and exposes it as the `version` output, so unpinned
+builds are at least traceable.
+
+### Building a config-driven site
+
+Point the action at your config file. Everything a real site keeps there —
+`redirects:`, `worker:`, `variables:`, the `check_*` validators — has no input
+equivalent, so this is the only way the action can build it:
+
+```yaml
+- uses: spagu/ssg@v1
+  with:
+    config: .ssg.yaml
+    deploy: cloudflare
+    deploy-project: my-site
+```
+
+With `config` set, `source`, `template` and `domain` are optional — the config
+supplies them, and repeating them here is how the two drift apart. Other inputs
+are still passed through as flags; the CLI resolves flag-versus-config
+precedence, so a flag wins over the same setting in the file.
+
+### Action inputs
+
+The action intentionally exposes a stable subset of the complete CLI:
+
+| Input | Required | Default | Meaning |
+|---|---:|---|---|
+| `config` | no | — | Path to `.ssg.yaml`/`.toml`/`.json`. Makes the three below optional |
+| `source` | unless `config` | — | Content source name |
+| `template` | unless `config` | `simple` | Theme name |
+| `domain` | unless `config` | — | Canonical host |
+| `version` | no | `latest` | Binary release to download |
+| `content-dir` | no | `content` | Content root |
+| `templates-dir` | no | `templates` | Theme root |
+| `output-dir` | no | `output` | Generated destination |
+| `webp` | no | `false` | Enable WebP conversion |
+| `webp-quality` | no | `60` | WebP quality |
+| `zip` | no | `false` | Create ZIP archive |
+| `minify` | no | `false` | Enable all minification |
+| `clean` | no | `false` | Clean before build |
+| `engine` | no | `go` | Template engine |
+| `online-theme` | no | empty | Theme download URL |
+| `deploy` | no | empty | Native provider |
+| `deploy-project` | no | empty | Provider project/site |
+| `deploy-branch` | no | empty | Provider branch |
+| `deploy-target` | no | empty | Git/FTP/SFTP target |
+
+Inputs are passed through environment variables and validated before being
+added to the command argument array.
+
+### Action outputs
+
+| Output | Meaning |
+|---|---|
+| `output-path` | Generated site directory |
+| `zip-file` | ZIP path when `zip` is enabled |
+| `zip-size` | ZIP size in bytes |
+| `version` | Resolved ssg version used for the build (GO-052) |
+
+Example artifact upload:
+
+```yaml
+- uses: actions/upload-pages-artifact@v4
+  with:
+    path: ${{ steps.ssg.outputs.output-path }}
+```
+
+### Native deployment from Actions
+
+```yaml
+- uses: spagu/ssg@v1
+  with:
+    source: my-blog
+    template: simple
+    domain: example.com
+    clean: "true"
+    minify: "true"
+    deploy: cloudflare
+    deploy-project: my-site
+  env:
+    CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+    CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+```
+
+Provider credentials must be repository or environment secrets referenced in
+`env`, not action inputs. A complete example is available at
+[examples/workflows/cloudflare-pages.yml](../examples/workflows/cloudflare-pages.yml).
+
+## Deployment checklist
+
+- Run a clean production build.
+- Run `--check-links=strict`.
+- Inspect generated canonical URLs and redirects.
+- Confirm the provider project/site ID.
+- Store credentials only in the runtime environment or CI secret store.
+- Use a least-privilege token.
+- For GitHub Pages, confirm the target is a disposable generated branch.
+- For SFTP, verify and pin the server host key.
+- Test custom domains, HTTPS and cache headers after publishing.
+

@@ -27,6 +27,10 @@ Thumbs.db
 *.out
 vendor/
 
+# Compiled ssg binary (never commit build artifacts — see #73 Binary-Artifacts)
+/ssg
+/ssg-*
+
 # Logs
 *.log
 
@@ -38,8 +42,9 @@ temp/
 content/*
 !content/test-content/
 
-# ZIP deployments
+# Archive deployments (--zip / --targz / --tarxz)
 *.zip
+*.tar.xz
 
 # Distribution/Packaging
 /dist/
@@ -47,9 +52,29 @@ content/*
 *.rpm
 *.snap
 *.tar.gz
-
+/.claude/
+/.claude/*
 /.agent/
 /.agent/*
 # Downloaded themes (created by --online-theme)
 templates/gohugo-*/
 templates/hugo-*/
+
+# Audit reports (local only)
+/audit/
+
+# Image-processing cache (v1.8.3)
+.ssg-cache/
+
+# Example project build artifacts
+examples/*/output/
+
+# Documentation site built by `make site` from docs/ (.ssg.yaml)
+.site/
+
+# Local wrangler dev artifacts (miniflare state, generated config)
+.wrangler/
+/wrangler.toml
+
+# Build-throughput benchmark corpora (scripts/bench-build.sh, make bench)
+ssg-bench/

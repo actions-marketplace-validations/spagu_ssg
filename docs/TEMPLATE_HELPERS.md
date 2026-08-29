@@ -1,0 +1,572 @@
+# Template Collection & Conditional Helpers
+
+*Since v1.8.3.* SSG's Go template engine ships a set of generic helpers for
+filtering, sorting, grouping, slicing and testing content — so a theme can build
+"recently updated guides", "related posts" or "grouped archives" without any
+code changes.
+
+The **collection is always the final argument**, so helpers chain naturally in
+Go template pipelines:
+
+```gotemplate
+{{ $recentGuides := .Site.Pages
+    | where "Type" "guide"
+    | sort "Modified" "desc"
+    | first 5
+}}
+
+{{ range $recentGuides }}
+  <article>
+    <h2><a href="{{ .URL }}">{{ .Title }}</a></h2>
+    <time>{{ formatDate .Modified }}</time>
+  </article>
+{{ end }}
+```
+
+Helpers work on `[]models.Page` **and generically** on slices of structs,
+pointers to structs, string-keyed maps, and primitives (via reflection). They
+**never mutate their input** and **never panic** — invalid usage stops template
+execution with a descriptive error such as:
+
+```text
+where: field "ModifiedAt" does not exist on models.Page
+sort: unsupported direction "newest"; expected "asc" or "desc"
+first: count must be greater than or equal to zero
+matches: invalid regular expression "["
+filter: unsupported operator "newest"; expected one of eq, ne, gt, ge, lt, le, …
+```
+
+## What you do NOT need helpers for
+
+`if`, `else if`, `with`, `range`, `eq/ne/lt/le/gt/ge`, `and/or/not` are **native
+Go template features** — use them directly:
+
+```gotemplate
+{{ if .Page.HasMath }}math{{ else if eq .Page.Type "guide" }}guide{{ else }}other{{ end }}
+```
+
+Native `switch/case` does **not** exist in Go templates and SSG deliberately
+does not emulate it — compose `if / else if` with the conditional helpers below.
+
+## Supported comparison types
+
+`where`, `filter`, `sort` and the equality-based helpers compare: **strings**,
+**booleans** (`false < true`), **all integer/float kinds** (compared cross-type,
+so `int(5)` equals `float64(5)`), **`time.Time`** (and convertible aliases).
+Anything else (slices, maps, structs) errors in ordering contexts; equality
+falls back to deep comparison.
+
+---
+
+## Collection helpers
+
+### `related` / `relatedFromMddb` — related posts
+
+```gotemplate
+{{ range related . 5 }}<a href="{{ .Link }}">{{ .Title }}</a>{{ end }}
+```
+
+`related <page> <n>` returns up to `n` posts most related to `<page>`, ranked by
+the number of shared **tags and keywords** (then recency, then slug for a stable
+order). It reads the already-loaded posts — whatever the content source — so it
+needs no network and is reproducible; posts with no overlap are excluded.
+
+`relatedFromMddb <page> <n>` does the same by querying the **mddb** server
+(`Search` filtered by the page's tags/keywords), so it can surface articles from
+the whole corpus, not just the pages built into this site. It is a live query
+(not cached) and returns nothing when mddb is not configured or the query fails.
+`relatedIn <page> <n> <collection>` scores an explicit collection instead of the
+loaded posts, and ranks differently: shared tags (3) > shared categories (2) >
+same author (1). Until 1.8.23 it was registered under the name `related` as
+well, where it was unreachable — use `related` for keyword and tag scoring over
+the site's own posts, and `relatedIn` when you have a collection in hand.
+
+> **MDDB metadata is flat.** Anything the helpers hand back from an MDDB
+> collection went through `map[string][]string` on the way in, so a nested
+> structure in the source frontmatter arrives as *text* unless the producer
+> encoded it. A theme reaching for that field gets a string where it expected a
+> list, and the failure looks like a template bug rather than a storage one. See
+> [Structured frontmatter through MDDB's flat meta](CONFIGURATION.md#structured-frontmatter-through-mddbs-flat-meta)
+> for the producer contract — you meet the constraint through this helper long
+> before you meet it in the config file.
+
+See [`examples/related-posts/`](../examples/related-posts/) for the keyword, mddb
+and embeddings/vector approaches.
+
+### `feed` — a declared feed's items
+
+```gotemplate
+{{ range feed "/planet.xml" }}
+  <article>
+    <span class="badge">{{ .Label }}</span>
+    <h3><a href="{{ .URL }}">{{ .Title }}</a></h3>
+    <p>{{ .Summary }}</p>
+  </article>
+{{ end }}
+```
+
+`feed <path-or-name>` returns the items of a feed declared in `feeds:` — already
+merged, filtered, deduplicated, sorted newest first and carrying its provenance
+`.Label`. A page built this way and the feed itself come from the same
+computation, so they cannot drift.
+
+Each item exposes `.Title`, `.URL`, `.ID`, `.Summary`, `.ContentHTML`,
+`.Published`, `.Updated`, `.Tags`, `.Author`, `.Source` and `.Label`.
+
+Look a feed up by its `path`, or by an optional `name:` on the spec. It returns
+the **whole** feed, not one page — paginate the HTML yourself with `first` /
+`offset` if you want that. An undeclared feed yields nothing and warns, rather
+than failing the render.
+
+### `concat` / `flatten` — compose collections
+
+```gotemplate
+{{ $all := concat .Site.Posts .ExternalData.mddb.items }}
+{{ range $all | sort "Published" "desc" | first 12 }}…{{ end }}
+
+{{ flatten (slice $a $b) }}
+```
+
+Go templates cannot join two collections: `slice a b` builds a list *of* two
+lists, and nothing unnests it. `concat` joins any number of collections into one
+`[]any` — which the helpers above handle by reflection, so it composes with
+`sort`, `first` and the rest. Element types need not match. A `nil` input
+contributes nothing rather than a hole for `range` to trip on. `flatten` unnests
+one level.
+
+### `where` — filter by field equality
+
+```gotemplate
+{{ .Site.Pages | where "Type" "guide" }}
+{{ .Site.Pages | where "Status" "publish" }}
+{{ .Site.Pages | where "HasMath" false }}
+```
+
+Signature `where(field, expected, collection)`. Matches struct fields,
+pointer-to-struct fields and map keys exactly; preserves input order and element
+type. A missing field/key is an error (no silent fallback).
+
+### `filter` — filter with an operator
+
+```gotemplate
+{{ .Site.Pages | filter "Modified" "gt" $cutoff }}
+{{ .Site.Pages | filter "Tags" "contains" "go" }}
+{{ .Site.Pages | filter "Type" "in" (slice "guide" "tutorial") }}
+```
+
+```gotemplate
+{{ .Site.Pages | filter "Link" "hasPrefix" "/special/" }}
+{{ .Site.Posts | filter "Title" "matches" "^Baby " }}
+```
+
+Signature `filter(field, operator, expected, collection)`. Operators:
+`eq` `ne` `gt` `ge` `lt` `le` `contains` `notContains` `in` `notIn`
+`hasPrefix` `hasSuffix` `matches`.
+`contains` searches strings (substring) and slices/arrays (element);
+`in`/`notIn` test the field value against a provided collection.
+
+`hasPrefix`, `hasSuffix` and `matches` (regular expression) are anchored string
+tests, and need a string field and a string value — applied to a `[]string`
+field they report an error rather than quietly answering false. Reach for them
+where `contains` is too loose: `contains "/special/"` also matches
+`/not-special/thing/`, while `hasPrefix "/special/"` does not.
+
+### `sort` — stable sort by field
+
+```gotemplate
+{{ .Site.Pages | sort "Modified" "desc" }}
+{{ .Site.Pages | sort "Title" "asc" }}
+```
+
+Signature `sort(field, direction, collection)`; direction is `asc` or `desc`.
+Stable, non-mutating (returns a sorted copy). Field must exist on every element
+and hold a comparable type.
+
+The collection must be a slice or a **string-keyed** map. The site's own
+taxonomy maps are **int-keyed** (`.Site.Categories` and `.Site.Tags` are
+`map[int]Category`), so `{{ .Site.Categories | sort "Name" "asc" }}` fails with
+*"expected a slice or array, got map"*. Iterate those through the taxonomy
+helpers instead, which return an already-ordered slice of terms:
+
+```gotemplate
+{{ range taxonomyTerms "category" }}{{ .Name }} ({{ .Count }}){{ end }}
+```
+
+### `first` / `last` / `limit` / `offset` — pagination
+
+```gotemplate
+{{ .Site.Pages | first 5 }}
+{{ .Site.Pages | last 3 }}
+{{ .Site.Pages | sort "Modified" "desc" | limit 5 }}   {{/* limit = first */}}
+{{ .Site.Pages | offset 10 | limit 10 }}               {{/* page 2 of 10 */}}
+```
+
+Negative counts error; counts past the end clamp (`offset` past the end yields
+an empty collection); inputs are never mutated.
+
+### `groupBy` — group by scalar field
+
+```gotemplate
+{{ range $category, $pages := (.Site.Pages | groupBy "Category") }}
+  <h2>{{ $category }}</h2>
+  {{ range $pages }}…{{ end }}
+{{ end }}
+```
+
+Returns `map[key] → slice`. Item order inside each group is preserved. Go
+templates iterate maps in **sorted key order**, so output is deterministic.
+Keys must be scalar (string/bool/number/`time.Time` → RFC 3339); slices, maps
+and other structs error.
+
+### `uniq` / `uniqBy` — deduplicate
+
+```gotemplate
+{{ .Site.Pages | pluck "Category" | uniq }}   {{/* primitives only */}}
+{{ .Site.Pages | uniqBy "Category" }}         {{/* structs, by field */}}
+```
+
+First occurrence wins. `uniq` on structs/maps errors — use `uniqBy`.
+
+### `reverse` — reversed copy
+
+```gotemplate
+{{ .Site.Pages | reverse }}
+```
+
+### `slice` — build a list inline
+
+```gotemplate
+{{ slice "guide" "tutorial" "docs" }}
+{{ if in .Page.Type (slice "guide" "tutorial") }}…{{ end }}
+```
+
+> ⚠️ Registering `slice` **overrides Go's builtin** `slice(value, i, j)`
+> sub-slicing function. Bundled themes do not use the builtin; if yours does,
+> switch to `printf "%.10s"` for strings or restructure the data.
+
+### `append` — add to a list
+
+```gotemplate
+{{ $kids := slice }}
+{{ range .Site.Pages }}
+  {{ if and (ne .GetURL $.URL) (hasPrefix .GetURL $.URL) }}
+    {{ $kids = append $kids . }}
+  {{ end }}
+{{ end }}
+{{ range $kids }}<a href="{{ .GetURL }}">{{ .Title }}</a>{{ end }}
+```
+
+`slice` builds a literal; `append` is what lets a loop accumulate one, so a
+theme can derive a collection — "the sub-pages of this section" — from the page
+tree instead of from per-site configuration.
+
+The collection may be either the first or the last argument, so both the Go
+form (`append $kids .`) and the pipeline form (`$kids | append .`) work; when
+both ends are lists the first is the one appended to, as in Go. The input list
+is never modified, so appending twice to the same base gives two independent
+results.
+
+Values that do not share the list's element type widen the result to a generic
+list rather than failing.
+
+### `pluck` — extract one field
+
+```gotemplate
+{{ $titles := .Site.Pages | pluck "Title" }}
+```
+
+Returns a `[]any` of field values (`nil` for nil-pointer elements).
+
+### `indexBy` — build a lookup map
+
+```gotemplate
+{{ $bySlug := .Site.Pages | indexBy "Slug" }}
+{{ $page := index $bySlug "getting-started" }}
+```
+
+Duplicate keys and empty keys are **errors** (no silent overwrites).
+
+---
+
+## String helpers
+
+`hasPrefix`, `hasSuffix`, `startsWith`, `endsWith`, `matches`, `trimPrefix` and
+`trimSuffix` all take plain strings.
+
+```gotemplate
+{{ trimSuffix .Page.Link ".html" }}
+```
+
+`trimPrefix`/`trimSuffix` exist because testing for an affix without being able
+to remove one left no way to strip an extension inside a template (#103).
+
+### `toJSON` — a value as inline JSON
+
+```gotemplate
+<script id="ssg-consent-config" type="application/json">{{ .Ctx.Vars.cookie_consent | toJSON }}</script>
+```
+
+Marshals any value — a config map, a list, a struct — for embedding in a
+`<script>`. It returns `template.JS`, so the result is not HTML-escaped again;
+`json.Marshal` escapes `<`, `>` and `&`, which is what makes that safe inside a
+script element.
+
+This is how a theme passes a configuration block from `.ssg.yaml` to a client
+script without the theme having to know the block's shape — the pattern
+`ssgtheme` uses for the cookie banner.
+
+## Taxonomy helpers
+
+`taxonomies`, `taxonomy`, `taxonomyTerms`, `pageTerms`, `termURL`, `hasTerm` and
+`pagesByTerm` are documented with the feature they belong to, in
+[TAXONOMIES.md](TAXONOMIES.md#template-helpers).
+
+`termURL` is also the answer to "where is `urlize`/`slugify`" — there is no
+general slugify helper, and `termURL "category" "Marsaskala"` is how a term
+link is built. The built-in taxonomy names are `category`, `tag` and `series`.
+
+## Conditional helpers
+
+| Helper | Signature | Example |
+|--------|-----------|---------|
+| `in` | `in value collection → bool` | `{{ if in .Page.Type (slice "guide" "docs") }}` |
+| `notIn` | `notIn value collection → bool` | `{{ if notIn .Page.Type (slice "draft") }}` |
+| `contains` | `contains container value → bool` | `{{ if contains .Page.Tags "ssg" }}` — string→substring, slice→element, map→key |
+| `startsWith` | `startsWith value prefix → bool` | `{{ if startsWith .Page.Slug "guide-" }}` |
+| `endsWith` | `endsWith value suffix → bool` | `{{ if endsWith .Page.SourceFile ".md" }}` |
+| `hasPrefix` | alias of `startsWith` (v1.8.5) | `{{ if hasPrefix .Page.Slug "guide-" }}` |
+| `hasSuffix` | alias of `endsWith` (v1.8.5) | `{{ if hasSuffix .Page.SourceFile ".md" }}` |
+| `matches` | `matches pattern value → bool` | ``{{ if matches `^guide-` .Page.Slug }}`` — RE2; compiled patterns are cached; invalid patterns error |
+| `isNil` | `isNil value → bool` | true for nil interfaces/pointers/maps/slices/funcs/chans; never panics |
+| `isEmpty` | `isEmpty value → bool` | Go template truthiness: nil, `""`, `0`, `false`, empty slice/map ⇒ empty. Structs are never empty (zero `time.Time` included — use `.IsZero`) |
+| `ternary` | `ternary cond a b → any` | `{{ ternary .Page.HasMath "math" "plain" }}` — for values, not control flow |
+
+`in` takes the **value first, collection second** (the canonical form above).
+For pipeline-style membership tests use `filter … "in" …` instead.
+
+---
+
+## Content helpers (wrappers)
+
+| Helper | Equivalent to | Example |
+|--------|---------------|---------|
+| `latest field n c` | `sort field "desc" \\| first n` | `{{ .Site.Posts \\| latest "Modified" 5 }}` |
+| `published c` | `where "Status" "publish"` | `{{ .Site.Pages \\| published }}` |
+| `byTag t c` | `filter "Tags" "contains" t` | `{{ .Site.Posts \\| byTag "go" }}` |
+| `byCategory name c` | *(site-aware)* | `{{ .Site.Posts \\| byCategory "guides" }}` — matches frontmatter `Category` or resolved category names/slugs, case-insensitive; `[]models.Page` only |
+| `byAuthor a c` | *(site-aware)* | `{{ .Site.Posts \\| byAuthor "jan-kowalski" }}` — by ID, name or slug; `[]models.Page` only |
+| `relatedIn page n c` | *(scored)* | `{{ .Site.Posts \\| relatedIn .Page 3 }}` — ranks by shared tags (3) > shared categories (2) > same author (1), recency breaks ties, excludes the current page, only positive scores |
+
+---
+
+## Classic utility helpers
+
+SSG registers several helper functions in the Go template engine for date formatting, HTML cleaning, metadata lookup, and logic controls.
+
+### HTML and String Utilities
+* **`raw value`** (alias **`html`**) — Emits a value as HTML with **no processing
+  at all** — the plain `template.HTML` cast. Use it for markup that comes from
+  data: inline SVG, a pre-rendered snippet, an embedded config blob.
+
+  ```gotemplate
+  <svg viewBox="0 0 24 24">{{ index .Data.icons .Name | raw }}</svg>
+  ```
+
+  `safeHTML` is **not** a substitute here: in a page template it runs the Markdown
+  pipeline, which wraps the fragment in a `<p>`. Inside `<svg>` that is invalid,
+  so nothing draws and nothing warns.
+
+* **`safeHTML value`** — **Renders a page's Markdown body.** Despite the name, this
+  is not only an escaping escape hatch: it is the pipeline that turns the raw
+  Markdown source into HTML — shortcodes, the table of contents marker, Markdown
+  conversion, `.md` link rewriting, `link_rewrites`, sanitizing — and returns
+  `template.HTML` so the result is not escaped again.
+
+  **A content field piped through anything else is emitted as raw Markdown.**
+  `{{ .Content }}` renders `# Title` literally instead of an `<h1>`, which is the
+  single most common template mistake:
+
+  ```gotemplate
+  {{ .Post.Content | safeHTML }}   {{/* posts   — correct */}}
+  {{ .Page.Content | safeHTML }}   {{/* pages   — correct */}}
+  {{ .Content }}                   {{/* WRONG — raw Markdown reaches the reader */}}
+  ```
+
+  Use it for shortcode output and other pre-rendered HTML too.
+* **`decodeHTML value`** — Unescapes standard HTML entity sequences (e.g. `&amp;` becomes `&`).
+  ```gotemplate
+  {{ decodeHTML .Title }}
+  ```
+* **`stripHTML value`** — Strips all HTML tags (`<...>` pattern) from the string.
+  ```gotemplate
+  {{ .Content | stripHTML }}
+  ```
+* **`stripShortcodes value`** — Strips YouTube and embed WordPress-style bracket shortcodes (`[youtube]...[/youtube]`, `[embed]...[/embed]`) from the text.
+  ```gotemplate
+  {{ .Content | stripShortcodes }}
+  ```
+
+### Date Formatting
+* **`formatDate value`** — Formats a date. If a string is passed, it returns it as-is.
+  ```gotemplate
+  {{ formatDate .Date }}
+  ```
+* **`formatDatePL date`** — Formats a Go `time.Time` date using Polish month names (e.g., `14 lipca 2026`).
+  ```gotemplate
+  {{ formatDatePL .Date }}
+  ```
+
+### Taxonomy and Metadata Lookup
+* **`getCategoryName id`** — Looks up and returns the name of a category by its integer ID from `metadata.json`.
+  ```gotemplate
+  {{ getCategoryName .Category }}
+  ```
+* **`getCategorySlug id`** — Looks up and returns the slug of a category by its integer ID from `metadata.json`.
+  ```gotemplate
+  {{ getCategorySlug .Category }}
+  ```
+* **`isValidCategory id`** — Returns `true` if the category ID is not `1` (ID `1` is commonly reserved for "Bez kategorii").
+  ```gotemplate
+  {{ if isValidCategory .Category }}...{{ end }}
+  ```
+* **`getAuthorName id`** — Looks up and returns the name of an author by their integer ID from `metadata.json`.
+  ```gotemplate
+  {{ getAuthorName .Author }}
+  ```
+* **`hasValidCategories page`** — Returns `true` if the page or post has categories assigned other than ID `1`.
+  ```gotemplate
+  {{ if hasValidCategories . }}...{{ end }}
+  ```
+
+### Pages and URLs
+* **`getURL page`** — Helper function that returns the calculated URL path for the page or post. Equivalent to calling `.GetURL`.
+  ```gotemplate
+  {{ getURL . }}
+  ```
+* **`getCanonical page`** — Helper function that returns the full canonical URL for the page or post. Equivalent to calling `.GetCanonical .Domain`.
+  ```gotemplate
+  {{ getCanonical . }}
+  ```
+
+### Miscellaneous Helpers
+* **`thumbnailFromYoutube value`** — Extracts the YouTube video ID from a YouTube WordPress-style shortcode and returns its high-quality video thumbnail URL (`https://img.youtube.com/vi/<id>/hqdefault.jpg`).
+  ```gotemplate
+  {{ thumbnailFromYoutube .Content }}
+  ```
+* **`recentPosts n`** — Returns a list of the first `n` posts. Safely clamps the count at both ends to prevent slice panics.
+  ```gotemplate
+  {{ range recentPosts 5 }}...{{ end }}
+  ```
+* **`default defaultVal val`** — Returns `defaultVal` if `val` is empty, `nil`, `""`, or `0`. Otherwise returns `val`.
+  ```gotemplate
+  {{ default "No title" .Title }}
+  ```
+* **`dict key1 val1 key2 val2 ...`** — Creates a dictionary (map) from key-value arguments. Useful for passing complex parameters into other helpers like `imageResize`.
+  ```gotemplate
+  {{ $image := imageResize "photo.jpg" (dict "width" 300 "height" 200 "mode" "fill") }}
+  ```
+  `dict` is also how a partial receives a computed context:
+  ```gotemplate
+  {{ template "site-head" (dict "Title" .Page.Title "Ctx" .) }}
+  ```
+
+### Arithmetic
+
+Go templates have no arithmetic of their own; these four cover the cases a
+theme actually needs (column splits, "page N of M", index offsets).
+
+* **`add a b`**, **`sub a b`**, **`mul a b`**, **`div a b`** — Integer operands
+  give an integer result and `div` divides integrally (`div 7 2` → `3`); a
+  float operand anywhere gives a float (`div 7.0 2` → `3.5`). Dividing by zero
+  is a template error rather than infinity, and a non-numeric argument fails
+  the render with a message naming the helper.
+  ```gotemplate
+  {{ $half := div (add (len .Site.Pages) 1) 2 }}
+  {{ range $i, $p := .Site.Pages }}{{ if lt $i $half }}…{{ end }}{{ end }}
+  ```
+
+---
+
+## Availability
+
+- **Theme templates** (`base/index/post/page/category.html`, layouts, partials):
+  every helper above.
+- **Shortcode templates**: the safe, deterministic subset — `slice`, `append`, `in`,
+  `notIn`, `contains`, `startsWith`, `endsWith`, `hasPrefix`, `hasSuffix`,
+  `matches`, `isNil`, `isEmpty`, `ternary` — plus the image helpers
+  (`imageResize`, `imageSrcSet`, …) and the read-only external-source helpers
+  (`getExternal`, `getExternalMeta`). Collection helpers that walk site-wide
+  data stay theme-only.
+- **Alt engines** (pongo2/mustache/handlebars): not applicable — those engines
+  ship their own filter syntax; these helpers are Go-template only.
+
+## Limitations
+
+- No custom predicates/lambdas, no `switch/case`, no JS expressions (by design).
+- `sort`/`filter` ordering requires comparable field types (see above).
+- `groupBy`/`indexBy`/`uniq` keys must be scalar.
+- `uniq` across mixed numeric types dedupes by rendered value (`1` ≡ `uint8(1)`).
+
+
+## Numbered pagination
+
+`.Pager` carries the neighbouring pages (`PrevURL`, `NextURL`) and, since
+1.8.38, every page with its address — so a theme can draw the numbered control
+its source site shows instead of only "← →".
+
+```gotemplate
+{{range .Pager.Pages}}
+  {{if .Current}}<span class="page-numbers current">{{.Number}}</span>
+  {{else}}<a class="page-numbers" href="{{.URL}}">{{.Number}}</a>{{end}}
+{{end}}
+```
+
+A long archive is better drawn windowed — first, last, and a few either side of
+the current page, with `…` for each gap, which is what WordPress renders:
+
+```gotemplate
+{{range .Pager.Window 2}}
+  {{if .Ellipsis}}<span class="page-numbers dots">…</span>
+  {{else if .Current}}<span class="page-numbers current">{{.Number}}</span>
+  {{else}}<a class="page-numbers" href="{{.URL}}">{{.Number}}</a>{{end}}
+{{end}}
+```
+
+The addresses come from the generator, so they follow `posts_page`, a language
+prefix and the archive's own base without a theme guessing the URL shape.
+`Current`, `Total`, `PerPage`, `PrevURL` and `NextURL` are unchanged.
+
+## Structured data
+
+`.Schema` is the JSON-LD SSG would inject for the page, already merged in
+precedence order — site-wide `schema:` < derived from frontmatter <
+`schema_defaults` for the section < the page's own `schema:`. Render it with
+`toJSON`:
+
+```gotemplate
+<script type="application/ld+json">{{ toJSON .Schema }}</script>
+```
+
+You need it when your theme writes JSON-LD of its own. **Auto-injection is
+gated on the theme having emitted none**: one hand-written
+`application/ld+json` block turns it off for the whole page, so a theme with,
+say, an `FAQPage` partial silently loses whatever `schema_defaults` declared for
+that section. Emitting `.Schema` beside your own block restores it without
+reimplementing the merge in the theme:
+
+```gotemplate
+<script type="application/ld+json">{{ toJSON .Schema }}</script>
+{{ partial "schema-faq" . }}
+```
+
+Two sibling blocks are what Google asks for when a `Recipe` and an `FAQPage`
+describe the same page. If you would rather ship one block, put both in a graph:
+
+```gotemplate
+<script type="application/ld+json">
+{"@context":"https://schema.org","@graph":[{{ toJSON .Schema }}, {{ toJSON .FAQ }}]}
+</script>
+```
+
+`check_schema` accepts either shape, and reports a section's `@type` that
+reached neither (see [Validating structured data](CONFIGURATION.md#validating-structured-data)).
