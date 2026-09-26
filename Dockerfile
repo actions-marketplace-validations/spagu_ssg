@@ -35,7 +35,7 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH="${TARGETARCH}" GOARM="${TARGETVARIANT#v}" \
 # Pinned by digest as well as tag: a tag is a moving target, so a digest is
 # what makes a build reproducible. Dependabot bumps both (.github/dependabot.yml)
 # — a digest nobody updates stops receiving security patches silently.
-FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
+FROM alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
 
 # Install runtime dependencies (cwebp)
 RUN apk add --no-cache libwebp-tools
