@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	neturl "net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -35,20 +36,31 @@ import (
 	"github.com/spagu/ssg/internal/webp"
 )
 
-// Version is set by build flags
-var Version = "dev"
+// Version is set by build flags; see version.go for a `go install` build.
+var Version = devVersion
 
 func main() {
-	args := os.Args[1:]
+	if code, done := run(os.Args[1:]); done {
+		os.Exit(code)
+	}
+}
 
+// run is main without the exit, so the whole startup sequence can be tested.
+//
+// It returns (code, true) when the program is finished and should exit with
+// that code, and (0, false) when it has handed control to a loop that owns the
+// process from here — the watcher, or the HTTP server. Splitting it this way
+// keeps every decision main used to make in one testable place, and leaves
+// main with the single thing a test cannot do: exit.
+func run(args []string) (int, bool) {
 	// Subcommands. Verb+noun pairs (new worker, import redirects) dispatch only
 	// on a known noun so a source directory literally named "new"/"import" still
 	// builds normally (GO-067). `init` is a standalone verb like `git init`.
 	if code, handled := dispatchSingleVerb(args); handled {
-		os.Exit(code)
+		return code, true
 	}
 	if code, handled := dispatchSubcommand(args); handled {
-		os.Exit(code)
+		return code, true
 	}
 
 	cfg := loadConfig(args)
@@ -65,8 +77,22 @@ func main() {
 	// gives no way to tell whether the tool changed or the site did.
 	logRunningVersion(cfg)
 
+	// A watch loop is where narrowing pays for itself: the alternative is a
+	// full build on every save. One-shot builds stay full unless asked,
+	// because a build nobody is waiting on should be the simple one (GO-094).
+	if cfg.Watch {
+		cfg.Incremental = true
+		genCfg.Incremental = true
+	}
+
+	// Edit mode is checked before the first build, so a refused combination
+	// says so instead of building a site with an editor marker nobody serves.
+	if !startEditMode(genCfg, cfg) {
+		return 2, true
+	}
+
 	if !runInitialBuild(genCfg, cfg) && !cfg.Watch && !cfg.HTTP {
-		os.Exit(1)
+		return 1, true
 	}
 
 	if cfg.HTTP {
@@ -76,7 +102,17 @@ func main() {
 		startServerAsync(cfg)
 	}
 
+	if !ownsTheProcess(cfg) {
+		return 0, true // a one-shot build: nothing is waiting on anything
+	}
 	runWatchOrServe(genCfg, cfg)
+	return 0, false
+}
+
+// ownsTheProcess reports whether this run ends by handing control to something
+// that keeps running — a watcher, or the HTTP server — rather than returning.
+func ownsTheProcess(cfg *config.Config) bool {
+	return cfg.Watch || cfg.HTTP || (cfg.Mddb.Watch && cfg.Mddb.Enabled)
 }
 
 // autoReloadEnabled reports whether live reload should run: it needs both the
@@ -114,7 +150,7 @@ func runInitialBuild(genCfg generator.Config, cfg *config.Config) bool {
 // runWatchOrServe handles watch mode loop or HTTP server blocking
 func runWatchOrServe(genCfg generator.Config, cfg *config.Config) {
 	if cfg.Mddb.Watch && cfg.Mddb.Enabled {
-		runMddbWatchLoop(genCfg, cfg)
+		runMddbWatchLoop(genCfg, cfg, nil) // the process's own loop: it ends with the process
 	} else if cfg.Watch {
 		runWatchLoop(genCfg, cfg, nil) // the process's own loop: it ends with the process
 	} else if cfg.HTTP {
@@ -139,7 +175,7 @@ func runWatchLoop(genCfg generator.Config, cfg *config.Config, stop <-chan struc
 	// has bindings to read (GO-077).
 	ensureWranglerForWorkers(cfg)
 	config.ApplyWorkerWatchDefaults(cfg)
-	if cfg.WatchRunner != "" {
+	if cfg.WatchRunner != "" && !config.RunnerDisabled(cfg.WatchRunner) {
 		cmd := startWatchRunner(watchRunnerSpec{
 			Runner: cfg.WatchRunner,
 			Config: cfg.WatchRunnerConfig,
@@ -259,14 +295,26 @@ func watchIteration(dirs []string, sigCache *fileSigCache, lastBuild time.Time, 
 }
 
 // watchDirs returns the directories watched for changes: content, templates,
-// data and every extra Markdown root, so editing a file in a content_sources
-// directory rebuilds like editing the primary source does (CONTENT-002).
+// data, every extra Markdown root (CONTENT-002) — and the static roots (#235).
+// static_dir is where the files somebody edits most often while watching live
+// end up — the stylesheet, the script, the logo — and since 1.8.51 it is also
+// where the MCP media tools write, so an assistant swapping a picture over MCP
+// changes a file the watcher otherwise cannot see. "Save and look" has to be
+// true for these files too.
 func watchDirs(cfg *config.Config) []string {
 	dirs := []string{cfg.ContentDir, cfg.TemplatesDir}
 	if cfg.DataDir != "" {
 		dirs = append(dirs, cfg.DataDir)
 	}
+	if cfg.StaticDir != "" {
+		dirs = append(dirs, cfg.StaticDir)
+	}
 	for _, src := range cfg.ContentSources {
+		if p := strings.TrimSpace(src.Path); p != "" {
+			dirs = append(dirs, p)
+		}
+	}
+	for _, src := range cfg.StaticSources {
 		if p := strings.TrimSpace(src.Path); p != "" {
 			dirs = append(dirs, p)
 		}
@@ -274,8 +322,13 @@ func watchDirs(cfg *config.Config) []string {
 	return dirs
 }
 
-// runMddbWatchLoop continuously polls MDDB checksum and rebuilds on changes
-func runMddbWatchLoop(genCfg generator.Config, cfg *config.Config) {
+// runMddbWatchLoop continuously polls the MDDB checksum and rebuilds on change.
+//
+// stop ends the loop, exactly as it does for runWatchLoop beside it: a nil
+// channel never fires, which is the main command's case, where the loop ends
+// with the process. Without it the loop had no exit at all, which made it
+// impossible to own from anywhere else — and impossible to test.
+func runMddbWatchLoop(genCfg generator.Config, cfg *config.Config, stop <-chan struct{}) {
 	client, err := mddb.NewMddbClient(mddb.ClientConfig{
 		URL:       cfg.Mddb.URL,
 		Protocol:  cfg.Mddb.Protocol,
@@ -289,6 +342,7 @@ func runMddbWatchLoop(genCfg generator.Config, cfg *config.Config) {
 		return
 	}
 
+	collections := cfg.Mddb.Collections()
 	interval := cfg.Mddb.WatchInterval
 	if interval <= 0 {
 		interval = 30
@@ -296,13 +350,13 @@ func runMddbWatchLoop(genCfg generator.Config, cfg *config.Config) {
 
 	if !cfg.Quiet {
 		fmt.Printf("👀 Watching MDDB collection '%s' for changes (interval: %ds)...\n",
-			cfg.Mddb.Collection, interval)
+			strings.Join(collections, "', '"), interval)
 	}
 
 	var lastChecksum string
 
 	// Get initial checksum
-	checksumResp, err := client.Checksum(cfg.Mddb.Collection)
+	checksumResp, err := mddbChecksum(client, collections)
 	if err != nil {
 		errf("⚠️  Could not get initial checksum: %v\n", err)
 	} else {
@@ -314,9 +368,13 @@ func runMddbWatchLoop(genCfg generator.Config, cfg *config.Config) {
 	}
 
 	for {
-		time.Sleep(time.Duration(interval) * time.Second)
+		select {
+		case <-stop:
+			return
+		case <-time.After(time.Duration(interval) * time.Second):
+		}
 
-		checksumResp, err := client.Checksum(cfg.Mddb.Collection)
+		checksumResp, err := mddbChecksum(client, collections)
 		if err != nil {
 			if !cfg.Quiet {
 				errf("⚠️  Checksum check failed: %v\n", err)
@@ -333,6 +391,26 @@ func runMddbWatchLoop(genCfg generator.Config, cfg *config.Config) {
 			rebuildOnChange(genCfg, cfg)
 		}
 	}
+}
+
+// mddbChecksum is one checksum over every collection the build reads, so a
+// change in any of them rebuilds (#361). A single collection reports its own
+// checksum unchanged.
+func mddbChecksum(client mddb.MddbClient, collections []string) (*mddb.ChecksumResponse, error) {
+	if len(collections) == 1 {
+		return client.Checksum(collections[0])
+	}
+	sums := make([]string, 0, len(collections))
+	total := 0
+	for _, c := range collections {
+		resp, err := client.Checksum(c)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", c, err)
+		}
+		sums = append(sums, resp.Checksum)
+		total += resp.DocumentCount
+	}
+	return &mddb.ChecksumResponse{Checksum: strings.Join(sums, "+"), DocumentCount: total}, nil
 }
 
 // rebuildOnChange handles rebuilding when changes are detected. It no longer
@@ -611,7 +689,13 @@ func createGeneratorConfig(cfg *config.Config) generator.Config {
 		ContentDir:             cfg.ContentDir,
 		TemplatesDir:           cfg.TemplatesDir,
 		OutputDir:              cfg.OutputDir,
+		MinifyHTMLKeepComments: cfg.MinifyHTMLKeepComments,
+		SiteGraph:              cfg.SiteGraph,
+		Version:                Version,
+		Marketing:              cfg.Marketing,
 		SitemapOff:             cfg.SitemapOff,
+		Sitemaps:               cfg.Sitemaps,
+		SitemapMaxURLs:         cfg.SitemapMaxURLs,
 		RobotsOff:              cfg.RobotsOff,
 		RobotsRules:            robotsRulesOf(cfg),
 		NotFoundOff:            cfg.NotFoundOff,
@@ -620,6 +704,9 @@ func createGeneratorConfig(cfg *config.Config) generator.Config {
 		PostURLFormat:          cfg.PostURLFormat,
 		PageFormat:             cfg.PageFormat,
 		RelativeLinks:          cfg.RelativeLinks,
+		BasePath:               config.ResolveBasePath(cfg.BasePath, cfg.Domain),
+		NoAutolinkLists:        cfg.AutolinkListItems != nil && !*cfg.AutolinkListItems,
+		NoHostFiles:            cfg.HostFiles != nil && !*cfg.HostFiles,
 		Shortcodes:             shortcodes,
 		ShortcodeBrackets:      cfg.ShortcodeBrackets,
 		MinifyHTML:             cfg.MinifyHTML,
@@ -682,8 +769,21 @@ func createGeneratorConfig(cfg *config.Config) generator.Config {
 		ContentSchemas:         cfg.ContentSchemas,
 		Strict:                 cfg.Strict,
 		RouteManifest:          cfg.RouteManifest,
+		BuildReport:            cfg.BuildReport,
+		Profile:                cfg.Profile,
+		AnalyticsIDs:           cfg.AnalyticsIDs,
+		ComponentsDir:          cfg.ComponentsDir,
+		RenderHooks:            cfg.RenderHooks,
+		Versions:               generator.VersionsConfig{NoindexOld: cfg.Versions.NoindexOld},
+		EditMode:               cfg.Edit,
 		BuildWorkers:           resolveBuildWorkers(cfg.BuildWorkers),
 		AI:                     buildAIClient(cfg.AI),
+		Audio:                  buildAudioOptions(cfg),
+		Listen:                 buildListenOptions(cfg.Listen),
+		Print:                  buildPrintOptions(cfg.Print),
+		CookMode:               buildCookModeOptions(cfg.CookMode),
+		HeadingAnchors:         generator.HeadingAnchorsOptions(cfg.HeadingAnchors),
+		Breadcrumbs:            buildBreadcrumbOptions(cfg.Breadcrumbs),
 		Notify:                 buildNotifier(cfg),
 		CheckLinks:             cfg.CheckLinks,
 		PostsPage:              cfg.PostsPage,
@@ -694,8 +794,14 @@ func createGeneratorConfig(cfg *config.Config) generator.Config {
 		CheckMarkup:            cfg.CheckMarkup,
 		CheckMeta:              cfg.CheckMeta,
 		CheckSchema:            cfg.CheckSchema,
+		CheckSchemaRecommended: cfg.CheckSchemaRecommended,
+		RecipeHeadings:         cfg.RecipeHeadings,
 		CheckOrphans:           cfg.CheckOrphans,
 		CheckRedirects:         cfg.CheckRedirects,
+		CheckAPI:               cfg.CheckAPI,
+		APIDocs:                buildAPIDocsOptions(cfg.APIDocs),
+		Resume:                 generator.ResumeOptions(cfg.Resume),
+		WebStories:             buildWebStoriesOptions(cfg),
 		PrettyURLs:             cfg.PrettyURLs,
 		ContentExclude:         cfg.ContentExclude,
 		SitemapPruneCanonical:  cfg.SitemapPruneCanonical,
@@ -705,6 +811,12 @@ func createGeneratorConfig(cfg *config.Config) generator.Config {
 		MetaLimits:             cfg.MetaLimits,
 		Bundles:                cfg.Bundles,
 		Outputs:                cfg.Outputs,
+		OutputsPerType:         cfg.OutputsPerType,
+		Incremental:            cfg.Incremental,
+		MarkdownCache:          cfg.MarkdownCacheEnabled(),
+		CacheDir:               ".ssg-cache",
+		ConfigPath:             configPathOf(os.Args[1:]),
+		OutputsCustom:          toGeneratorOutputs(cfg.OutputsCustom),
 		SearchIndex:            cfg.SearchIndex,
 		WebMCP:                 cfg.WebMCP,
 		SanitizeHTML:           cfg.SanitizeHTML,
@@ -730,6 +842,7 @@ func createGeneratorConfig(cfg *config.Config) generator.Config {
 			Timeout:    cfg.Mddb.Timeout,
 			BatchSize:  cfg.Mddb.BatchSize,
 			AllowHTTP:  cfg.Mddb.AllowHTTP,
+			Sources:    mddbSourcesOf(cfg),
 		},
 	}
 }
@@ -774,6 +887,23 @@ func workersOf(cfg *config.Config) []generator.WorkerConfig {
 // contentSourcesOf converts the configured extra Markdown roots into the
 // generator's own type, keeping the two packages free of a shared dependency
 // (the same pattern as MddbConfig above). CONTENT-002.
+// mddbSourcesOf maps mddb.sources onto the generator's own type (#361).
+func mddbSourcesOf(cfg *config.Config) []generator.MddbSource {
+	if len(cfg.Mddb.Sources) == 0 {
+		return nil
+	}
+	out := make([]generator.MddbSource, 0, len(cfg.Mddb.Sources))
+	for _, src := range cfg.Mddb.Sources {
+		out = append(out, generator.MddbSource{
+			Collection: src.Collection,
+			Filter:     src.Filter,
+			Type:       src.Type,
+			Section:    src.Section,
+		})
+	}
+	return out
+}
+
 func contentSourcesOf(cfg *config.Config) []generator.ContentSource {
 	if len(cfg.ContentSources) == 0 {
 		return nil
@@ -820,7 +950,7 @@ func parseFlags(args []string, cfg *config.Config) {
 		}
 		i += parseValueFlags(args, i, cfg)
 	}
-	if cfg.WatchRunner != "" {
+	if cfg.WatchRunner != "" && !config.RunnerDisabled(cfg.WatchRunner) {
 		cfg.Watch = true
 	}
 	warnUnknownFlags(args, cfg)
@@ -829,57 +959,69 @@ func parseFlags(args []string, cfg *config.Config) {
 // parseBoolFlags handles boolean flags, returns true if flag was handled. Simple
 // on/off toggles are table-driven (name → target field) to keep this small and DRY.
 func parseBoolFlags(arg string, cfg *config.Config) bool {
+	if arg == "--build-report" { // bare: the default file (#338)
+		cfg.BuildReport = generator.DefaultBuildReport
+		return true
+	}
 	if arg == "--auto-reload" || arg == "--no-auto-reload" { // *bool: on by default in --watch
 		v := arg == "--auto-reload"
 		cfg.AutoReload = &v
 		return true
 	}
-	if arg == "--wrangler" || arg == "-wrangler" {
-		selectWatchRunner(cfg, "wrangler", "", "")
+	if arg == markdownCacheFlag || arg == noMarkdownCacheFlag { // *bool, off by default (#270)
+		v := arg == markdownCacheFlag
+		cfg.MarkdownCache = &v
 		return true
 	}
-	if arg == "--workerd" || arg == "-workerd" {
-		selectWatchRunner(cfg, "workerd", "", "")
+	if runner, ok := watchRunnerFlags()[arg]; ok {
+		selectWatchRunner(cfg, runner, "", "")
 		return true
 	}
-	if arg == "--check-links" { // the one toggle that sets a string mode, not a bool
-		cfg.CheckLinks = "warn"
+	if arg == "--profile" { // bare form reports on stdout; --profile=json writes the file
+		cfg.Profile = generator.ProfileText
 		return true
 	}
-	if arg == "--check-images" { // same shape: bare form means warn (#75)
-		cfg.CheckImages = "warn"
-		return true
-	}
-	if arg == "--check-meta" { // same shape: bare form means warn (#76)
-		cfg.CheckMeta = "warn"
+	if target, ok := bareCheckFlags(cfg)[arg]; ok {
+		*target = "warn"
 		return true
 	}
 	if arg == "--no-check-markup" { // the one check that is on by default (#127)
 		cfg.CheckMarkup = ""
 		return true
 	}
-	if arg == "--check-schema" { // same shape: bare form means warn (#111)
-		cfg.CheckSchema = "warn"
-		return true
-	}
-	if arg == "--check-orphans" { // same shape: bare form means warn (#77)
-		cfg.CheckOrphans = "warn"
-		return true
-	}
-	if arg == "--check-redirects" { // same shape: bare form means warn (#87)
-		cfg.CheckRedirects = "warn"
-		return true
-	}
 	if arg == "--seo-off" { // deprecated no-op: SEO injection is opt-in since v1.8.2
 		cfg.SEO = false
 		return true
 	}
-	toggles := boolFlagTargets(cfg)
-	if target, ok := toggles[arg]; ok {
+	if target, ok := boolFlagTargets(cfg)[arg]; ok {
 		*target = true
 		return true
 	}
 	return false
+}
+
+// watchRunnerFlags are the convenience spellings that both select a runner and
+// turn watching on.
+func watchRunnerFlags() map[string]string {
+	return map[string]string{
+		"--wrangler": "wrangler", "-wrangler": "wrangler",
+		"--workerd": "workerd", "-workerd": "workerd",
+	}
+}
+
+// bareCheckFlags are the checks whose bare flag means "warn". Each also takes
+// an explicit level as --check-x=strict, which the equals-flag parser handles;
+// listing them here is what keeps six near-identical branches from being
+// written out, and what makes adding the seventh a one-line change.
+func bareCheckFlags(cfg *config.Config) map[string]*string {
+	return map[string]*string{
+		"--check-links":     &cfg.CheckLinks,
+		"--check-images":    &cfg.CheckImages,    // #75
+		"--check-meta":      &cfg.CheckMeta,      // #76
+		"--check-schema":    &cfg.CheckSchema,    // #111
+		"--check-orphans":   &cfg.CheckOrphans,   // #77
+		"--check-redirects": &cfg.CheckRedirects, // #87
+	}
 }
 
 // selectWatchRunner enables watch mode for a runner, optionally recording where
@@ -987,6 +1129,8 @@ func stringEqualFlags(cfg *config.Config) map[string]*string {
 		"--image-sizes-attr=": &cfg.ImageSizesAttr,
 		"--sass-binary=":      &cfg.SassBinary,
 		"--highlight-style=":  &cfg.HighlightStyle,
+		"--profile-pprof=":    &cfg.ProfilePprof,
+		"--components-dir=":   &cfg.ComponentsDir,
 		"--default-language=": &cfg.DefaultLanguage,
 		"--timezone=":         &cfg.Timezone,
 		"--engine=":           &cfg.Engine,
@@ -1089,6 +1233,12 @@ func parseMiscEqualFlags(arg string, cfg *config.Config) {
 		setPermalink(cfg, "post", strings.TrimPrefix(arg, "--permalink-post="))
 	case strings.HasPrefix(arg, "--permalink-page="):
 		setPermalink(cfg, "page", strings.TrimPrefix(arg, "--permalink-page="))
+	case strings.HasPrefix(arg, "--build-report="): // #338
+		cfg.BuildReport = strings.TrimPrefix(arg, "--build-report=")
+	case strings.HasPrefix(arg, "--profile="):
+		if v := strings.TrimPrefix(arg, "--profile="); v == generator.ProfileText || v == generator.ProfileJSON {
+			cfg.Profile = v
+		}
 	case strings.HasPrefix(arg, "--check-links="):
 		if v := strings.TrimPrefix(arg, "--check-links="); v == "warn" || v == "strict" {
 			cfg.CheckLinks = v
@@ -1206,6 +1356,10 @@ func parseSeparateValueFlags(args []string, i int, cfg *config.Config) int {
 // SEC-012: it defaults to loopback and flags exposure when an all-interfaces
 // address is requested. net.JoinHostPort brackets IPv6 literals so --host=::1
 // yields a valid listen address (GO-034).
+//
+// The URL is plain by default because the preview server is: TLS is opt-in, and
+// resolveListenURL is what a caller that has turned it on uses instead of
+// rewriting the string afterwards.
 func resolveListenAddr(host string, port int) (addr, url string, exposed bool) {
 	if host == "" {
 		host = "127.0.0.1"
@@ -1217,29 +1371,58 @@ func resolveListenAddr(host string, port int) (addr, url string, exposed bool) {
 		display = "127.0.0.1"
 		exposed = true
 	}
-	url = fmt.Sprintf("http://%s", net.JoinHostPort(display, portStr))
-	return addr, url, exposed
+	return addr, resolveListenURL(false, net.JoinHostPort(display, portStr)), exposed
 }
 
+// resolveListenURL formats the address a person is meant to open, for the
+// scheme the server actually speaks.
+func resolveListenURL(secure bool, hostPort string) string {
+	scheme := plainScheme
+	if secure {
+		scheme = plainScheme + "s"
+	}
+	return (&neturl.URL{Scheme: scheme, Host: hostPort}).String()
+}
+
+// The between-builds conversion cache's flags (#270), named so the parser, the
+// known-flag list and any future caller all spell them the same way.
+const (
+	markdownCacheFlag   = "--markdown-cache"
+	noMarkdownCacheFlag = "--no-markdown-cache"
+)
+
+// plainScheme is the preview server's default. It is not a mistake and not a
+// setting a site inherits: this is a development server on loopback, and every
+// public deployment is somebody else's TLS.
+const plainScheme = "http"
+
 func build(genCfg generator.Config, cfg *config.Config) error {
+	warnSnapPrivatePaths(os.Stderr, genCfg, isSnapInstall(executableOf()))
 	gen, err := generator.New(genCfg)
 	if err != nil {
 		return fmt.Errorf("initializing generator: %w", err)
 	}
+	// The build's own accounting (GO-097). The generator measures its phases;
+	// the steps that live out here — images, archives, deployment — join the
+	// same report, because a build that spends nine seconds converting images
+	// is not explained by anything inside the generator.
+	prof := gen.Profile()
+	defer emitProfile(prof, cfg)
+	defer startPprof(cfg)()
 	if err := gen.Generate(); err != nil {
 		return fmt.Errorf("generating site: %w", err)
 	}
-	if err := emitEndpoints(cfg); err != nil {
+	if err := prof.Measure("Endpoints", func() error { return emitEndpoints(cfg) }); err != nil {
 		return err
 	}
 	runImagesGC(gen, cfg)
-	if err := runWebP(cfg); err != nil {
+	if err := prof.Measure("Images", func() error { return runWebP(cfg, prof) }); err != nil {
 		return err
 	}
-	if err := runArchives(cfg); err != nil {
+	if err := prof.Measure("Archives", func() error { return runArchives(cfg) }); err != nil {
 		return err
 	}
-	return runDeploy(cfg)
+	return prof.Measure("Deploy", func() error { return runDeploy(cfg) })
 }
 
 // runImagesGC prunes image-cache entries not referenced by this build when
@@ -1279,7 +1462,7 @@ func resolveBuildWorkers(n *int) int {
 }
 
 // runWebP converts output images to WebP and rewrites references when --webp is set.
-func runWebP(cfg *config.Config) error {
+func runWebP(cfg *config.Config, prof *generator.Profile) error {
 	if !cfg.WebP && !wantsFormat(cfg, "webp") && !wantsFormat(cfg, "avif") {
 		return nil
 	}
@@ -1300,13 +1483,16 @@ func runWebP(cfg *config.Config) error {
 	if err != nil {
 		return fmt.Errorf("converting to WebP: %w", err)
 	}
-	if err := webp.UpdateReferences(cfg.OutputDir); err != nil {
+	// The site's own absolute image URLs (og:image, #350) are rewritten too.
+	if err := webp.UpdateReferencesOnSite(cfg.OutputDir, siteOrigin(cfg.Domain)); err != nil {
 		return fmt.Errorf("updating image references: %w", err)
 	}
 	// Emit responsive srcset/sizes for images that have variants (ASSET-004).
 	if err := webp.EmitSrcset(cfg.OutputDir, cfg.ImageSizes, cfg.ImageSizesAttr); err != nil {
 		return fmt.Errorf("emitting responsive srcset: %w", err)
 	}
+	prof.Count("images converted", int64(converted))
+	prof.Count("image bytes saved", saved)
 	if !cfg.Quiet && converted > 0 {
 		fmt.Printf("   📊 Converted %d images, saved %.1f MB\n", converted, float64(saved)/(1024*1024))
 	}
@@ -1562,6 +1748,9 @@ func printUsage() {
 	fmt.Println("  ssg init [name]        - Scaffold a new site")
 	fmt.Println("  ssg new worker <kind>  - Scaffold a Pages Functions worker")
 	fmt.Println("  ssg new wrangler       - Generate a starter wrangler.toml")
+	fmt.Println("  ssg graph [path]       - What a change rebuilds, and why a build cannot be narrowed")
+	fmt.Println("  ssg config view|set|unset - Read and edit the config, comments intact")
+	fmt.Println("  ssg profile page /url/ - What one page cost in the last profiled build")
 	fmt.Println("  ssg import redirects   - Convert a Next.js redirects() rule set")
 	fmt.Println("  ssg migrate <src> <url> - Migrate a live site (see 'ssg migrate --help')")
 	fmt.Println("  ssg repair [--fix]     - Find (and fix) markup a migration left indented")
@@ -1688,6 +1877,12 @@ func printUsage() {
 	fmt.Println("                           strict = keep and fail the build)")
 	fmt.Println("  --strict               - Escalate every soft build problem into a hard failure")
 	fmt.Println("  --route-manifest       - Write routes.json so the route contract ships with the site")
+	fmt.Println("  --build-report[=FILE]  - Write a JSON build report (version, duration, pages) to FILE, default build.json")
+	fmt.Println("  --edit                 - Turn the preview into an editor (needs --http --watch); see docs/EDITING.md")
+	fmt.Println("  --incremental          - Rebuild only what a change affects (default in --watch)")
+	fmt.Println("  --markdown-cache       - Keep converted Markdown between builds (off by default; see docs)")
+	fmt.Println("  --profile[=json]       - Report where the build's time went; json writes build-profile.json")
+	fmt.Println("  --profile-pprof=DIR    - Also write cpu.prof and heap.prof for `go tool pprof`")
 	fmt.Println("  --notify               - Announce new and changed posts to the configured channels")
 	fmt.Println("")
 	fmt.Println("Internationalisation (docs/I18N.md):")
@@ -1804,6 +1999,22 @@ func watchRunnerCommand(runner, runnerConfig string) (string, []string) {
 	}
 }
 
+// runnerMissingMessage explains a runner that is not installed (#326): the
+// static preview keeps working, the Functions do not, and the reader is told
+// how to get them or how to stop being told. In the Docker image there is no
+// Node at all, which is worth saying in so many words.
+func runnerMissingMessage(cmdName, runner string, inDocker bool) string {
+	msg := fmt.Sprintf("ℹ️  Watch runner %q not started: %s is not installed here, so /api/* Functions are not served "+
+		"(the static preview works).\n", runner, cmdName)
+	if inDocker {
+		msg += "   The ssg Docker image has no Node: run `npx wrangler pages dev output` on the host beside it, " +
+			"or use an image with Node.\n"
+	} else {
+		msg += "   Install Node.js (for npx and wrangler), or run the runner yourself.\n"
+	}
+	return msg + "   Set watch_runner: none to preview without Functions and skip this note (docs/WORKERS.md).\n"
+}
+
 // watchRunnerSpec describes the background process to spawn: which runner, the
 // config file it should read, and the directory it runs in. Dir covers the
 // monorepo layout where the Worker sits in a subdirectory while content and
@@ -1849,6 +2060,10 @@ func startWatchRunner(spec watchRunnerSpec) *exec.Cmd {
 			errf("⚠️  Watch-runner directory %q not usable: %v\n", spec.Dir, err)
 			return nil
 		}
+	}
+	if _, err := exec.LookPath(cmdName); err != nil {
+		errf("%s", runnerMissingMessage(cmdName, spec.Runner, isDockerInstall()))
+		return nil
 	}
 	if !spec.Quiet {
 		where := ""
@@ -1937,6 +2152,8 @@ func knownFlagNames(cfg *config.Config) map[string]bool {
 // their own branch in parseBoolFlags/parseSpecialFlags.
 var standaloneFlagNames = []string{
 	"--help", "-h", "--version", "-v", "--auto-reload", "--no-auto-reload",
+	markdownCacheFlag, noMarkdownCacheFlag,
+	"--profile", "--build-report",
 	"--check-links", "--check-images", "--check-meta", "--check-schema",
 	"--check-orphans", "--check-redirects", "--seo-off", "--no-check-markup",
 }
@@ -2017,10 +2234,12 @@ func boolFlagTargets(cfg *config.Config) map[string]*bool {
 		"--search-index": &cfg.SearchIndex, "--seo": &cfg.SEO,
 		"--webmcp": &cfg.WebMCP,
 		"--strict": &cfg.Strict, "--route-manifest": &cfg.RouteManifest, // #62
-		"--notify":     &cfg.Notify,     // #1.8.16 announce new/changed posts
-		"--mddb-watch": &cfg.Mddb.Watch, // bool flag, not an =value flag (GO-018)
-		"--clean":      &cfg.Clean,
-		"--quiet":      &cfg.Quiet, "-q": &cfg.Quiet,
+		"--edit":        &cfg.Edit,        // GO-102: the preview server becomes an editor
+		"--incremental": &cfg.Incremental, // GO-094: narrow a build to what changed
+		"--notify":      &cfg.Notify,      // #1.8.16 announce new/changed posts
+		"--mddb-watch":  &cfg.Mddb.Watch,  // bool flag, not an =value flag (GO-018)
+		"--clean":       &cfg.Clean,
+		"--quiet":       &cfg.Quiet, "-q": &cfg.Quiet,
 		// External sources (docs/EXTERNAL_SOURCES.md)
 		"--offline":                  &cfg.ExternalSources.Offline,
 		"--refresh-external-sources": &cfg.ExternalSources.Refresh,
@@ -2044,4 +2263,25 @@ func logRunningVersion(cfg *config.Config) {
 		return
 	}
 	fmt.Printf("🧱 ssg %s\n", Version)
+}
+
+// toGeneratorOutputs converts the configured custom output formats (GO-092).
+func toGeneratorOutputs(in []config.CustomOutput) []generator.CustomOutput {
+	out := make([]generator.CustomOutput, 0, len(in))
+	for _, c := range in {
+		out = append(out, generator.CustomOutput{
+			Name: c.Name, Suffix: c.Suffix, MIME: c.MIME, Template: c.Template,
+		})
+	}
+	return out
+}
+
+// siteOrigin is the absolute origin the site is served at ("" without a
+// domain), the form an absolute og:image starts with (#350).
+func siteOrigin(domain string) string {
+	domain = strings.Trim(strings.TrimSpace(domain), "/")
+	if domain == "" {
+		return ""
+	}
+	return "https://" + domain
 }

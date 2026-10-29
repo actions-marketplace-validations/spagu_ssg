@@ -38,6 +38,37 @@ type MetaLimits struct {
 type StaticSource struct {
 	Path string `yaml:"path" toml:"path" json:"path"`
 	Dest string `yaml:"dest" toml:"dest" json:"dest"`
+	// Sitemap lists this entry in sitemap.xml (#255). A verbatim HTML document
+	// — a hand-authored SPA, a spec viewer — never becomes a Page, so no branch
+	// of the sitemap could reach it, however heavily the site links it. The
+	// generator cannot tell a document from an asset by looking, so the site
+	// says which of the files it already declares here is one.
+	Sitemap bool `yaml:"sitemap" toml:"sitemap" json:"sitemap"`
+	// Priority is the sitemap <priority> for that entry; 0 means the 0.8 an
+	// ordinary page gets.
+	Priority float64 `yaml:"priority" toml:"priority" json:"priority"`
+}
+
+// SitemapSpec is one declared sitemap file.
+//
+// `sitemap.xml` is one file holding everything, which answers neither of the
+// two questions a growing site asks. Above 50,000 URLs the protocol requires a
+// sitemap index, and Search Console reports indexing coverage **per submitted
+// sitemap**, so "how much of the blog is indexed" cannot be answered while the
+// blog shares a file with everything else.
+//
+// The shape mirrors [FeedSpec]: choose what goes in, and where it is written.
+// Selection is a partition — an entry lands in the first spec that matches it —
+// so order matters and no URL is listed twice or lost. Anything matching no
+// spec is written to a default file, and `sitemap.xml` becomes the index naming
+// them all.
+type SitemapSpec struct {
+	Path string `yaml:"path" toml:"path" json:"path"` // output path, e.g. "/sitemap-blog.xml"
+
+	// Selection — optional, combined with AND; none of them claims everything
+	// still unclaimed.
+	Source  string   `yaml:"source" toml:"source" json:"source"`    // a content_sources path / content folder
+	Include []string `yaml:"include" toml:"include" json:"include"` // pages, posts, categories, tags, authors, taxonomies, static, home, listing
 }
 
 // FeedSpec is one declared syndication feed (#86). It answers two questions the

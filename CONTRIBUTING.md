@@ -17,16 +17,32 @@ review workflow. By participating, you agree to follow the
 
 ## Requirements
 
-- Go 1.27.0 or newer
+- Go 1.27.3 or newer
 - Make for the documented shortcuts
 - Git
 - Optional `cwebp` for WebP integration paths
 - Optional Dart Sass for SCSS integration paths
 - Optional `golangci-lint`, `gosec` and `govulncheck` for extended checks
 
-Go 1.27.0 is the minimum: it is what the `go` directive asks for, and the
-linter refuses to analyse a target newer than the Go it was built with. The
-floor before it was 1.26.6, because earlier 1.26 standard libraries contain
+CI enforces a **96 % statement-coverage floor twice**: on the whole module, and
+on every package individually. Both are computed without the generated protobuf
+under `internal/mddb/proto` (the same exclusion `codecov.yml` uses). A pull
+request that drops either below the floor fails the `Test` job;
+`make test-coverage` shows the module number locally, and
+
+```bash
+go test -cover ./... | sort -t: -k2 -n
+```
+
+shows the per-package one. The second gate exists because the first was being
+held up by packages at 99–100 % while others sat in the eighties, which is
+exactly the shape a single number hides. gosec runs in CI too, with
+results in the repository's Security tab.
+
+Go 1.27.3 is the minimum: it is what the `go` directive asks for, and the
+linter refuses to analyse a target newer than the Go it was built with. 1.27.2
+carries GO-2026-6809 (crypto/x509), which this code reaches. The floor before
+it was 1.27.2, and before that 1.26.6, because earlier 1.26 standard libraries contain
 security issues relevant to this project. The exact module requirement is in
 [go.mod](go.mod).
 
@@ -76,6 +92,10 @@ packaging/          OS/package-manager definitions
 | `make security` | Run gosec and govulncheck when installed |
 | `make all` | Dependencies, lint, tests and build |
 | `make version-check` | Check packaging version consistency |
+| `make golden` / `make golden-update` | Check output against the recorded baseline, or re-record it |
+| `make determinism` | Check the worker count does not change the output |
+| `make site` / `make site-watch` | Build the project's own documentation site, or serve it and rebuild on change |
+| `make site-edit` | Serve the documentation site with the browser editor; edits land on a branch |
 | `make test-action` | Exercise the local Action build path |
 | `make clean` | Remove generated build/test artifacts |
 

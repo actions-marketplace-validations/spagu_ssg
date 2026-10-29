@@ -94,11 +94,13 @@ Archive pages pick the first template that exists in the theme:
 | Taxonomy index (`/technology/`) | `template:` override → `taxonomy-<name>.html` → `taxonomy.html` → `archive.html` → `category.html` |
 | Term archive (`/technology/go/`) | `term_template:` override → `taxonomy-<name>-term.html` → `taxonomy-term.html` → `archive.html` → `category.html` |
 
-The index context provides `.Taxonomy` (`Name/Label/Singular/Path/URL`) and
-`.Terms` (each `Name/Slug/URL/Description/Count/Weight/Data`). The term context
+The index context provides `.Taxonomy` (`Name/Label/Singular/Path/URL`),
+`.Terms` (each `Name/Slug/URL/Description/Count/Weight/Data`) and, like every
+other archive, `.CanonicalURL`. The term context
 provides `.Taxonomy`, `.Term`, `.Posts` (newest first), `.Pager` and — for
 compatibility with `category.html` — `.Category`, `.Kind` and `.Name`. With
-`paginate` set, term archives paginate to `/technology/go/page/2/`.
+`paginate` set, term archives paginate to `/technology/go/page/2/`, and
+`.CanonicalURL` names the page currently being rendered.
 
 ### Template helpers
 
@@ -124,6 +126,13 @@ it is worth stating the built-in names outright — they are `category`, `tag` a
 An unknown taxonomy name returns an empty string rather than an error, so the
 mistake shows up as `href=""` rather than as a failed build.
 
+**Author is not one of them.** The author archive is keyed on an author id
+rather than a frontmatter field, so it is driven outside the registry and
+`termURL "author"` returns `""`. Use `authorURL` instead — it takes the author id
+a post carries, the post itself, an author record or a display name, and returns
+`/author/<slug>/` (see
+[docs/TEMPLATE_HELPERS.md](TEMPLATE_HELPERS.md)).
+
 ## Multilingual builds
 
 With `i18n.enabled`, terms live in per-language buckets and custom archives are
@@ -135,6 +144,12 @@ the helpers all follow the language of the page being rendered.
 
 - `feed: true` (plus global `feed: true`) writes an Atom feed per term.
 - `sitemap: true` (default) adds the taxonomy index and each term archive.
+  `sitemap: false` keeps them out **without** removing them: `archive` is the
+  separate switch that decides whether they are written at all. It applies to the
+  built-in `category` and `tag` as well as to custom taxonomies — before 1.8.58
+  it parsed and validated on the built-ins and did nothing, so a site whose theme
+  marked its tag archives `noindex` kept advertising them anyway. `author` is
+  driven outside the registry and is not configurable this way.
 - The search index and JSON output records carry a `taxonomies` map
   (`{"technology": ["Go", "Rust"], …}`) for client-side filtering.
 

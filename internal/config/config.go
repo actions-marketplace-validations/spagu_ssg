@@ -50,6 +50,43 @@ type MddbConfig struct {
 	// default; the same opt-in `external_sources` already take (#201).
 	AllowHTTP     bool `yaml:"allow_http" toml:"allow_http" json:"allow_http"`
 	WatchInterval int  `yaml:"watch_interval" toml:"watch_interval" json:"watch_interval"` // Watch interval in seconds (default: 30)
+	// Sources reads several collections in one build, each with its own
+	// metadata filter, content type and section (#361). Empty means the one
+	// `collection` above, as before.
+	Sources []MddbSource `yaml:"sources" toml:"sources" json:"sources"`
+}
+
+// MddbSource is one collection an MDDB build reads (#361). Filter is passed to
+// the server as filterMeta — each key lists the values a document may have —
+// so what it leaves out never reaches the build directory or the search index.
+// Type "page" or "post" files every document as that; empty keeps each
+// document's own `type` meta. Section is the content section the documents
+// belong to, the key schema_defaults, language_sections and feeds match.
+type MddbSource struct {
+	Collection string              `yaml:"collection" toml:"collection" json:"collection"`
+	Filter     map[string][]string `yaml:"filter" toml:"filter" json:"filter"`
+	Type       string              `yaml:"type" toml:"type" json:"type"`
+	Section    string              `yaml:"section" toml:"section" json:"section"`
+}
+
+// Collections names every collection the build reads, in order and once each,
+// which is what the watch loop checksums.
+func (m MddbConfig) Collections() []string {
+	if len(m.Sources) == 0 {
+		if m.Collection == "" {
+			return nil
+		}
+		return []string{m.Collection}
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, src := range m.Sources {
+		if src.Collection != "" && !seen[src.Collection] {
+			seen[src.Collection] = true
+			out = append(out, src.Collection)
+		}
+	}
+	return out
 }
 
 // ContentSource is one extra Markdown root merged into the site (CONTENT-002).
@@ -161,8 +198,43 @@ type Config struct {
 	HTTP3 bool `yaml:"http3" toml:"http3" json:"http3"`
 
 	// Output Control
+	// MinifyHTMLKeepComments names comment openings `minify_html` must not
+	// delete, beyond the host directives kept by default (#263). A value may
+	// name the directive ("email_off") or the whole opening ("<!--email_off").
+	MinifyHTMLKeepComments []string `yaml:"minify_html_keep_comments" toml:"minify_html_keep_comments" json:"minify_html_keep_comments"`
+
+	// Marketing is the site's social identity: the default og:image, the
+	// og:site_name, verification tokens, icons and theme colour.
+	//
+	// It existed only as something `ssg migrate` recorded in metadata.json from
+	// a WordPress crawl, so a site built from scratch had no way to declare a
+	// default card image — and a documentation site, where no page has a hero
+	// photograph and every page wants the project's card, is exactly that case
+	// (#264). Values here win over a migration's, the same precedence
+	// `.Site.Title` follows (#128).
+	Marketing models.Marketing `yaml:"marketing" toml:"marketing" json:"marketing"`
+
+	// SiteGraph writes site-graph.json: one model of the published site —
+	// pages, sections, taxonomies, links, redirects, translations — for agents
+	// and tools that would otherwise scan directories (GO-095). Opt-in, like
+	// markdown_publish; the same model feeds routes.json and llms.txt either way.
+	SiteGraph bool `yaml:"site_graph" toml:"site_graph" json:"site_graph"`
+
 	SitemapOff bool `yaml:"sitemap_off" toml:"sitemap_off" json:"sitemap_off"`
-	RobotsOff  bool `yaml:"robots_off" toml:"robots_off" json:"robots_off"`
+
+	// Sitemaps declares sub-sitemaps, each choosing what goes in and where it is
+	// written; sitemap.xml becomes the <sitemapindex> naming them. One file
+	// holding everything answers neither of the questions a growing site asks:
+	// above 50,000 URLs the protocol requires an index, and Search Console
+	// reports indexing coverage per submitted sitemap, so "how much of the blog
+	// is indexed" needs the blog in a file of its own.
+	Sitemaps []models.SitemapSpec `yaml:"sitemaps" toml:"sitemaps" json:"sitemaps"`
+
+	// SitemapMaxURLs caps one sitemap file; 0 means the protocol's 50,000. A set
+	// over the cap is split into numbered files and indexed rather than written
+	// as one file every crawler rejects.
+	SitemapMaxURLs int  `yaml:"sitemap_max_urls" toml:"sitemap_max_urls" json:"sitemap_max_urls"`
+	RobotsOff      bool `yaml:"robots_off" toml:"robots_off" json:"robots_off"`
 	// RobotsRules replaces the default permissive robots.txt (User-agent: * /
 	// Allow: /) with explicit per-crawler directives, so a site can spell out
 	// its policy for AI and search crawlers — e.g. welcome GPTBot, OAI-SearchBot
@@ -211,10 +283,23 @@ type Config struct {
 	PostURLFormat string `yaml:"post_url_format" toml:"post_url_format" json:"post_url_format"` // "date" (default) or "slug"
 	PageFormat    string `yaml:"page_format" toml:"page_format" json:"page_format"`             // "directory" (default), "flat", or "both"
 	RelativeLinks bool   `yaml:"relative_links" toml:"relative_links" json:"relative_links"`    // Convert absolute URLs to relative
-	MinifyAll     bool   `yaml:"minify_all" toml:"minify_all" json:"minify_all"`
-	MinifyHTML    bool   `yaml:"minify_html" toml:"minify_html" json:"minify_html"`
-	MinifyCSS     bool   `yaml:"minify_css" toml:"minify_css" json:"minify_css"`
-	MinifyJS      bool   `yaml:"minify_js" toml:"minify_js" json:"minify_js"`
+	// BasePath is the path the site is served under, e.g. "/docs-site" for a
+	// GitHub project page at https://user.github.io/docs-site/ (#306). Every
+	// root-relative URL the build writes is prefixed with it, and check_links and
+	// the preview server understand it. Empty takes the path of `domain`, so
+	// `domain: user.github.io/docs-site` is enough; "/" forces the host's root.
+	BasePath string `yaml:"base_path" toml:"base_path" json:"base_path"`
+	// AutolinkListItems turns a list item whose whole text is a page title into
+	// a link to that page. On unless set to false (#305).
+	AutolinkListItems *bool `yaml:"autolink_list_items" toml:"autolink_list_items" json:"autolink_list_items"`
+	// HostFiles writes _headers and _redirects, which Cloudflare Pages and
+	// Netlify read and every other host serves as ordinary public files. On
+	// unless set to false (#308).
+	HostFiles  *bool `yaml:"host_files" toml:"host_files" json:"host_files"`
+	MinifyAll  bool  `yaml:"minify_all" toml:"minify_all" json:"minify_all"`
+	MinifyHTML bool  `yaml:"minify_html" toml:"minify_html" json:"minify_html"`
+	MinifyCSS  bool  `yaml:"minify_css" toml:"minify_css" json:"minify_css"`
+	MinifyJS   bool  `yaml:"minify_js" toml:"minify_js" json:"minify_js"`
 	// SourceMap emits v3 source maps (*.js.map / *.css.map) alongside minified
 	// JS/CSS, embedding the original source; minification is line-preserving so
 	// the mapping stays exact (GO-004 / BLOG-007). Requires the matching minify_*.
@@ -471,7 +556,17 @@ type Config struct {
 	// JavaScript on every page is the site owner's decision, not a side effect
 	// of migrating content. The ids stay readable at .Site.Analytics either way.
 	Analytics bool `yaml:"analytics" toml:"analytics" json:"analytics"`
-	SEOOff    bool `yaml:"seo_off" toml:"seo_off" json:"seo_off"` // deprecated: use seo: false
+
+	// AnalyticsIDs are the tracking ids the site itself declares, keyed by
+	// vendor — `gtm: GTM-XXXXXXX`, `ga4: G-XXXXXXX`. Until now the only source
+	// of an id was a migration's crawl, so a site written by hand had no way
+	// to run a tag manager at all except by editing a theme (FE-001).
+	//
+	// Declaring one is the consent `analytics: true` asks for, so an id here
+	// renders without also setting that flag; ids from a migration still need
+	// it, because nobody chose those.
+	AnalyticsIDs map[string]string `yaml:"analytics_ids" toml:"analytics_ids" json:"analytics_ids"`
+	SEOOff       bool              `yaml:"seo_off" toml:"seo_off" json:"seo_off"` // deprecated: use seo: false
 
 	// CheckLinks validates internal links after build: "" (off), "warn", or "strict"
 	// (non-zero exit on a dead internal link) (SEO-005).
@@ -503,6 +598,13 @@ type Config struct {
 	// properties and say nothing the author can see, so the build succeeds, the
 	// page ships and the rich result simply never appears.
 	CheckSchema string `yaml:"check_schema" toml:"check_schema" json:"check_schema"`
+	// CheckSchemaRecommended adds the properties a rich result shows but does
+	// not require (a Recipe's yield, time, nutrition) to check_schema's report.
+	// Always advisory: they never fail a strict build.
+	CheckSchemaRecommended bool `yaml:"check_schema_recommended" toml:"check_schema_recommended" json:"check_schema_recommended"`
+	// RecipeHeadings adds headings a Recipe's ingredients and method are read
+	// from when its schema: has neither: {ingredients: [...], instructions: [...]}.
+	RecipeHeadings map[string][]string `yaml:"recipe_headings" toml:"recipe_headings" json:"recipe_headings"`
 
 	// SitemapPruneCanonical also drops pages whose rendered canonical points at a
 	// different URL from sitemap.xml. Off by default: a canonical that disagrees
@@ -538,6 +640,10 @@ type Config struct {
 	// crawler a hop, and one such link in shared chrome multiplies across every
 	// page. Requires pretty_urls to know what the host does (#87).
 	CheckRedirects string `yaml:"check_redirects" toml:"check_redirects" json:"check_redirects"`
+	// CheckAPI reports documentation problems in api_docs packages: exports
+	// without a description, @param tags that do not match the signature,
+	// unresolved links (GO-110). "" (off), "warn" or "strict".
+	CheckAPI string `yaml:"check_api" toml:"check_api" json:"check_api"`
 
 	// PrettyURLs describes how the host serves URLs: it strips a ".html"
 	// extension and appends a trailing slash to a directory, answering the
@@ -567,9 +673,40 @@ type Config struct {
 	// (ASSET-002): {"app.css": ["reset.css","theme.css"]}.
 	Bundles map[string][]string `yaml:"bundles" toml:"bundles" json:"bundles"`
 
-	// Outputs lists per-page output formats; "html" always emitted, add "json" for a
-	// headless JSON representation next to index.html (PLAT-003).
-	Outputs []string `yaml:"outputs" toml:"outputs" json:"outputs"`
+	// Outputs lists per-page output formats; "html" is always emitted (PLAT-003).
+	//
+	// It accepts two shapes (GO-092). The flat list it has always taken —
+	// `outputs: [html, json]` — applies to every content type. A mapping —
+	// `outputs: {page: [html, json], post: [html, markdown]}` — applies per
+	// type. OutputsPerType holds the second form; both decode through
+	// OutputsSpec so an existing config means exactly what it did.
+	Outputs        []string            `yaml:"-" toml:"-" json:"-"`
+	OutputsPerType map[string][]string `yaml:"-" toml:"-" json:"-"`
+	OutputsSpec    OutputsSpec         `yaml:"outputs" toml:"outputs" json:"outputs"`
+
+	// OutputsCustom are output formats this site defines with a template of
+	// its own — which is how a site publishes XML without the generator
+	// guessing at a schema (GO-092).
+	OutputsCustom []CustomOutput `yaml:"outputs_custom" toml:"outputs_custom" json:"outputs_custom"`
+
+	// Incremental narrows a build to what a change can have affected, using
+	// the dependency graph the previous build recorded (GO-094). On by default
+	// in --watch, where it is the difference between a keystroke and a pause;
+	// a build that cannot be narrowed silently runs whole.
+	Incremental bool `yaml:"incremental" toml:"incremental" json:"incremental"`
+
+	// MarkdownCache keeps converted Markdown between builds (#270).
+	//
+	// **Off by default, deliberately.** It costs disk equal to the size of the
+	// content and buys 3% on a developer's machine, because converting Markdown
+	// is parallel and reading a cache is not. It is worth turning on in one
+	// place: a CI runner with two cores and a cache carried between runs, where
+	// it is worth about 9%.
+	//
+	// A build with render hooks never uses it whatever this says — a hook can
+	// read the whole site, and a conversion that does is not a function of its
+	// own input any more.
+	MarkdownCache *bool `yaml:"markdown_cache" toml:"markdown_cache" json:"markdown_cache"`
 
 	// SearchIndex writes search-index.json (title/url/tags/excerpt/text) for a
 	// client-side search widget (PLAT-004).
@@ -595,6 +732,29 @@ type Config struct {
 	// RouteManifest writes routes.json — a machine-readable list of every generated
 	// route and its metadata — for external tooling and typed clients (#62).
 	RouteManifest bool `yaml:"route_manifest" toml:"route_manifest" json:"route_manifest"`
+	// BuildReport writes a JSON report of the build — version, duration,
+	// pages and files written, content by type — to this file in the output
+	// directory once the last page is out (#338). Empty means none.
+	BuildReport string `yaml:"build_report" toml:"build_report" json:"build_report"`
+
+	// Profile reports where the build's time went (GO-097): "text" prints the
+	// phases, counters and slowest pages after the build; "json" additionally
+	// writes build-profile.json beside the project, for CI to archive and
+	// compare between commits. Empty is off.
+	Profile string `yaml:"profile" toml:"profile" json:"profile"`
+
+	// ProfilePprof writes cpu.prof and heap.prof into the named directory, for
+	// `go tool pprof`. A maintainer's tool: --profile answers where the time
+	// goes, this answers why.
+	ProfilePprof string `yaml:"profile_pprof" toml:"profile_pprof" json:"profile_pprof"`
+
+	// Edit turns the preview server into an editor (GO-102): a marked region
+	// on a page opens a form for that document's frontmatter, and a save is
+	// written, validated, rebuilt and committed to a branch of its own. Needs
+	// --http and --watch; refuses to start off loopback without a token. Never
+	// a config key on purpose — it belongs to a session at a keyboard, not to
+	// a project that might be built by CI.
+	Edit bool `yaml:"-" toml:"-" json:"-"`
 
 	// DataDir is the directory of data files (*.yaml|*.yml|*.json) loaded into
 	// the .Data.* template namespace (default "data", PLAT-002).
@@ -643,6 +803,22 @@ type Config struct {
 	// documents written without a "## Excerpt" section. Off by default,
 	// because it changes those texts on an existing site (GO-057).
 	AutoExcerpt bool `yaml:"auto_excerpt" toml:"auto_excerpt" json:"auto_excerpt"`
+
+	// ComponentsDir is where typed content components live (GO-093): a
+	// directory per component, each with a props schema, a template and
+	// optional assets. Default "components"; absent means the site has none.
+	ComponentsDir string `yaml:"components_dir" toml:"components_dir" json:"components_dir"`
+
+	// RenderHooks maps a Markdown node kind to the template that renders it
+	// (GO-099): image, link, heading, code, table, blockquote. Absent leaves
+	// goldmark's own markup untouched — which is what every existing site
+	// gets.
+	RenderHooks map[string]string `yaml:"render_hooks" toml:"render_hooks" json:"render_hooks"`
+
+	// Versions decides what a chain of document versions means for search
+	// engines (GO-096): whether superseded versions are noindexed, and whether
+	// they belong in the sitemap.
+	Versions VersionsConfig `yaml:"versions" toml:"versions" json:"versions"`
 
 	// ShortcodeErrors decides what a shortcode whose template fails to render
 	// leaves in the page: "" / "drop" (default, historical behaviour — a warning
@@ -705,6 +881,32 @@ type Config struct {
 	// are stable across builds and re-queried only when the question/model changes.
 	AI AIConfig `yaml:"ai" toml:"ai" json:"ai"`
 
+	// Listen adds a "Listen" button that reads the article aloud with the
+	// visitor's own browser speech engine (Web Speech API): no service, no
+	// audio files, nothing leaves the device (1.8.65).
+	Listen ListenConfig `yaml:"listen" toml:"listen" json:"listen"`
+	// Print adds a Print / PDF button and a print stylesheet; CookMode a
+	// step-by-step view of Recipe pages (1.8.72). See pagetools.go.
+	Print    PrintConfig    `yaml:"print" toml:"print" json:"print"`
+	CookMode CookModeConfig `yaml:"cook_mode" toml:"cook_mode" json:"cook_mode"`
+	// HeadingAnchors appends a "#" self-link to each heading with an id (#364).
+	HeadingAnchors HeadingAnchorsConfig `yaml:"heading_anchors" toml:"heading_anchors" json:"heading_anchors"`
+	// Breadcrumbs names the steps of the derived JSON-LD BreadcrumbList, or
+	// turns it off (1.8.73, #335). See breadcrumbs.go.
+	Breadcrumbs BreadcrumbsConfig `yaml:"breadcrumbs" toml:"breadcrumbs" json:"breadcrumbs"`
+	// TTS renders each article to an MP3 at build time through a
+	// text-to-speech API, caches it, and can publish a podcast feed (1.8.65).
+	TTS TTSConfig `yaml:"tts" toml:"tts" json:"tts"`
+	// APIDocs documents JavaScript/TypeScript code as pages of the site, one
+	// entry per package (1.8.69, GO-107). See docs/API_DOCS.md.
+	APIDocs []APIDocsConfig `yaml:"api_docs" toml:"api_docs" json:"api_docs"`
+	// Resume publishes a Schema Resume (schema-resume.org) JSON CV as a page
+	// with ProfilePage structured data. See docs/RESUME.md.
+	Resume ResumeConfig `yaml:"resume" toml:"resume" json:"resume"`
+	// WebStories makes a Google Web Story (AMP) from each selected post and
+	// a hub listing them (1.8.72). See webstories.go and docs/WEB_STORIES.md.
+	WebStories WebStoriesConfig `yaml:"web_stories" toml:"web_stories" json:"web_stories"`
+
 	// Notifications POST each newly published (or changed) post to user-defined
 	// webhook destinations (point them at a social API, an automation service, or
 	// your own endpoint). Only fires with --notify; a committed state file
@@ -750,7 +952,22 @@ type MCPConfig struct {
 	// only when the images genuinely come from a host on the same private
 	// network (#214).
 	MediaAllowPrivate bool `yaml:"media_allow_private" toml:"media_allow_private" json:"media_allow_private"`
+	// OAuth makes `ssg mcp --listen` an OAuth 2.1 resource server (#362).
+	OAuth MCPOAuth `yaml:"oauth" toml:"oauth" json:"oauth"`
 }
+
+// MCPOAuth names the authorization server whose access tokens the MCP
+// endpoint accepts, and this server's own canonical URI, which a token's
+// audience must name. ssg never issues tokens itself.
+type MCPOAuth struct {
+	Issuer   string   `yaml:"issuer" toml:"issuer" json:"issuer"`       // authorization server; tokens' iss
+	Resource string   `yaml:"resource" toml:"resource" json:"resource"` // this endpoint's public URI; tokens' aud
+	Scopes   []string `yaml:"scopes" toml:"scopes" json:"scopes"`       // scopes a token must carry
+	JWKSURL  string   `yaml:"jwks_url" toml:"jwks_url" json:"jwks_url"` // optional; discovered from the issuer otherwise
+}
+
+// Enabled reports whether OAuth is configured.
+func (o MCPOAuth) Enabled() bool { return o.Issuer != "" || o.Resource != "" }
 
 // MCPSearch points designer_find / content_find at an MDDB collection so a
 // question phrased as a sentence can be answered, where a local scan can only
@@ -1028,6 +1245,9 @@ func Load(path string) (*Config, error) {
 	}
 	cfg.LanguageConfigs = expanded
 	cfg.I18n = cfg.I18n.WithDefaults()
+	// `outputs:` arrives as a list or a map; both land in the fields the
+	// generator reads (GO-092).
+	cfg.applyOutputsSpec()
 
 	// Apply minify_all
 	if cfg.MinifyAll {
@@ -1069,10 +1289,27 @@ func warnUnknownKeys(path string, data []byte, ext string) {
 		if !ok {
 			continue
 		}
+		if known, ok := keyNamedElsewhere[key]; ok {
+			fmt.Fprintf(os.Stderr,
+				"⚠️  %s: unknown configuration key %q — ignored. The key is %q (%s).\n",
+				filepath.Base(path), key, known, docsURL)
+			continue
+		}
 		fmt.Fprintf(os.Stderr,
 			"⚠️  %s: unknown configuration key %q — ignored. Check the spelling, or upgrade ssg if the key is newer than this build (%s).\n",
 			filepath.Base(path), key, docsURL)
 	}
+}
+
+// keyNamedElsewhere maps the names other generators give a setting to the one
+// ssg reads. "Check the spelling" does not help when the spelling is right and
+// the name is not: `posts_per_page` is what WordPress calls it, and finding
+// `paginate` took a reader of config.go (#278).
+var keyNamedElsewhere = map[string]string{
+	"posts_per_page": "paginate",
+	"per_page":       "paginate",
+	"pagination":     "paginate",
+	"pager_size":     "paginate",
 }
 
 // ApplyWorkerWatchDefaults makes `worker:` the single source of truth for the
@@ -1081,6 +1318,9 @@ func warnUnknownKeys(path string, data []byte, ext string) {
 // Functions run side by side. Called only once watch mode is active (a plain
 // one-shot build never starts a runner). Explicit watch_runner_* keys (GO-054)
 // still win as overrides (GO-065).
+//
+// watch_runner: none (or off) is an explicit "no runner": the worker stays
+// configured for builds and deploys, the preview serves only static files.
 func ApplyWorkerWatchDefaults(cfg *Config) {
 	if cfg.WatchRunner != "" {
 		return
@@ -1115,6 +1355,16 @@ func ApplyWorkerWatchDefaults(cfg *Config) {
 			cfg.WatchRunnerConfig = first.WranglerConfig
 		}
 	}
+}
+
+// RunnerDisabled reports whether watch_runner turns the runner off rather
+// than naming one (#326).
+func RunnerDisabled(runner string) bool {
+	switch strings.ToLower(strings.TrimSpace(runner)) {
+	case "none", "off", "false":
+		return true
+	}
+	return false
 }
 
 // docsURL points at the configuration reference named in the warning above.
@@ -1211,4 +1461,176 @@ func FindConfigFile() string {
 	}
 
 	return ""
+}
+
+// VersionsConfig tunes a chain of document versions (GO-096).
+type VersionsConfig struct {
+	// NoindexOld adds `robots: noindex, follow` to superseded versions. Off by
+	// default: a superseded page is still a page someone may have linked to.
+	//
+	// Turning it on also removes them from the sitemap, through the rule that
+	// already drops any noindex page (#78) — rather than through a second
+	// switch that could disagree with the first.
+	NoindexOld bool `yaml:"noindex_old" toml:"noindex_old" json:"noindex_old"`
+}
+
+// CustomOutput is a page format a site defines for itself (GO-092).
+type CustomOutput struct {
+	Name     string `yaml:"name" toml:"name" json:"name"`
+	Suffix   string `yaml:"suffix" toml:"suffix" json:"suffix"`
+	MIME     string `yaml:"mime" toml:"mime" json:"mime"`
+	Template string `yaml:"template" toml:"template" json:"template"`
+}
+
+// OutputsSpec decodes `outputs:` in either of its two shapes (GO-092): the flat
+// list it has always been, or a mapping of content type to list.
+//
+// Two shapes rather than a new key, because the flat form is what every
+// existing config writes and a second key would leave two ways to say the same
+// thing forever.
+type OutputsSpec struct {
+	// All is the flat form, applying to every content type.
+	All []string
+	// PerType is the mapping form.
+	PerType map[string][]string
+}
+
+// UnmarshalYAML accepts both shapes.
+func (o *OutputsSpec) UnmarshalYAML(value *yaml.Node) error {
+	switch value.Kind {
+	case yaml.SequenceNode:
+		return value.Decode(&o.All)
+	case yaml.MappingNode:
+		return value.Decode(&o.PerType)
+	case 0:
+		return nil
+	}
+	return fmt.Errorf("outputs: expected a list of formats or a map of content type to formats")
+}
+
+// UnmarshalJSON accepts both shapes, for a JSON or TOML-decoded config.
+func (o *OutputsSpec) UnmarshalJSON(data []byte) error {
+	var list []string
+	if err := json.Unmarshal(data, &list); err == nil {
+		o.All = list
+		return nil
+	}
+	return json.Unmarshal(data, &o.PerType)
+}
+
+// MarkdownCacheEnabled reports whether conversions are kept between builds.
+// Unset means off; the pointer is there so a config can say either word and a
+// later default change cannot silently flip a project that had chosen.
+func (c *Config) MarkdownCacheEnabled() bool {
+	return c.MarkdownCache != nil && *c.MarkdownCache
+}
+
+// applyOutputsSpec copies the decoded shape into the fields the generator
+// reads. Called by Load, so a config built in code can set either directly.
+func (c *Config) applyOutputsSpec() {
+	if len(c.OutputsSpec.All) > 0 {
+		c.Outputs = c.OutputsSpec.All
+	}
+	if len(c.OutputsSpec.PerType) > 0 {
+		c.OutputsPerType = c.OutputsSpec.PerType
+	}
+}
+
+// ListenConfig is the browser read-aloud button.
+type ListenConfig struct {
+	Enabled bool   `yaml:"enabled" toml:"enabled" json:"enabled"`
+	Label   string `yaml:"label" toml:"label" json:"label"` // button text; default "Listen"
+	// Voice is a preferred browser voice, matched against voice names
+	// ("Natural", "Google UK English Female"); the best available is used
+	// when none matches.
+	Voice string `yaml:"voice" toml:"voice" json:"voice"`
+	// Player is how an article's MP3 is offered: "compact" (default) — the
+	// same small Listen button, which plays the file — or "full", the
+	// browser's <audio> bar with a seek control.
+	Player string `yaml:"player" toml:"player" json:"player"`
+	// Auto places the button on post pages whose theme does not place it
+	// with {{ listen .Page }}. On unless set to false.
+	Auto *bool `yaml:"auto" toml:"auto" json:"auto"`
+	// Sections limits the button to posts, pages, or both ("posts" by default).
+	Sections []string `yaml:"sections" toml:"sections" json:"sections"`
+}
+
+// TTSConfig is the build-time MP3 generation through an external API.
+type TTSConfig struct {
+	Enabled  bool    `yaml:"enabled" toml:"enabled" json:"enabled"`
+	Provider string  `yaml:"provider" toml:"provider" json:"provider"` // generic | openai | elevenlabs | google
+	APIURL   string  `yaml:"api_url" toml:"api_url" json:"api_url"`
+	APIKey   string  `yaml:"api_key" toml:"api_key" json:"api_key"` // use $ENV, never a literal
+	Voice    string  `yaml:"voice" toml:"voice" json:"voice"`
+	Lang     string  `yaml:"lang" toml:"lang" json:"lang"` // default: the page language
+	Model    string  `yaml:"model" toml:"model" json:"model"`
+	Speed    float64 `yaml:"speed" toml:"speed" json:"speed"`
+	// Instructions steer delivery on providers that accept them (openai).
+	Instructions string `yaml:"instructions" toml:"instructions" json:"instructions"`
+	// JingleURL is an MP3 played before every article, fetched once and cached.
+	JingleURL string `yaml:"jingle_url" toml:"jingle_url" json:"jingle_url"`
+	Timeout   string `yaml:"timeout" toml:"timeout" json:"timeout"` // per request, e.g. "60s"
+	Retries   int    `yaml:"retries" toml:"retries" json:"retries"` // extra attempts; default 2, -1 none
+	MaxChars  int    `yaml:"max_chars" toml:"max_chars" json:"max_chars"`
+	// Breaker: failed articles in a row before the API is skipped for the rest
+	// of the build. Default 3; -1 never.
+	Breaker int `yaml:"breaker" toml:"breaker" json:"breaker"`
+	// OnFailure is what a page gets when its audio cannot be made: "stale"
+	// (default) the last good MP3 of that page, else nothing; "skip" nothing;
+	// "fail" the build stops. strict: true turns stale and skip into fail.
+	OnFailure string   `yaml:"on_failure" toml:"on_failure" json:"on_failure"`
+	Sections  []string `yaml:"sections" toml:"sections" json:"sections"` // posts (default), pages
+	Dir       string   `yaml:"dir" toml:"dir" json:"dir"`                // output directory; default "audio"
+	// Feed writes a podcast RSS feed (RSS 2.0 + iTunes tags) of the audio.
+	Feed       bool   `yaml:"feed" toml:"feed" json:"feed"`
+	FeedPath   string `yaml:"feed_path" toml:"feed_path" json:"feed_path"` // default "podcast.xml"
+	FeedTitle  string `yaml:"feed_title" toml:"feed_title" json:"feed_title"`
+	FeedAuthor string `yaml:"feed_author" toml:"feed_author" json:"feed_author"`
+	FeedImage  string `yaml:"feed_image" toml:"feed_image" json:"feed_image"`
+	FeedLimit  int    `yaml:"feed_limit" toml:"feed_limit" json:"feed_limit"` // default 50
+}
+
+// APIDocsConfig is one package to document from code.
+type APIDocsConfig struct {
+	Name string `yaml:"name" toml:"name" json:"name"` // package name; default from package.json
+	Root string `yaml:"root" toml:"root" json:"root"` // directory with the package and its sources
+	// Language is javascript, typescript, go, php or python; empty detects it
+	// from the root (package.json, go.mod, composer.json, pyproject.toml).
+	Language string   `yaml:"language" toml:"language" json:"language"`
+	Entry    []string `yaml:"entry" toml:"entry" json:"entry"`       // entry files; default from package.json
+	Include  []string `yaml:"include" toml:"include" json:"include"` // globs relative to root
+	Exclude  []string `yaml:"exclude" toml:"exclude" json:"exclude"`
+	URL      string   `yaml:"url" toml:"url" json:"url"` // page prefix; default /api/<name>/
+	// Visibility: public (default) hides @internal symbols, internal shows
+	// them, all shows everything.
+	Visibility string   `yaml:"visibility" toml:"visibility" json:"visibility"`
+	Stability  []string `yaml:"stability" toml:"stability" json:"stability"` // beta, alpha, experimental to show; empty = all
+	// Readme shows the package README on its index page. On unless false.
+	Readme *bool `yaml:"readme" toml:"readme" json:"readme"`
+	// SourceURL links each definition to its code: {path}, {line} and {ref}
+	// are filled in, e.g. https://example.com/repo/blob/{ref}/{path}#L{line}.
+	SourceURL string `yaml:"source_url" toml:"source_url" json:"source_url"`
+	// SourceRef is the {ref}: a tag, branch or commit; "auto" (default) is the
+	// commit git reports for the root.
+	SourceRef string `yaml:"source_ref" toml:"source_ref" json:"source_ref"`
+	// Playground is the package as an ES module URL (a CDN build, or a file
+	// the site publishes with CORS); set, JavaScript examples run in the
+	// browser (GO-116).
+	Playground string `yaml:"playground" toml:"playground" json:"playground"`
+	// OpenAPI documents a REST API from an OpenAPI 3.x file (YAML or JSON)
+	// instead of code (GO-117); root, entry, include and exclude are unused.
+	OpenAPI string `yaml:"openapi" toml:"openapi" json:"openapi"`
+	// TryIt adds the "Try it" console to every operation of an openapi
+	// entry. On unless false (GO-118).
+	TryIt *bool `yaml:"try_it" toml:"try_it" json:"try_it"`
+}
+
+// ResumeConfig is a Schema Resume document published as a page.
+type ResumeConfig struct {
+	File  string `yaml:"file" toml:"file" json:"file"`    // the JSON document; empty = off
+	URL   string `yaml:"url" toml:"url" json:"url"`       // the page's URL; default /cv/
+	Title string `yaml:"title" toml:"title" json:"title"` // the page title; default basics.name
+	// Contact publishes the e-mail, phone and street address (page, JSON-LD
+	// and resume.json). Off by default: they are taken out.
+	Contact bool `yaml:"contact" toml:"contact" json:"contact"`
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	stdhtml "html"
 	"os"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -233,6 +234,16 @@ func (p *markdownParser) buildPage() (*models.Page, error) {
 	// Copy extra fields (those not in the struct)
 	page.Extra = extractExtraFields(allFields)
 
+	// The content dimensions (GO-096) are read from the raw fields rather than
+	// declared in PageFrontmatter, and deliberately NOT added to knownFields.
+	//
+	// That is the whole trick. A site that already writes `version:` in its
+	// frontmatter reads it in a template as `.Extra.version` today; promoting
+	// the key to a struct field would take it out of Extra and break that
+	// template silently — the mechanism of #115, in reverse. Reading them here
+	// leaves them in Extra too, so both accesses return the same value.
+	applyDimensions(page, allFields)
+
 	decodeTextEntities(page)
 
 	return page, nil
@@ -262,7 +273,8 @@ var knownFields = map[string]bool{
 	"translation_key": true,
 	"robots":          true, "featured_image": true, "tags": true, "category": true,
 	"layout": true, "template": true, "sitemap": true, "aliases": true, "series": true,
-	"taxonomies": true, "sticky": true,
+	"sitemap_changefreq": true, "sitemap_priority": true,
+	"taxonomies": true, "sticky": true, "paginate": true,
 }
 
 // extractExtraFields returns fields not in knownFields
@@ -304,10 +316,15 @@ type PageFrontmatter struct {
 	FeaturedImage  string   `yaml:"featured_image"`
 	Tags           []string `yaml:"tags,omitempty"`
 	Category       string   `yaml:"category"`
-	Sitemap        string   `yaml:"sitemap"`           // "no" excludes the page from sitemap.xml (GO-003)
-	Aliases        []string `yaml:"aliases,omitempty"` // old paths that redirect here (SEO-002)
-	Series         string   `yaml:"series,omitempty"`  // series grouping (AX-005)
-	Sticky         bool     `yaml:"sticky,omitempty"`  // pinned to the top of date-ordered listings (#155)
+	Sitemap        string   `yaml:"sitemap"` // "no" excludes the page from sitemap.xml (GO-003)
+	// The page's own <changefreq> and <priority> (#356). A string, so
+	// `sitemap_priority: 0.9` and `"0.9"` both arrive as written.
+	SitemapChangefreq string               `yaml:"sitemap_changefreq"`
+	SitemapPriority   string               `yaml:"sitemap_priority"`
+	Aliases           []string             `yaml:"aliases,omitempty"`  // old paths that redirect here (SEO-002)
+	Series            string               `yaml:"series,omitempty"`   // series grouping (AX-005)
+	Sticky            bool                 `yaml:"sticky,omitempty"`   // pinned to the top of date-ordered listings (#155)
+	Paginate          *models.PaginateSpec `yaml:"paginate,omitempty"` // page-level pagination over a collection (#267)
 
 	// AliasStubs overrides the site-wide alias_stubs default per page: false =
 	// 301 only (no duplicate copy), true = force a stub (#65).
@@ -437,12 +454,16 @@ func (pf *PageFrontmatter) ToPage() *models.Page {
 		Tags:           pf.Tags,
 		Category:       pf.Category,
 		Sitemap:        pf.Sitemap,
-		Aliases:        pf.Aliases,
-		AliasStubs:     pf.AliasStubs,
-		Series:         pf.Series,
-		Sticky:         pf.Sticky,
-		Schema:         pf.Schema,
-		TaxonomiesFM:   pf.Taxonomies,
+
+		SitemapChangefreq: pf.SitemapChangefreq,
+		SitemapPriority:   pf.SitemapPriority,
+		Aliases:           pf.Aliases,
+		AliasStubs:        pf.AliasStubs,
+		Series:            pf.Series,
+		Sticky:            pf.Sticky,
+		Paginate:          pf.Paginate,
+		Schema:            pf.Schema,
+		TaxonomiesFM:      pf.Taxonomies,
 		// Template selection
 		Layout:   pf.Layout,
 		Template: pf.Template,
@@ -470,9 +491,21 @@ func (p *markdownParser) derivedTitle() string {
 	return ""
 }
 
-// ExcerptMaxRunes bounds a derived excerpt. Long enough for a card or a meta
+// ExcerptMaxRunes bounds a derived excerpt: long enough for a card or a meta
 // description, short enough that search engines do not truncate mid-thought.
-const ExcerptMaxRunes = 200
+//
+// 160, not 200, since #265. The claim above was false at 200 — Google displays
+// roughly 155–160 characters — and worse, it contradicted the project's own
+// statement of where the line is: `check_meta` reports a description over
+// `defaultDescriptionMax`, which is 160. So the DEFAULT path failed the DEFAULT
+// check, on every page that wrote no `excerpt:` of its own, and a site only
+// found out if it happened to turn the check on. Thirteen of eighteen pages on
+// this project's own documentation site were over, and it surfaced through a
+// third-party crawl rather than through the build.
+//
+// The two numbers are now the same number, and the generator's check imports
+// this one so they cannot drift apart again.
+const ExcerptMaxRunes = 160
 
 // inlineMarkdownRe strips the inline syntax that would otherwise show up as
 // punctuation noise in a card or a <meta description>: emphasis markers,
@@ -559,16 +592,105 @@ func skipForExcerpt(line string) bool {
 	return false
 }
 
-// truncateRunes cuts text to at most max runes, preferring the last word
+// truncateRunes cuts text to at most limit runes, preferring the last word
 // boundary, and marks the cut with an ellipsis.
-func truncateRunes(text string, max int) string {
+func truncateRunes(text string, limit int) string {
 	runes := []rune(text)
-	if len(runes) <= max {
+	if len(runes) <= limit {
 		return text
 	}
-	cut := string(runes[:max])
-	if idx := strings.LastIndex(cut, " "); idx > max/2 {
+	cut := string(runes[:limit])
+	if idx := strings.LastIndex(cut, " "); idx > limit/2 {
 		cut = cut[:idx]
 	}
 	return strings.TrimRight(cut, " ,;:.") + "…"
+}
+
+// applyDimensions reads the content dimensions from the raw frontmatter
+// (GO-096): named relations, a version and its group, and per-page outputs.
+func applyDimensions(page *models.Page, fields map[string]interface{}) {
+	if rel := stringListMap(fields["relations"]); len(rel) > 0 {
+		page.Relations = rel
+	}
+	if v := scalarField(fields["version"]); v != "" {
+		page.Version = v
+	}
+	if v := scalarField(fields["version_of"]); v != "" {
+		page.VersionOf = v
+	}
+	if out := stringList(fields["outputs"]); len(out) > 0 {
+		page.Outputs = out
+	}
+}
+
+// stringListMap reads `name: [a, b]` (or `name: a`) into a map of lists.
+func stringListMap(v interface{}) map[string][]string {
+	raw, ok := v.(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	out := make(map[string][]string, len(raw))
+	for name, value := range raw {
+		if list := stringList(value); len(list) > 0 {
+			out[name] = list
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// stringList accepts a list or a single value, which is how people write
+// frontmatter.
+func stringList(v interface{}) []string {
+	switch t := v.(type) {
+	case []interface{}:
+		out := make([]string, 0, len(t))
+		for _, item := range t {
+			if s := scalarField(item); s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	case []string:
+		return t
+	case nil:
+		return nil
+	}
+	if s := scalarField(v); s != "" {
+		return []string{s}
+	}
+	return nil
+}
+
+// scalarField renders a frontmatter scalar as the text it was written as, so
+// `version: 4` and `version: "4"` mean the same thing.
+func scalarField(v interface{}) string {
+	switch t := v.(type) {
+	case nil:
+		return ""
+	case string:
+		return strings.TrimSpace(t)
+	case int:
+		return strconv.Itoa(t)
+	case int64:
+		return strconv.FormatInt(t, 10)
+	case float64:
+		if t == float64(int64(t)) {
+			return strconv.FormatInt(int64(t), 10)
+		}
+		return strconv.FormatFloat(t, 'f', -1, 64)
+	case bool:
+		return strconv.FormatBool(t)
+	}
+	// A mapping or a list is not a scalar. Rendering one with %v would invent a
+	// value like "map[html:true]" and pass it on as if an author had typed it,
+	// which is how `outputs:` written as a mapping becomes an unknown output
+	// format instead of a line that was simply ignored.
+	switch reflect.ValueOf(v).Kind() {
+	case reflect.Map, reflect.Slice, reflect.Array:
+		return ""
+	}
+	return fmt.Sprintf("%v", v)
 }

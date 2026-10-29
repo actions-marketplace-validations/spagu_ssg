@@ -12,8 +12,10 @@ import (
 	"fmt"
 	stdhtml "html"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/spagu/ssg/internal/models"
 )
@@ -36,7 +38,10 @@ func prettifyHTMLString(s string) string {
 
 // minifyHTMLString collapses inter-tag whitespace and strips comments while
 // preserving htmlmin:ignore blocks and whitespace-sensitive elements (GO-022).
-func minifyHTMLString(s string) string {
+//
+// keepComments names additional comment openings to leave alone, beyond the
+// host directives kept by default (#263).
+func minifyHTMLString(s string, keepComments []string) string {
 	preservedBlocks := make(map[string]string)
 	preserve := func(inner string) string {
 		placeholder := fmt.Sprintf("__HTMLMIN_PRESERVE_%d__", len(preservedBlocks))
@@ -51,7 +56,7 @@ func minifyHTMLString(s string) string {
 	})
 	s = minPreserveTagRe.ReplaceAllStringFunc(s, preserve)
 	s = minHTMLCommentRe.ReplaceAllStringFunc(s, func(match string) string {
-		if strings.HasPrefix(match, "<!--[if") {
+		if keepsHTMLComment(match, keepComments) {
 			return match
 		}
 		return ""
@@ -65,14 +70,32 @@ func minifyHTMLString(s string) string {
 	return s
 }
 
+// webScheme is the scheme of the sites this generator publishes. It is spelled
+// once, and every "does this reference name my own origin" comparison builds
+// its prefixes from it — so the three ways a link can write this host live in
+// one function instead of being retyped, slightly differently, in three.
+const webScheme = "http"
+
+// ownOriginPrefixes are those three ways: either web scheme, or scheme-relative.
+func ownOriginPrefixes(host string) []string {
+	return []string{webScheme + "s://" + host, webScheme + "://" + host, "//" + host}
+}
+
+// hostOnly drops a scheme a person wrote into a `domain:` setting, which is a
+// host and not a URL — but is given as one often enough to handle.
+func hostOnly(domain string) string {
+	if i := strings.Index(domain, "://"); i >= 0 {
+		return domain[i+3:]
+	}
+	return strings.TrimPrefix(domain, "//")
+}
+
 // relativizeHTMLString rewrites absolute URLs pointing at domain into relative
 // links (href/src/action attributes and url() in inline styles).
 func relativizeHTMLString(s, domain string) string {
-	baseDomain := strings.TrimPrefix(domain, "https://")
-	baseDomain = strings.TrimPrefix(baseDomain, "http://")
-	baseDomain = strings.TrimSuffix(baseDomain, "/")
+	baseDomain := strings.TrimSuffix(hostOnly(domain), "/")
 
-	patterns := []string{"https://" + baseDomain, "http://" + baseDomain, "//" + baseDomain}
+	patterns := ownOriginPrefixes(baseDomain)
 	for _, pattern := range patterns {
 		for _, attr := range []string{"href", "src", "action"} {
 			s = strings.ReplaceAll(s, attr+`="`+pattern+`"`, attr+`="/"`)
@@ -114,15 +137,28 @@ func (g *Generator) seoHTMLString(s string, page models.Page, isPost bool) strin
 		return s
 	}
 	var b strings.Builder
+	// The social tags and the structured data are decided apart: a theme may
+	// write either, both or neither. Before #349 a theme with its own JSON-LD
+	// but no og:title got ssg's JSON-LD beside its own — a SoftwareApplication
+	// page shipped a BlogPosting for itself too.
 	if !strings.Contains(s, "og:title") {
-		b.WriteString(g.buildOpenGraph(page, isPost)) // includes the JSON-LD
-	} else if !strings.Contains(s, "application/ld+json") {
-		// The theme already provides OpenGraph tags but no structured data —
-		// inject the JSON-LD on its own so AI-first Linked Data (#61) still reaches
-		// themes that supply their own social meta (e.g. ssgtheme).
-		b.WriteString(g.buildJSONLD(page, isPost))
+		b.WriteString(g.socialMeta(page, isPost))
 	}
-	if !strings.Contains(s, "hreflang") {
+	if !strings.Contains(s, "application/ld+json") {
+		// AI-first Linked Data (#61) for every theme that wrote none.
+		b.WriteString(g.buildJSONLD(page, isPost))
+	} else {
+		// The theme's own block is the page's type; the breadcrumb and the
+		// FAQ still belong beside it, unless the theme wrote those too (#351).
+		b.WriteString(g.companionLD(page, s))
+	}
+	if page.IsNotFound() {
+		// The error page is not content: keep it out of the index and give it
+		// no alternates, whatever the theme forgot (#333).
+		if !strings.Contains(s, `name="robots"`) {
+			b.WriteString(`<meta name="robots" content="noindex">` + "\n")
+		}
+	} else if !strings.Contains(s, "hreflang") {
 		b.WriteString(string(g.hreflangTags(page)))
 	}
 	// The site's own identity, discovered when the content was migrated:
@@ -132,7 +168,6 @@ func (g *Generator) seoHTMLString(s string, page models.Page, isPost bool) strin
 	// The site palette as CSS custom properties, so a theme can style against
 	// the source site's colours instead of the author copying hex codes (#128).
 	b.WriteString(g.buildPaletteHead(s))
-	b.WriteString(g.analyticsSnippet(s))
 	// Fall back to the front-matter description when the theme emitted no usable
 	// one (#76). Nothing is invented here — the author already wrote it, it just
 	// never reached the output because the template interpolated a different
@@ -154,11 +189,11 @@ func (g *Generator) seoHTMLString(s string, page models.Page, isPost bool) strin
 // prettify or minify. Pages pass their models.Page for SEO; page-less HTML
 // (index, archives, alias stubs) passes nil.
 func (g *Generator) transformHTMLPage(s string, page *models.Page, isPost bool) string {
+	lang := g.currentLang
+	if page != nil && page.Lang != "" {
+		lang = page.Lang
+	}
 	if g.config.I18n.Enabled {
-		lang := g.currentLang
-		if page != nil && page.Lang != "" {
-			lang = page.Lang
-		}
 		if lang != "" {
 			htmlLang := regexp.MustCompile(`(?i)<html([^>]*?)\s+lang=(?:"[^"]*"|'[^']*')`)
 			if htmlLang.MatchString(s) {
@@ -168,20 +203,60 @@ func (g *Generator) transformHTMLPage(s string, page *models.Page, isPost bool) 
 			}
 		}
 	}
+	// The editing scaffolding: kept for the edit server, taken back out of a
+	// published page, before anything downstream measures or minifies it.
+	if g.config.EditMode {
+		if page != nil {
+			s = injectEditSource(s, editSourceMeta(page.SourceDir, page.SourceFile, page.Type))
+		}
+	} else {
+		s = stripEditAttrs(s)
+	}
+	// An AMP page (a theme's, or a web story) takes no injected script or
+	// style: everything below adds some (1.8.72).
+	if isAMPDocument(s) {
+		return g.finishAMP(s)
+	}
+	s = g.fillStorySlot(s, page)
 	if page != nil {
 		s = g.seoHTMLString(s, *page, isPost)
-		// Point agents at the page's Markdown copy (GO-085). Only real source
-		// pages get an index.md; the synthetic home/listing context carries no
-		// Content, so it is skipped and never advertises a missing .md.
-		if g.config.MarkdownPublish && page.Content != "" {
-			s = injectMarkdownAlternate(s, markdownLeaf(page.GetURL()))
+		// Point agents at the page's other representations (GO-085, generalised
+		// by GO-092). Only real source pages have them; the synthetic
+		// home/listing context carries no Content, so it is skipped and never
+		// advertises a file that was not written.
+		if page.Content != "" {
+			if g.config.MarkdownPublish {
+				s = injectMarkdownAlternate(s, markdownLeaf(page.GetURL()))
+			}
+			s = injectAlternates(s, g.alternateLinks(*page, s))
+			s = injectAlternates(s, g.resumeAlternate(*page, s))
 		}
 	}
+	// A page links the stylesheets and scripts of the components it actually
+	// contains, and then forgets which those were: the marker is bookkeeping,
+	// not content (GO-093).
+	s = g.injectComponentAssets(s)
+	// Print / PDF and Cook Mode, before Listen so the buttons read in order (1.8.72).
+	s = g.pageToolsHTMLString(s, page, isPost)
+	// The article read aloud: the MP3 player or the browser button, where the
+	// theme did not place one, and the button's script (1.8.65).
+	s = g.listenHTMLString(s, page)
+	// Live examples and the REST console, where a page has them (GO-116/118).
+	s = injectAPITools(s)
+	// Tracking runs on every page, not only the ones with a page context and
+	// not only when `seo:` happens to be on (FE-001).
+	//
+	// It used to ride inside the SEO pass, which meant a site that had asked
+	// for a tag manager got it on its posts and pages and NOT on its home page
+	// or its archives — the pages an analytics report is mostly about — and a
+	// site with `seo: false` got none at all despite having consented. The two
+	// were always separate decisions; only the code had them tangled.
+	s = g.injectAnalytics(s)
 	// Feed autodiscovery is injected for every page, not only those with a page
 	// context. The SEO block runs only for posts and pages, so the site homepage
 	// — the first place a reader or a subscription tool looks — never advertised
 	// a feed at all (#86).
-	s = g.injectFeedLinks(s)
+	s = g.injectFeedLinks(s, lang)
 	if g.config.Math {
 		s = mathHTMLString(s)
 	}
@@ -192,7 +267,7 @@ func (g *Generator) transformHTMLPage(s string, page *models.Page, isPost bool) 
 	// with every other absolute path rather than staying rooted at / on a site
 	// served from a subdirectory (#224).
 	if g.config.WebMCP {
-		s = injectWebMCP(s, g.webmcpIndexURL(page))
+		s = injectWebMCP(s, g.webmcpIndexURL(page), g.webmcpAPIURL())
 	}
 	if g.config.RelativeLinks && g.config.Domain != "" {
 		s = relativizeHTMLString(s, g.config.Domain)
@@ -201,7 +276,7 @@ func (g *Generator) transformHTMLPage(s string, page *models.Page, isPost bool) 
 		s = prettifyHTMLString(s)
 	}
 	if g.config.MinifyHTML {
-		s = minifyHTMLString(s)
+		s = minifyHTMLString(s, g.config.MinifyHTMLKeepComments)
 	}
 	// Last, so it sees the finished document: characters arrive from content,
 	// from a template and from an injected block alike, and a pass that ran
@@ -214,6 +289,16 @@ func (g *Generator) transformHTMLPage(s string, page *models.Page, isPost bool) 
 // transforms and writes the result in a single write (PERF-005). page carries
 // the SEO context for posts/pages; nil for listing pages.
 func (g *Generator) renderPageTemplate(templateName, outputPath string, data interface{}, page *models.Page, isPost bool) error {
+	// Where a build's page time goes (GO-097). Pages render on a worker pool,
+	// so the profile takes a sharded slot rather than a shared lock; with
+	// profiling off this is one nil check.
+	if g.profile != nil {
+		started := time.Now()
+		defer func() {
+			g.profile.Page(g.profileOutputPath(outputPath), time.Since(started))
+			g.profile.Count("pages rendered", 1)
+		}()
+	}
 	if g.engine != nil {
 		return g.renderWithEngine(templateName, outputPath, data, page, isPost)
 	}
@@ -224,7 +309,10 @@ func (g *Generator) renderPageTemplate(templateName, outputPath string, data int
 	out := buf.String()
 	data2 := []byte(out)
 	if strings.HasSuffix(strings.ToLower(outputPath), ".html") {
+		themeLD := strings.Contains(out, "application/ld+json")
 		out = g.transformHTMLPage(out, page, isPost)
+		out = g.injectStructuredData(out, structuredDataOf(data), themeLD)
+		g.noteEmptyCanonical(outputPath, out)
 		// Re-encode the finished HTML to the page's output encoding, keeping the
 		// declared <meta charset> in step with the bytes on disk (GO-087).
 		enc := g.encodingFor(page)
@@ -233,4 +321,16 @@ func (g *Generator) renderPageTemplate(templateName, outputPath string, data int
 	}
 	// #nosec G306 -- Web content files need to be world-readable
 	return os.WriteFile(outputPath, data2, 0644)
+}
+
+// profileOutputPath names a rendered file the way its reader will: by the URL
+// it serves, relative to the output root, so the report matches the site
+// rather than the machine it was built on.
+func (g *Generator) profileOutputPath(outputPath string) string {
+	rel, err := filepath.Rel(g.config.OutputDir, outputPath)
+	if err != nil {
+		return outputPath
+	}
+	rel = filepath.ToSlash(rel)
+	return "/" + strings.TrimSuffix(rel, "index.html")
 }

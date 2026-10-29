@@ -242,9 +242,16 @@ func (g *Generator) selectFeedPosts(spec models.FeedSpec) []models.Page {
 
 // pageInSource reports whether a page came from a content root, matching the
 // directory itself and anything beneath it, so `source: blog` covers
-// blog/2026/post.md as well as blog/post.md.
+// blog/2026/post.md as well as blog/post.md. A page with a named section, an
+// MDDB document, matches that section the same way (#361).
 func pageInSource(p models.Page, source string) bool {
-	dir := filepath.ToSlash(strings.TrimSuffix(p.SourceDir, "/"))
+	return sourceDirMatches(p.SourceDir, source) || sourceDirMatches(p.Section, source)
+}
+
+// sourceDirMatches is that test on the directory alone, so a declared sitemap
+// selects content roots by exactly the rule a declared feed does (#86).
+func sourceDirMatches(sourceDir, source string) bool {
+	dir := filepath.ToSlash(strings.TrimSuffix(sourceDir, "/"))
 	want := filepath.ToSlash(strings.Trim(source, "/"))
 	if dir == "" || want == "" {
 		return false
@@ -295,8 +302,9 @@ func lowerSet(items []string) map[string]bool {
 // and the plain-text summary used by formats that want both.
 func (g *Generator) feedBody(p models.Page, full bool) (htmlBody, summary string) {
 	if full {
-		// Feed readers render this HTML — sanitize like page output (SEC-014).
-		htmlBody = g.sanitizeHTML(g.convertMarkdownToHTML(p.Content))
+		// Feed readers render this HTML — sanitize like page output (SEC-014)
+		// — away from the page, so its URLs must work there too (#347).
+		htmlBody = absoluteFeedHTML(g.sanitizeHTML(g.convertMarkdownToHTML(p.Content)), g.servedCanonical(p))
 	}
 	summary = p.Excerpt
 	if summary == "" {
@@ -483,64 +491,4 @@ func newestItemUpdate(items []externalsource.FeedItem) time.Time {
 		}
 	}
 	return newest
-}
-
-// feedAutodiscoveryLinks renders one <link rel="alternate"> per feed the site
-// publishes, each with its own MIME type and title.
-//
-// A reader that offers a choice reads exactly these links, so publishing four
-// feeds behind a single Atom <link> hides three of them. The built-in feed is
-// included when `feed: true`, and a declared feed whose format is unknown is
-// skipped rather than advertised with a wrong type.
-func (g *Generator) feedAutodiscoveryLinks() string {
-	var sb strings.Builder
-	if g.config.Feed {
-		fmt.Fprintf(&sb, `<link rel="alternate" type="application/atom+xml" title=%q href="/%s">`+"\n",
-			stdhtml.EscapeString(g.config.Domain), feedFileName)
-	}
-	for _, spec := range g.config.Feeds {
-		rel := models.SanitizeRelPath(strings.TrimSpace(spec.Path))
-		if rel == "" {
-			continue
-		}
-		format, _, err := feedFormatOf(spec)
-		if err != nil {
-			continue
-		}
-		title := strings.TrimSpace(spec.Title)
-		if title == "" {
-			title = g.config.Domain
-		}
-		fmt.Fprintf(&sb, `<link rel="alternate" type=%q title=%q href="/%s">`+"\n",
-			format.mime, stdhtml.EscapeString(title), filepath.ToSlash(rel))
-	}
-	return sb.String()
-}
-
-// injectFeedLinks adds the autodiscovery <link> elements to a rendered page,
-// unless the page already advertises a feed of its own. Applied to every HTML
-// page — including the homepage, which carries no page context and so was
-// skipped by the SEO block that used to own this (#86).
-func (g *Generator) injectFeedLinks(s string) string {
-	if !g.config.Feed && len(g.config.Feeds) == 0 {
-		return s
-	}
-	// feed_autodiscovery: false hands the links to the theme, for a site that
-	// wants control over their order, titles or which feeds are advertised.
-	if g.config.FeedAutodiscovery != nil && !*g.config.FeedAutodiscovery {
-		return s
-	}
-	if strings.Contains(s, `rel="alternate" type="application/atom+xml"`) ||
-		strings.Contains(s, `rel="alternate" type="application/rss+xml"`) ||
-		strings.Contains(s, `rel="alternate" type="application/feed+json"`) {
-		return s // the theme provides its own
-	}
-	links := g.feedAutodiscoveryLinks()
-	if links == "" {
-		return s
-	}
-	if i := strings.LastIndex(s, "</head>"); i >= 0 {
-		return s[:i] + links + s[i:]
-	}
-	return s
 }

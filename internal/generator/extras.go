@@ -33,6 +33,20 @@ func (g *Generator) checkLinksIfRequested() error {
 	if g.config.Strict {
 		mode = "strict"
 	}
+	// A declared relation naming a page the site does not have is a broken
+	// link with a name on it, so it fails the same build under the same
+	// setting (GO-096).
+	if failures := g.relationErrors(); len(failures) > 0 {
+		for _, msg := range failures {
+			if mode != "" {
+				fmt.Printf("   ⚠️  %s\n", msg)
+			}
+		}
+		if mode == "strict" {
+			return fmt.Errorf("check_links: strict — %d declared relation(s) name a page that does not exist:\n   - %s",
+				len(failures), strings.Join(failures, "\n   - "))
+		}
+	}
 	if mode == "" {
 		return nil
 	}
@@ -41,6 +55,13 @@ func (g *Generator) checkLinksIfRequested() error {
 	if err != nil {
 		return err
 	}
+	// A stylesheet's url() and @import are links too, and the ones whose
+	// breakage no browser reports (#286).
+	cssBroken, err := g.checkCSSLinks()
+	if err != nil {
+		return err
+	}
+	broken = append(broken, cssBroken...)
 	for _, b := range broken {
 		fmt.Printf("   ⚠️  broken link in %s → %s\n", b.from, b.href)
 	}
@@ -60,32 +81,49 @@ func (g *Generator) checkLinksIfRequested() error {
 func (g *Generator) checkLinks() ([]brokenLink, error) {
 	root := g.config.OutputDir
 	var broken []brokenLink
-	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() || !strings.EqualFold(filepath.Ext(path), ".html") {
-			return err
-		}
-		refs, e := extractRefs(path)
-		if e != nil {
-			return nil // unreadable file is not a link error
-		}
-		rel, _ := filepath.Rel(root, path)
-		for _, ref := range refs {
+	// One parse of the output per build, shared with the site graph (GO-095):
+	// the references used to be extracted here and discarded once checked.
+	// The checker runs first and always reads what is on disk now — the graph,
+	// written right after it, reuses that parse.
+	g.resetOutputRefs()
+	refs, err := g.outputRefs()
+	if err != nil {
+		return nil, err
+	}
+	files := make([]string, 0, len(refs))
+	for rel := range refs {
+		files = append(files, rel)
+	}
+	sort.Strings(files)
+	for _, rel := range files {
+		htmlDir := filepath.Dir(filepath.Join(root, filepath.FromSlash(rel)))
+		for _, ref := range refs[rel] {
+			// An absolute URL on the site's own domain is an internal
+			// reference wearing its Sunday clothes — and one class of them, the
+			// canonical, is ALWAYS absolute. Skipping every absolute URL
+			// exempted exactly the reference three production sites shipped
+			// broken: a theme hardcoding /category/ into canonicals it stamped
+			// on tag and author archives too (#229).
+			ref, underBase := g.siteRelativeRef(ref)
 			if !isInternalRef(ref) {
 				continue
 			}
-			if !g.refResolves(ref, filepath.Dir(path)) {
-				broken = append(broken, brokenLink{from: filepath.ToSlash(rel), href: ref})
+			if !underBase {
+				broken = append(broken, brokenLink{from: rel, href: ref})
+				continue
+			}
+			if !g.refResolves(ref, htmlDir) {
+				broken = append(broken, brokenLink{from: rel, href: ref})
 			}
 		}
-		return nil
-	})
+	}
 	sort.Slice(broken, func(i, j int) bool {
 		if broken[i].from != broken[j].from {
 			return broken[i].from < broken[j].from
 		}
 		return broken[i].href < broken[j].href
 	})
-	return broken, err
+	return broken, nil
 }
 
 // extractRefs returns the href/src attribute values in an HTML file.
@@ -115,6 +153,51 @@ func extractRefs(path string) ([]string, error) {
 	}
 	walk(doc)
 	return refs, nil
+}
+
+// stripOwnDomain rewrites an absolute URL on the site's own domain to the
+// path-only form the checker validates, and returns every other reference
+// unchanged. Case-insensitive on the host, exact on the boundary: the domain
+// must be followed by "/", "?", "#" or nothing, so example.com.evil stays
+// foreign (#229). With no configured domain there is nothing to match.
+func (g *Generator) stripOwnDomain(ref string) string {
+	domain := strings.ToLower(strings.TrimSpace(g.config.Domain))
+	if domain == "" {
+		return ref
+	}
+	lower := strings.ToLower(strings.TrimSpace(ref))
+	for _, prefix := range ownOriginPrefixes(domain) {
+		if !strings.HasPrefix(lower, prefix) {
+			continue
+		}
+		rest := strings.TrimSpace(ref)[len(prefix):]
+		if rest == "" {
+			return "/"
+		}
+		if rest[0] == '/' || rest[0] == '?' || rest[0] == '#' {
+			if rest[0] != '/' {
+				rest = "/" + rest
+			}
+			return rest
+		}
+	}
+	return ref
+}
+
+// siteRelativeRef turns a reference into the path within the site that the
+// checker resolves against the output tree: an absolute URL on the site's own
+// domain loses the origin (and with it the base path the domain carries), and
+// a root-relative one loses the base path (#306). The second result is false
+// for a root-relative reference outside the base path — on a site served
+// under /docs-site, /css/x.css asks the host for a file this site does not own.
+func (g *Generator) siteRelativeRef(ref string) (string, bool) {
+	if stripped := g.stripOwnDomain(ref); stripped != ref {
+		return stripped, true
+	}
+	if !strings.HasPrefix(ref, "/") || strings.HasPrefix(ref, "//") {
+		return ref, true
+	}
+	return cutBasePath(ref, g.config.BasePath)
 }
 
 // isInternalRef reports whether a reference points inside the generated site.
@@ -260,7 +343,10 @@ func (g *Generator) writeBundle(name string, sources []string) error {
 
 // ─── PLAT-003: per-page JSON output ─────────────────────────────────────────
 
-// wantsOutput reports whether a named output format is enabled (PLAT-003).
+// wantsOutput reports whether a named output format is enabled site-wide.
+//
+// The per-page and per-type answer is formatsFor (GO-092); this is the flat
+// list, still consulted where the question genuinely has no page in scope.
 func (g *Generator) wantsOutput(format string) bool {
 	for _, o := range g.config.Outputs {
 		if strings.EqualFold(o, format) {
@@ -268,22 +354,6 @@ func (g *Generator) wantsOutput(format string) bool {
 		}
 	}
 	return false
-}
-
-// writeJSONOutput writes index.json next to a page's index.html when the json
-// output format is enabled (PLAT-003).
-func (g *Generator) writeJSONOutput(page models.Page, htmlPath string) {
-	if !g.wantsOutput("json") || !strings.HasSuffix(htmlPath, "index.html") {
-		return
-	}
-	rec := g.pageRecord(page)
-	data, err := json.MarshalIndent(rec, "", "  ")
-	if err != nil {
-		return
-	}
-	jsonPath := strings.TrimSuffix(htmlPath, "index.html") + "index.json"
-	// #nosec G306 -- Web content files need to be world-readable
-	_ = os.WriteFile(jsonPath, data, 0644)
 }
 
 // pageRecord is the stable JSON representation of a page (PLAT-003 / PLAT-004).
@@ -313,7 +383,7 @@ func (g *Generator) pageRecord(page models.Page) map[string]interface{} {
 func (g *Generator) searchRecord(p models.Page) map[string]interface{} {
 	record := map[string]interface{}{
 		"title":           p.Title,
-		"url":             p.GetURL(),
+		"url":             withBasePath(p.GetURL(), g.config.BasePath),
 		"lang":            p.Lang,
 		"locale":          p.Locale,
 		"translation_key": p.TranslationKey,

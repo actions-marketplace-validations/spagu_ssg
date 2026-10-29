@@ -37,8 +37,9 @@ LDFLAGS=-s -w -X main.Version=$(VERSION)
         build build-linux build-freebsd build-darwin build-windows build-openbsd build-all \
         package-all package-deb package-rpm package-snap \
         test test-coverage lint security run generate generate-simple serve deploy \
-        site site-watch golden golden-update bench determinism \
-        clean install uninstall release test-action
+        site site-watch site-edit golden golden-update bench determinism \
+        clean install uninstall release test-action \
+        tts-server-build tts-server-up tts-server-down tts-server-test
 
 # Default target
 all: deps lint test build ## 🚀 Run all: deps, lint, test, build
@@ -139,6 +140,7 @@ test: ## 🧪 Run tests
 test-coverage: test ## 📊 Run tests with coverage report
 	@echo "${BLUE}📊 Generating coverage report...${RESET}"
 	@$(GO) tool cover -html=coverage.out -o coverage.html
+	@echo "${GREEN}✅ Coverage report: coverage.html${RESET}"
 
 bench: ## ⏱️  Measure build throughput on a synthetic corpus (PERF-012/013)
 	@./scripts/bench-build.sh
@@ -151,7 +153,6 @@ golden: ## 🔒 Check taxonomy output against the backward-compat golden baselin
 
 golden-update: ## 🔄 Re-baseline the taxonomy goldens (after an intended change)
 	@./scripts/taxonomy-golden.sh --update
-	@echo "${GREEN}✅ Coverage report: coverage.html${RESET}"
 
 # Linting
 lint: ## 🔍 Run linter
@@ -166,7 +167,10 @@ lint: ## 🔍 Run linter
 
 security: ## 🔒 Run SAST + vulnerability scan (gosec + govulncheck)
 	@echo "${BLUE}🔒 Running gosec...${RESET}"
-	@if command -v gosec >/dev/null 2>&1; then gosec -quiet ./...; else echo "${YELLOW}⚠️  gosec not installed (go install github.com/securego/gosec/v2/cmd/gosec@latest)${RESET}"; fi
+	@# The same gosec CI runs, built from the locked .github/tools/gosec module,
+	@# so a finding CI reports is a finding here too.
+	@$(GO) -C .github/tools/gosec build -mod=readonly -o $(CURDIR)/.cache/gosec github.com/securego/gosec/v2/cmd/gosec
+	@$(CURDIR)/.cache/gosec -quiet -exclude-dir=testdata ./...
 	@echo "${BLUE}🔒 Running govulncheck...${RESET}"
 	@if command -v govulncheck >/dev/null 2>&1; then govulncheck ./...; else echo "${YELLOW}⚠️  govulncheck not installed (go install golang.org/x/vuln/cmd/govulncheck@latest)${RESET}"; fi
 	@echo "${GREEN}✅ Security scan complete${RESET}"
@@ -202,11 +206,37 @@ site-watch: build ## 👀 Build the documentation site and rebuild+serve on chan
 	@echo "${BLUE}👀 Watching docs/ and templates/ — http://127.0.0.1:8888${RESET}"
 	@./$(BUILD_DIR)/$(BINARY_NAME) --config docs-site.yaml --watch --http
 
+site-edit: build ## ✏️  Serve the documentation site with the browser editor (GO-102)
+	@echo "${BLUE}✏️  Editing docs/ in the browser — http://127.0.0.1:8888 (edits land on a branch)${RESET}"
+	@./$(BUILD_DIR)/$(BINARY_NAME) --config docs-site.yaml --watch --http --edit
+
 deploy: build ## ☁️  Generate site with ZIP for Cloudflare Pages deployment
 	@echo "${BLUE}☁️  Generating deployment package...${RESET}"
 	@./$(BUILD_DIR)/$(BINARY_NAME) test-content krowy example.com --webp --zip
 	@echo "${GREEN}✅ Deployment package created: example.com.zip${RESET}"
 	@echo "${YELLOW}📤 Upload example.com.zip to Cloudflare Pages${RESET}"
+
+# Self-hosted TTS server (services/tts-server, its own Go module)
+TTS_DIR=services/tts-server
+
+tts-server-build: ## 🗣️  Build the tts-server Docker image (WITH_VOICES=en_US-lessac-medium,... to bake Piper voices)
+	@echo "${BLUE}🗣️  Building tts-server image...${RESET}"
+	@cd $(TTS_DIR) && docker compose build
+	@echo "${GREEN}✅ tts-server image built${RESET}"
+
+tts-server-up: ## ▶️  Start tts-server on 127.0.0.1:8080 (docker compose, reads services/tts-server/.env)
+	@cd $(TTS_DIR) && docker compose up -d --build
+	@echo "${GREEN}✅ tts-server running — http://127.0.0.1:8080/docs${RESET}"
+
+tts-server-down: ## ⏹️  Stop tts-server (volumes with voices and cache are kept)
+	@cd $(TTS_DIR) && docker compose down
+	@echo "${GREEN}✅ tts-server stopped${RESET}"
+
+tts-server-test: ## 🧪 Test, vet and lint tts-server (coverage per package)
+	@echo "${BLUE}🧪 Testing tts-server...${RESET}"
+	@cd $(TTS_DIR) && gofmt -l . | (! grep .) && $(GO) vet ./... && $(GO) test -race -cover ./...
+	@cd $(TTS_DIR) && golangci-lint run ./... && gosec -quiet ./...
+	@echo "${GREEN}✅ tts-server checks passed${RESET}"
 
 # Clean
 clean: ## 🗑️  Clean build artifacts

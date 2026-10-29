@@ -2,11 +2,13 @@
 package mddb
 
 // MddbClient defines the interface for MDDB client operations
-// Both HTTP and gRPC clients implement this interface
+// Both HTTP and gRPC clients implement this interface.
+//
+// It lists what the generator actually calls. A single-document Get lived here
+// for a while with no production call site — only tests reached it — so it went
+// (GO-044): an interface that promises more than anything uses is a claim
+// nobody is checking, and both implementations had to carry it.
 type MddbClient interface {
-	// Get fetches a single document by collection and key
-	Get(req GetRequest) (*Document, error)
-
 	// Search fetches multiple documents matching filters
 	Search(req SearchRequest) ([]Document, int, error)
 
@@ -15,6 +17,10 @@ type MddbClient interface {
 
 	// GetByType fetches all documents filtered by type (page or post) with pagination
 	GetByType(collection string, docType string, lang string) ([]Document, error)
+
+	// GetMatching fetches all documents whose metadata matches filterMeta, a
+	// key → accepted values map the server applies (#361)
+	GetMatching(collection, lang string, filterMeta map[string][]any) ([]Document, error)
 
 	// Health checks if the mddb server is available
 	Health() error

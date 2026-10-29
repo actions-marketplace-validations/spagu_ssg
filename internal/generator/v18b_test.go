@@ -59,6 +59,7 @@ func TestGenerateFeeds(t *testing.T) {
 	g.config.Feed = true
 	g.config.FeedItems = 20
 	g.siteData.Categories[2] = models.Category{ID: 2, Name: "News", Slug: "news"}
+	g.categoryArchives = map[int]string{2: "category/news"}
 	g.siteData.Posts = []models.Page{
 		{Title: "Post A", Slug: "a", Type: "post", Date: time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC),
 			Categories: []int{2}, Tags: []string{"go"}, Excerpt: "excerpt A"},
@@ -164,7 +165,10 @@ func TestBundleAndOutputsAndSearch(t *testing.T) {
 	htmlPath := filepath.Join(out, "s", "index.html")
 	_ = os.MkdirAll(filepath.Dir(htmlPath), 0755)
 	_ = os.WriteFile(htmlPath, []byte("<html></html>"), 0644)
-	g.writeJSONOutput(page, htmlPath)
+	if err := g.loadOutputs(nil); err != nil {
+		t.Fatal(err)
+	}
+	g.writePageOutputs(page, htmlPath)
 	if _, err := os.Stat(filepath.Join(out, "s", "index.json")); err != nil {
 		t.Errorf("index.json not written: %v", err)
 	}
@@ -210,11 +214,16 @@ func TestSEOInjectsJSONLDIndependently(t *testing.T) {
 		t.Errorf("must not duplicate og:title, got %d", strings.Count(out, "og:title"))
 	}
 
-	// Page already carries JSON-LD → nothing added.
+	// Page already carries JSON-LD → its type is not duplicated. Only the
+	// breadcrumb, which sits beside a type rather than replacing it, is added
+	// (#351).
 	both := `<html><head><meta property="og:title" content="T">` +
 		`<script type="application/ld+json">{}</script></head><body></body></html>`
 	out2 := g.seoHTMLString(both, page, true)
-	if strings.Count(out2, "application/ld+json") != 1 {
-		t.Errorf("JSON-LD must not be duplicated when already present, got %d", strings.Count(out2, "application/ld+json"))
+	if strings.Contains(out2, "BlogPosting") {
+		t.Errorf("the page's type must not be duplicated when the theme wrote JSON-LD:\n%s", out2)
+	}
+	if strings.Count(out2, "application/ld+json") != 2 || !strings.Contains(out2, "BreadcrumbList") {
+		t.Errorf("only the breadcrumb is added beside the theme's block:\n%s", out2)
 	}
 }

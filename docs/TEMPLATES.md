@@ -1,13 +1,14 @@
 # Templates and themes
 
-Two halves: the themes you can use as they are, and how to write one.
+Two halves: the themes you can use as they are, and how to write one of your
+own — the file layout, the values in scope, and which template renders what.
 
 Go template helper signatures are in [TEMPLATE_HELPERS.md](TEMPLATE_HELPERS.md);
 image functions are in [IMAGES.md](IMAGES.md).
 
 ## Ready-made themes
 
-Four themes ship with SSG. `simple` and `krowy` are embedded in the binary and
+Five themes ship with SSG. `simple`, `krowy` and `apidoc` are embedded in the binary and
 scaffolded into an empty theme directory the first time you name one; `imd` and
 `ssgtheme` live in the repository, so copy the directory you want into your own
 `templates/`.
@@ -30,6 +31,14 @@ this repository.
       <h3><code>krowy</code> — a fuller blog with a sidebar</h3>
       <p>A wider layout with a sidebar for recent posts and categories, a photo strip in the header and a textured background. The one to look at for a content-heavy site.</p>
       <span class="theme-card__tag">Embedded · used by the examples</span>
+    </div>
+  </li>
+  <li class="theme-card">
+    <img src="/img/themes/apidoc.webp" alt="The apidoc theme: a REST reference page with a guides and reference sidebar, a POST method label, parameter and response tables and an On this page column" loading="lazy" width="1600" height="1125">
+    <div class="theme-card__body">
+      <h3><code>apidoc</code> — documentation and API reference</h3>
+      <p>Guides, references generated from code and REST references from OpenAPI in one sidebar, with search, an "On this page" column, live examples and the Try it console.</p>
+      <span class="theme-card__tag">Embedded · <a href="../templates/apidoc/README.md">README</a></span>
     </div>
   </li>
   <li class="theme-card">
@@ -232,11 +241,78 @@ Notes that save a debugging session:
   never invokes it implicitly.
 - Templates are parsed once per build, after content is loaded, so site data is
   fully available to every helper.
+- **An HTML comment written in a template does not reach the output.** Go's
+  `html/template` strips comments while parsing — long-standing and reasonable
+  on its own terms, and silent: no error, no warning, output missing something
+  you wrote. It matters because every comment-based *host directive* is affected,
+  not just a note to yourself:
+
+  ```gotemplate
+  <!--email_off-->            {{/* Cloudflare Email Obfuscation opt-out — VANISHES */}}
+  {{ "<!--email_off-->" | safeHTML }}   {{/* survives */}}
+  ```
+
+  The same applies to SSI/ESI markers (`<!--#include …-->`), CDN and tag-manager
+  markers, and any build-provenance comment a theme wants to emit. Wrap the
+  comment in `safeHTML` whenever it is meant for something downstream to read.
+
+  **It then survives `minify_html` too.** Until 1.8.59 minification deleted every
+  comment but the conditional `<!--[if …]>`, so the `safeHTML` form worked with
+  minification off and silently did nothing with it on — which is how most
+  production builds run. The directives kept by default are `<!--[if`,
+  `<!--email_off`, `<!--/email_off`, `<!--#` (SSI), `<!--esi`, `<!--googleoff`,
+  `<!--googleon`, `<!--noindex`, `<!--/noindex` and `<!--htmlmin:keep`. A host
+  that reads something else is covered by `minify_html_keep_comments`:
+
+  ```yaml
+  minify_html_keep_comments: [acme:begin, acme:end]
+  ```
+
+  An ordinary comment — a note to yourself — is still removed, which is the
+  point of minifying.
 
 The bundled `ssgtheme` is the reference implementation of this layout:
 `partials/chrome.html` holds the head, header and footer; the four role
 templates hold only what is unique to them. See
 [`templates/ssgtheme/README.md`](../templates/ssgtheme/README.md).
+
+## Marking editable regions
+
+A theme says which parts of a page may be edited in the browser
+(`ssg --http --watch --edit`, see [EDITING.md](EDITING.md)) with one attribute:
+
+```html
+<h1 data-ssg-edit="frontmatter:title">{{ .Post.Title }}</h1>
+<time data-ssg-edit="frontmatter:date" datetime="{{ .Post.Date.Format "2006-01-02" }}">…</time>
+<p data-ssg-edit="frontmatter:description">{{ .Page.Description }}</p>
+```
+
+The value names the source of the text: `frontmatter:<key>` opens that field's
+control, and `body` marks the region holding the page's content, inside which a
+click on a paragraph, heading, list item or quotation opens that block:
+
+```html
+<div class="post-body" data-ssg-edit="body">{{ .Post.Content | safeHTML }}</div>
+```
+
+Put it on an element the theme already has rather than adding a wrapper, so a
+published page keeps the markup it had. A region with no attribute is not editable, which is the point — most
+text on a rendered page did not come from a file's body, and guessing where it
+came from is how an editor changes the wrong paragraph.
+
+The attribute is free to leave in: a build without `--edit` removes it, byte for
+byte, so a published page carries none of it. `ssgtheme`, `simple` and `krowy`
+already have it on their titles.
+
+### Heading ids may start with a digit
+
+Heading ids follow the heading text, so `## 1. Deterministic ids` gets
+`id="1-deterministic-ids"`. `#1-deterministic-ids` is not a valid CSS selector,
+and `document.querySelector(location.hash)` throws on it. A theme script that
+scrolls to a heading should look it up with
+`document.getElementById(decodeURIComponent(location.hash.slice(1)))`, or with
+`CSS.escape` around the id. ssg can also write the heading links itself; see
+`heading_anchors` in [CONFIGURATION.md](CONFIGURATION.md#authoring).
 
 ## Template engines
 
@@ -335,6 +411,21 @@ Rely on the tables below rather than assuming every value exists everywhere.
 | `.Data` | map | YAML/JSON data files |
 | `.Pager` | pager | Pagination state |
 | `.BuildTime` | time | When this build ran — one value for the whole build |
+| `.Modified` | time | The newest `modified` (or `date`) of the listed posts, for `dateModified`; zero when none is dated |
+| `.SSG.Version` | string | The ssg that built the site, e.g. `1.8.74` |
+| `.Lang` | string | The listing's language (empty without i18n) |
+| `.CanonicalURL` | string | This listing page's own absolute URL, `/blog/page/2/` included |
+| `.Description` | string | The site's description |
+| `.Translations` | list | The listing in every language: `Lang`, `Locale`, `Title` (language name), `URL`, `Canonical`, `IsCurrent`, `IsDefault` |
+| `.Hreflang` | HTML | `<link rel="alternate" hreflang>` for every language plus `x-default`, built from `.Translations` |
+
+A shared `<head>` partial can therefore treat a listing like a page:
+
+```gotemplate
+<link rel="canonical" href="{{ .CanonicalURL }}">
+{{ .Hreflang }}
+{{ range .Translations }}{{ if not .IsCurrent }}<a href="{{ .URL }}" hreflang="{{ .Lang }}">{{ .Title }}</a>{{ end }}{{ end }}
+```
 
 `.Pager` contains `Current`, `Total`, `PerPage`, `PrevURL` and `NextURL`:
 
@@ -354,6 +445,7 @@ Individual content fields are flattened at the root:
 |---|---|
 | `.Site`, `.Domain`, `.Vars`, `.Data` | Global site/configuration data |
 | `.BuildTime` | When this build ran (see below) |
+| `.SSG.Version` | The ssg that built the site (see below) |
 | `.ID`, `.Title`, `.Slug`, `.Status`, `.Type` | Identity fields |
 | `.Date`, `.Modified` | Dates converted to the configured content timezone |
 | `.Content`, `.Excerpt`, `.Description`, `.Keywords` | Body and metadata text |
@@ -390,6 +482,23 @@ should not break a deploy. The build stays internally consistent either way.
 A site that rebuilds on a schedule, or on a `republish-trigger` webhook, then
 never shows last year's footer without anyone editing anything.
 
+### `.SSG.Version` — which ssg built the page
+
+Every view that has `.BuildTime` — pages, posts, the front listing, archives
+and taxonomy indexes — also has `.SSG.Version`, so a footer or the generator
+meta tag can name the tool (#338):
+
+```gotemplate
+<meta name="generator" content="ssg {{ .SSG.Version }}">
+<footer>Built with ssg {{ .SSG.Version }} on {{ .BuildTime.Format "2 January 2006" }}</footer>
+```
+
+It is `1.8.74` for a release, the module version for `go install
+github.com/spagu/ssg/cmd/ssg@v1.8.74` (#337), `1.8.74+dirty` for a build of a
+modified checkout. How many pages the build wrote and how long it took cannot
+be in a page, which is written before the build ends; `build_report:` writes
+them to a file beside the pages (see CONFIGURATION.md).
+
 > ⚠️ The four do not behave alike. An exporter writes **names** in frontmatter
 > (`author: "Zonqor"`, `categories: ["Marsaskala"]`), but `.Author` and
 > `.Categories` hold the **IDs** those names resolved to. So
@@ -409,7 +518,7 @@ never shows last year's footer without anyone editing anything.
 | `.SeriesPrevURL`, `.SeriesPrevTitle` | Previous series item |
 | `.SeriesNextURL`, `.SeriesNextTitle` | Next series item |
 | `.Lang`, `.Languages`, `.DefaultLanguage` | Language state |
-| `.Translations`, `.Hreflang` | Language switching/alternate links |
+| `.Translations`, `.Hreflang` | Language switching/alternate links. Each translation carries `.IsCurrent` for the page being rendered, as `.Page.Translations` does |
 
 The `models.Page` struct is also available as a nested value — but the key differs
 by content type: **`.Page` in `page.html`, `.Post` in `post.html`.** A post
@@ -431,8 +540,12 @@ executing "page.html" at <.Page.TOC>: can't evaluate field TOC in type interface
 |---|---|
 | `.URL`, `.CanonicalURL`, `.OutputPath`, `.TOC`, `.Hreflang` | **root only** — computed for the template, no struct field behind them |
 | `.Site`, `.Domain`, `.Vars`, `.Data`, `.ExternalData`, `.Languages` | **root only** — site-level, not per-page |
+| `.Pager`, `.Posts` | **only on a page with `paginate:` in its frontmatter** — this page's pager and slice, the same shape an archive gets; nil / absent elsewhere, so guard with `{{ with .Pager }}` in a shared layout |
 | `.Title`, `.Slug`, `.Date`, `.Description`, `.Tags`, `.Content`, `.Translations`, … | both root and `.Page`/`.Post` |
 | custom frontmatter (`lead:`) | root as `.lead`, or **`.Page.Extra.lead`** |
+| a mapped record's fields (external source with `content_map`) | root, or `.Page.Extra` / `.Post.Extra` — every field, mapped or not |
+| `.BreadcrumbSchema` | the derived `BreadcrumbList`, ready for `{{ toJSON .BreadcrumbSchema }}` in a theme that writes its own JSON-LD; nil on the front page |
+| `.Page.IsNotFound` | true on the error page (slug `404`, written as `/404.html`) — the one page to mark `noindex` and give no canonical |
 
 Under the nested struct the computed ones have method equivalents:
 `{{ .Page.GetURL }}`, `{{ .Page.GetCanonical .Domain }}`, `{{ .Page.GetOutputPath }}`.
@@ -461,10 +574,31 @@ directly ships unrendered Markdown to the reader.
 | `.Name` | Display name |
 | `.Series` | Series name for compatibility |
 | `.Posts` | Posts in the archive |
+| `.Pager` | Pagination for this archive (`.Current`, `.Total`, `.Pages`) |
+| `.CanonicalURL` | Absolute URL of **this** archive page |
+| `.Lang`, `.BuildTime` | Language code and build timestamp |
 | `.Domain`, `.Vars`, `.Data` | Global values |
 
 Category, tag and author posts are newest first. Series posts are oldest first
 to preserve reading order.
+
+`.CanonicalURL` is the same name pages and posts carry, so one expression writes
+the canonical everywhere:
+
+```gotemplate
+<link rel="canonical" href="{{ .CanonicalURL }}"/>
+<meta property="og:url" content="{{ .CanonicalURL }}"/>
+```
+
+It names the path the archive was actually written to, which matters in two
+cases a template cannot reconstruct from `.Category.Slug`: a category with its
+own `link:` is served away from `/category/`, and a nested category is served at
+`/category/<parent>/<child>/`. Page 2 canonicalises to itself rather than
+claiming to be page 1.
+
+Author archives are addressed with `authorURL` (see
+[docs/TEMPLATE_HELPERS.md](TEMPLATE_HELPERS.md)); `termURL` covers registered
+taxonomies only.
 
 ## Site data
 
@@ -490,6 +624,34 @@ Examples:
 ```gotemplate
 {{ with index .Site.Authors .Author }}
   <a href="/author/{{ .Slug }}/">{{ .Name }}</a>
+{{ end }}
+```
+
+### What a category and a media item carry
+
+These entries hold more than the generator reads. The extra fields exist for
+themes, and are listed here so a theme author does not have to guess (GO-045):
+
+| `.Site.Categories[id]` | What it is |
+|---|---|
+| `.ID`, `.Name`, `.Slug` | identity; `.Slug` is what the archive URL uses |
+| `.Description` | the term's own text, for an archive header |
+| `.Count` | how many entries the source CMS had in it — "12 posts" beside a term |
+| `.Parent` | the id of the parent term, for a nested menu; `0` at the top |
+| `.Link` | the URL the **source** site served this archive at, useful on a migrated site |
+
+| `.Site.Media[id]` | What it is |
+|---|---|
+| `.ID`, `.Slug`, `.Title.Rendered` | identity and caption |
+| `.MediaType`, `.MimeType` | `image`, `file`; the MIME type picks an icon for a document link |
+| `.SourceURL` | the original URL, for a site that did not copy its media across |
+| `.MediaDetails.File` | the path the generator itself resolves a featured image through |
+| `.MediaDetails.Width`, `.Height` | the intrinsic size — write both attributes and the page stops shifting as images load |
+
+```gotemplate
+{{ with index .Site.Media .FeaturedMediaID }}
+  <img src="{{ .SourceURL }}" alt="{{ .Title.Rendered }}"
+       width="{{ .MediaDetails.Width }}" height="{{ .MediaDetails.Height }}">
 {{ end }}
 ```
 
@@ -588,10 +750,36 @@ the page — `.` and `$` are the same object. In scope:
 | `.Data.key` | the entry's `data:` map (values are strings) |
 | `.Attrs.key`, `.InnerContent` | the invocation: `[name key="v"]inner[/name]` |
 | `.Vars.key`, `$.Vars.key` | site-wide `variables:` (same map page templates see) |
+| `.SiteData.key` | the `data/` files — the same tree page templates read as `.Data` |
+| `.ExternalData.key` | `external_sources` namespaces |
+
+`.SiteData`, not `.Data`: inside a shortcode `.Data` has always meant the
+`shortcodes:` entry's own `data:` map, and repointing it would break every theme
+using it. The site-wide namespaces are admitted for the same reason `.Vars` is —
+one map shared by every invocation, with nothing page-specific about it.
 
 **Not** in scope: `.Page`, `.Site`, `.Posts`, `.Categories` or anything else
 from a page template's context. A shortcode has no page — the same instance may
 render on many pages — so reaching for page data is a template error.
+
+**Theme partials are callable.** A shortcode is parsed into a copy of the
+theme's namespace, so `{{ template "card" . }}` reaches `partials/card.html`
+like any role template does, and a block both a page template and a shortcode
+need is written once. The copy is private to the shortcode: a `{{ define }}` in
+it wins inside it and cannot change what a page renders.
+
+**The collection helpers work here too** — `filter`, `sort`, `first`, `where`,
+`pluck` and the rest — because there is now site-wide data to use them on. With
+`int`/`float` converting an attribute, a data-driven block is expressible in
+full:
+
+```gotemplate
+{{/* shortcodes/reviews.html — [reviews min="4" limit="3"] */}}
+{{ $picked := filter "rating" "ge" (float .Attrs.min) .SiteData.reviews }}
+{{ range first (int .Attrs.limit) (sort "date" "desc" $picked) }}
+  {{ template "review-card" . }}
+{{ end }}
+```
 
 A template error does not stop the build by default: the shortcode is dropped
 from the page and a warning is printed. Set `shortcode_errors` (or

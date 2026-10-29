@@ -47,13 +47,13 @@ on:
 env:
   # Kept in step with go.mod's directive and with the pinned golangci-lint,
   # which refuses to analyse a target newer than the Go it was built with —
-  # v2.13.1 is the first release built on 1.27, which is what allowed the
-  # directive to move here at all.
+  # v2.13.1 was the first release built on 1.27; 1.27.2 also needs v2.14.0,
+  # whose x/tools reads the export data version 5 it writes.
   #
-  # Never below 1.26.7: earlier 1.26.x stdlib carries advisories govulncheck
-  # finds reachable from this code (encoding/asn1 GO-2026-5972 via the SFTP
-  # deploy, net/http GO-2026-5026 via every outbound request).
-  GO_VERSION: "1.27.0"
+  # Never below 1.27.3: earlier releases carry stdlib advisories govulncheck
+  # finds reachable from this code (crypto/x509: GO-2026-6809; net/http and
+  # HTTP/2, crypto/tls, html/template: GO-2026-6599..6613).
+  GO_VERSION: "1.27.3"
   # Node.js 20 is deprecated on runners; run JS actions on Node 24 explicitly.
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
@@ -72,6 +72,8 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     timeout-minutes: 20
     steps:
       - name: Checkout code
@@ -100,6 +102,47 @@ jobs:
       - name: Run tests
         run: go test -v -race -coverprofile=coverage.out ./...
 
+      # The 96% floor the project holds itself to, enforced rather than reported
+      # (TEST-002). Generated protobuf is excluded the same way codecov.yml
+      # excludes it: 2,760 statements nobody writes, which dragged the number
+      # 16 points below the truth. Codecov still uploads below, but a status
+      # from an external service is advisory; this step is the gate.
+      - name: Enforce the coverage floor
+        run: |
+          set -euo pipefail
+          grep -v 'internal/mddb/proto' coverage.out > coverage.gate.out
+          pct=$(go tool cover -func=coverage.gate.out | awk '/^total:/ { gsub("%", "", $3); print $3 }')
+          echo "coverage excluding generated proto: ${pct}%"
+          awk -v p="$pct" 'BEGIN { exit !(p + 0 >= 96) }' \
+            || { echo "::error::coverage ${pct}% is below the 96% floor"; exit 1; }
+
+      # The same floor, per package (TEST-001). The aggregate above was being
+      # held up by the packages at 99-100% while cmd/ssg sat at 91 and
+      # internal/parser at 87, which is exactly the shape a single number hides.
+      - name: Enforce the coverage floor per package
+        run: |
+          set -euo pipefail
+          below=$(awk 'NR > 1 {
+              split($1, parts, ":"); file = parts[1]
+              n = split(file, segs, "/"); pkg = segs[1]
+              for (i = 2; i < n; i++) pkg = pkg "/" segs[i]
+              total[pkg] += $2
+              if ($3 > 0) covered[pkg] += $2
+            }
+            END {
+              for (pkg in total) {
+                pct = 100 * covered[pkg] / total[pkg]
+                if (pct + 0 < 96) printf "%s %.1f%%\n", pkg, pct
+              }
+            }' coverage.gate.out | sort)
+          if [ -n "$below" ]; then
+            echo "$below" | while read -r pkg pct; do
+              echo "::error::${pkg} is at ${pct}, below the 96% floor"
+            done
+            exit 1
+          fi
+          echo "every package is at or above 96%"
+
       # A short fuzz pass on every push. Not to find something in 20 seconds —
       # to keep the targets compiling, keep the seed corpus exercised, and grow
       # testdata/fuzz over time. The parsers these cover read bytes ssg did not
@@ -123,6 +166,19 @@ jobs:
       - name: Run tests in a shuffled order
         run: go test -race -shuffle=on ./...
 
+      # The full Build Binaries matrix runs only on tags now, so this is what
+      # catches platform-specific compile breakage in a PR: one compile per
+      # GOOS (plus arm64 for the odd 64-bit-only assumption), no artifacts,
+      # warm module cache. Seconds, not eleven runners.
+      - name: Cross-compile check
+        env:
+          CGO_ENABLED: 0
+        run: |
+          for target in linux/arm64 darwin/arm64 windows/amd64 freebsd/amd64 openbsd/amd64; do
+            echo "— $target"
+            GOOS=${target%/*} GOARCH=${target#*/} go build -o /dev/null ./cmd/ssg
+          done
+
       # The generated site must not depend on the recorded baseline drifting, nor
       # on how many workers built it. Neither check ran in CI before, which is how
       # four parallel-render bugs shipped: each lived on a path the unit tests
@@ -134,7 +190,7 @@ jobs:
         run: bash scripts/determinism.sh
 
       - name: Upload coverage
-        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           files: ./coverage.out
           fail_ci_if_error: false
@@ -142,6 +198,8 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     timeout-minutes: 20
     steps:
       - name: Checkout code
@@ -156,11 +214,50 @@ jobs:
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
         with:
-          version: v2.13.1 # pinned for reproducible CI (OPS-013); first build on go1.27
+          version: v2.14.0 # pinned for reproducible CI (OPS-013); reads go1.27 export data (v5)
+
+  # services/tts-server is its own Go module (1.8.65), so the root `./...`
+  # above never reaches it: it gets its own tests, coverage floor and lint.
+  tts-server:
+    name: TTS server
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: services/tts-server
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+          cache-dependency-path: services/tts-server/go.sum
+
+      - name: Test with the coverage floor
+        run: |
+          go test -race -coverprofile=coverage.out ./...
+          pct=$(go tool cover -func=coverage.out | awk '/^total:/ { gsub("%", "", $3); print $3 }')
+          echo "tts-server coverage: ${pct}%"
+          awk -v p="$pct" 'BEGIN { exit !(p + 0 >= 96) }' \
+            || { echo "::error::tts-server coverage ${pct}% is below the 96% floor"; exit 1; }
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
+        with:
+          version: v2.14.0 # same pin as the root lint job
+          working-directory: services/tts-server
 
   security:
     name: Security Scan
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write   # gosec SARIF → Security tab (OPS-008)
     timeout-minutes: 20
     steps:
       - name: Checkout code
@@ -173,16 +270,56 @@ jobs:
           cache: true
 
       - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@v1.3.0 # NOSONAR S8545: pinned to an exact, reproducible version (OPS-013)
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.9.0 # NOSONAR S8545: pinned to an exact, reproducible version (OPS-013)
+        # v1.3.0 predates Go 1.27 and its x/tools crashed on 1.27 export data
+        # (panic: Int in typesinternal.ForEachElement) — the scan died before
+        # scanning anything. Keep this pin at a release younger than GO_VERSION.
 
       - name: Run govulncheck
         run: govulncheck ./...
 
+      # Static analysis of the source (OPS-008), which govulncheck above is not:
+      # that scans the dependency graph for known advisories, this scans OUR
+      # code for the classes of mistake it is written to find. Results land in
+      # the Security tab as SARIF. Since 1.8.63 the tree is clean — the 12
+      # findings it carried were fixed (an open redirect in the preview's
+      # redirect replay, output walks moved to os.Root) or annotated with the
+      # reason they do not apply — so a new finding fails the job. The SARIF
+      # is uploaded either way, so the Security tab shows what failed it.
+      # gosec is built from .github/tools/gosec, whose go.mod and go.sum lock
+      # it and a newer x/tools by hash: the v2.29.0 release reads export data
+      # up to version 4, and Go 1.27 writes 5 (see that go.mod).
+      - name: Install gosec
+        working-directory: .github/tools/gosec
+        run: go build -mod=readonly -o "$(go env GOPATH)/bin/gosec" github.com/securego/gosec/v2/cmd/gosec
+
+      # testdata/ holds parser fixtures that are broken on purpose (the API
+      # docs readers report syntax errors); gosec counts their type errors as
+      # a failed run even with no finding, and none of it is shipped code.
+      - name: Run gosec
+        run: gosec -exclude-dir=testdata -fmt sarif -out gosec.sarif ./...
+
+      - name: Upload gosec results
+        if: always()
+        uses: github/codeql-action/upload-sarif@c16c0f3f2812ec4bb3750a5ed64873fe2ce0fbef # codeql-bundle-v2.26.3
+        with:
+          sarif_file: gosec.sarif
+          category: gosec
+
   build:
     name: Build Binaries
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     timeout-minutes: 20
     needs: [test, lint, security]
+    # Tags only. This matrix ran on every PR and every push to main, building
+    # eleven dev-versioned binaries nobody publishes — four full matrix runs
+    # per release cycle before the one that ships. Cross-platform compile
+    # breakage is still caught on every PR by the cross-compile check in the
+    # test job, which costs one cached `go build` per GOOS instead of eleven
+    # artifact builds.
+    if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.build_packages == 'true'
     strategy:
       matrix:
         include:
@@ -277,7 +414,7 @@ jobs:
           mv ssg.exe "ssg-${{ matrix.suffix }}.exe"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: ssg-${{ matrix.suffix }}
           path: dist/*
@@ -286,8 +423,14 @@ jobs:
   build-deb:
     name: Build DEB Packages
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     timeout-minutes: 20
-    needs: [test, lint, security]
+    # The .deb wraps the binary the build job already made — recompiling here
+    # was a third build of each linux target per tag, and a package that could
+    # in principle carry different bytes than the released tarball. Downloading
+    # the artifact makes the .deb provably the same binary.
+    needs: [build]
     if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.build_packages == 'true'
     strategy:
       matrix:
@@ -295,12 +438,6 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Setup Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: true
 
       - name: Get version
         id: version
@@ -311,14 +448,15 @@ jobs:
             echo "version=dev-$(date +%Y%m%d)" >> $GITHUB_OUTPUT
           fi
 
-      - name: Build binary
-        env:
-          GOOS: linux
-          GOARCH: ${{ matrix.arch }}
-          CGO_ENABLED: 0
+      - name: Download built binary
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: ssg-linux-${{ matrix.arch }}
+
+      - name: Unpack binary
         run: |
-          go build -ldflags "-s -w -X main.Version=${{ steps.version.outputs.version }}" \
-            -o ssg ./cmd/ssg
+          mv "ssg-linux-${{ matrix.arch }}" ssg
+          chmod 755 ssg
 
       - name: Build DEB package
         run: |
@@ -357,7 +495,7 @@ jobs:
           dpkg-deb --build "${PKG_DIR}"
 
       - name: Upload DEB artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: ssg-deb-${{ matrix.arch }}
           path: "*.deb"
@@ -366,8 +504,12 @@ jobs:
   build-rpm:
     name: Build RPM Packages
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     timeout-minutes: 20
-    needs: [test, lint, security]
+    # Same provenance argument as build-deb: wrap the built artifact, don't
+    # compile a fourth copy.
+    needs: [build]
     if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.build_packages == 'true'
     strategy:
       matrix:
@@ -379,12 +521,6 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Setup Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          cache: true
 
       - name: Install RPM tools
         run: sudo apt-get update && sudo apt-get install -y rpm
@@ -398,14 +534,15 @@ jobs:
             echo "version=dev-$(date +%Y%m%d)" >> $GITHUB_OUTPUT
           fi
 
-      - name: Build binary
-        env:
-          GOOS: linux
-          GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: 0
+      - name: Download built binary
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: ssg-linux-${{ matrix.goarch }}
+
+      - name: Unpack binary
         run: |
-          go build -ldflags "-s -w -X main.Version=${{ steps.version.outputs.version }}" \
-            -o ssg ./cmd/ssg
+          mv "ssg-linux-${{ matrix.goarch }}" ssg
+          chmod 755 ssg
 
       - name: Build RPM package
         run: |
@@ -438,7 +575,7 @@ jobs:
           cp ~/rpmbuild/RPMS/${ARCH}/*.rpm .
 
       - name: Upload RPM artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: ssg-rpm-${{ matrix.rpmarch }}
           path: "*.rpm"
@@ -479,7 +616,7 @@ jobs:
           git push -f origin "refs/tags/$MAJOR"
 
       - name: Download all artifacts
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           path: artifacts
 
@@ -506,7 +643,7 @@ jobs:
           ls -la
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           files: release/*
           generate_release_notes: true

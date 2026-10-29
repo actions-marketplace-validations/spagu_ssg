@@ -54,12 +54,26 @@ func (g *Generator) buildTaxonomies() error {
 	return g.checkTaxonomyCollisions()
 }
 
+// taxonomyExtra is the part of a page's Extra a taxonomy may read its terms
+// from: custom frontmatter, yes; a mapped record, no. A record carries every
+// field in Extra so a template can show it (1.8.73), and reading terms from
+// there too added the record's raw "maintainer" to the terms its
+// content_map.taxonomies chose — a normalised spelling, or none on purpose —
+// and failed the build on the slug collision (#344). For such a page the
+// mapping is the taxonomy's only source, as it is for the title and the rest.
+func taxonomyExtra(p *models.Page) map[string]interface{} {
+	if p.FromRecord {
+		return nil
+	}
+	return p.Extra
+}
+
 // assignPageTaxonomies resolves one page's taxonomy values and, for posts,
 // registers them in the registry's language bucket.
 func (g *Generator) assignPageTaxonomies(p *models.Page, isPost bool) error {
 	src := taxonomy.PageSources{
 		TaxonomiesFM:  p.TaxonomiesFM,
-		Extra:         p.Extra,
+		Extra:         taxonomyExtra(p),
 		CategoryNames: g.categoryNames(p),
 		Tags:          p.Tags,
 		Series:        p.Series,
@@ -307,7 +321,11 @@ func (g *Generator) renderFoldedBuiltin(def taxonomy.Definition) error {
 	case "category":
 		return g.generateCategories()
 	case "series":
-		return g.generateSeries()
+		slugs, err := g.generateSeries()
+		if err != nil {
+			return err
+		}
+		g.seriesSlugs = slugs
 	case "tag":
 		slugs, err := g.generateTags()
 		if err != nil {
@@ -346,8 +364,16 @@ func (g *Generator) generateTaxonomyArchives(def taxonomy.Definition, lang strin
 		// renders from its own struct, and a shared footer reads .BuildTime on
 		// every view or on none (#186).
 		BuildTime time.Time
+		// The canonical every other archive has had since #245; the term
+		// index was the one view a shared <head> could not read it from.
+		CanonicalURL string
+		// SSG names the ssg that built the site, beside BuildTime (#338).
+		SSG SSGInfo
+		// Modified is the newest lastmod of any post with a term (#339).
+		Modified time.Time
 	}{g.siteData, info, views, lang, g.config.Domain, g.config.Variables, g.data,
-		g.externalData, g.buildTime}
+		g.externalData, g.buildTime, g.archiveCanonical(base, Pager{}), g.ssgInfo(),
+		g.taxonomyLastmod(def.Name, lang)}
 	if err := g.renderTaxonomyPage(g.taxonomyIndexChain(def), indexOut, indexData); err != nil {
 		return err
 	}
@@ -416,7 +442,7 @@ func (g *Generator) renderTermArchive(def taxonomy.Definition, lang string, info
 			outPath = filepath.Join(root, "page", fmt.Sprintf("%d", chunk.Pager.Current), indexHTMLName)
 		}
 		data := g.archiveData(def.Name, term.Name,
-			models.Category{Name: term.Name, Slug: slug}, chunk.Posts, chunk.Pager, lang)
+			models.Category{Name: term.Name, Slug: slug}, chunk.Posts, chunk.Pager, lang, term.URL)
 		// A custom taxonomy also names the term's own definition and info, which
 		// only this view has.
 		data["Taxonomy"] = info
@@ -497,10 +523,11 @@ func (g *Generator) taxonomyTermChain(def taxonomy.Definition) []string {
 
 // writeTaxonomySitemap appends sitemap entries for custom taxonomy indexes and
 // term archives (sitemap: true, the default).
-func (g *Generator) writeTaxonomySitemap(sb *strings.Builder) {
+func (g *Generator) taxonomyEntries() []sitemapEntry {
 	if g.taxonomies == nil {
-		return
+		return nil
 	}
+	var out []sitemapEntry
 	for _, name := range g.taxonomies.Names {
 		def := g.taxonomies.Definitions[name]
 		// Folded built-ins contribute to the sitemap through their legacy slug
@@ -514,21 +541,18 @@ func (g *Generator) writeTaxonomySitemap(sb *strings.Builder) {
 				continue
 			}
 			base := g.taxonomyBaseURL(def, lang)
-			g.writeSitemapRelURL(sb, base)
+			out = append(out, g.taxonomyRelEntry(base))
 			for _, t := range terms {
-				g.writeSitemapRelURL(sb, base+t.Slug+"/")
+				out = append(out, g.taxonomyRelEntry(base+t.Slug+"/"))
 			}
 		}
 	}
+	return out
 }
 
-// writeSitemapRelURL appends one archive-style sitemap entry for a site-relative URL.
-func (g *Generator) writeSitemapRelURL(sb *strings.Builder, rel string) {
-	sb.WriteString(sitemapURLOpen)
-	fmt.Fprintf(sb, "    <loc>%s%s%s</loc>\n", httpsScheme, g.config.Domain, rel)
-	sb.WriteString("    <changefreq>weekly</changefreq>\n")
-	sb.WriteString("    <priority>0.5</priority>\n")
-	sb.WriteString(sitemapURLClose)
+// taxonomyRelEntry is one archive-style sitemap entry for a site-relative URL.
+func (g *Generator) taxonomyRelEntry(rel string) sitemapEntry {
+	return archiveEntry(httpsScheme+g.config.Domain+rel, kindTaxonomy)
 }
 
 // generateTaxonomyFeeds writes one Atom feed per term for custom taxonomies

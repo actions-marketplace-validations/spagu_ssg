@@ -19,11 +19,24 @@ import (
 // schema: overrides everything. json.Marshal HTML-escapes </script>, so
 // untrusted titles cannot break out of the script element.
 func (g *Generator) buildJSONLD(page models.Page, isPost bool) string {
-	merged := g.mergedSchema(page, isPost)
-
 	var b strings.Builder
-	writeLDScript(&b, merged)
-	if bc := g.breadcrumbLD(page); bc != nil {
+	writeLDScript(&b, g.mergedSchema(page, isPost))
+	b.WriteString(g.companionLD(page, ""))
+	return b.String()
+}
+
+// companionLD is the structured data that sits beside a page's own type
+// rather than competing with it: the FAQPage its faq: asked for, and the
+// BreadcrumbList that says where the page sits. A theme that writes its own
+// JSON-LD replaces ssg's main entity (#349), and kept losing these with it,
+// which no template could put back (#351). Each is added unless the theme's
+// head already has one of that type.
+func (g *Generator) companionLD(page models.Page, head string) string {
+	var b strings.Builder
+	if faq := g.faqLD(page); faq != nil && !strings.Contains(head, `"FAQPage"`) {
+		writeLDScript(&b, faq)
+	}
+	if bc := g.breadcrumbLD(page); bc != nil && !strings.Contains(head, `"BreadcrumbList"`) {
 		writeLDScript(&b, bc)
 	}
 	return b.String()
@@ -42,6 +55,8 @@ func (g *Generator) mergedSchema(page models.Page, isPost bool) map[string]inter
 	merged := deepMergeLD(cloneLD(g.config.Schema), g.derivedLD(page, isPost, g.servedCanonical(page)))
 	merged = deepMergeLD(merged, g.sectionSchema(page))
 	merged = deepMergeLD(merged, page.Schema)
+	g.fillRecipeFromContent(merged, page.Content)
+	g.fillRecipeCategory(merged, page)
 	if _, ok := merged["@context"]; !ok {
 		merged["@context"] = "https://schema.org"
 	}
@@ -71,7 +86,7 @@ func (g *Generator) derivedLD(page models.Page, isPost bool, canonical string) m
 		ld["inLanguage"] = page.Locale
 	}
 	if page.FeaturedImage != "" {
-		ld["image"] = page.FeaturedImage
+		ld["image"] = g.socialURL(page.FeaturedImage)
 	}
 	if !isPost {
 		return ld
@@ -96,40 +111,6 @@ func (g *Generator) derivedLD(page models.Page, isPost bool, canonical string) m
 	}
 	ld["mainEntityOfPage"] = map[string]interface{}{"@type": "WebPage", "@id": canonical}
 	return ld
-}
-
-// breadcrumbLD derives a BreadcrumbList from the page's URL path so agents can
-// place the page in the site hierarchy. Home (and any page whose URL is "/") has
-// no trail and returns nil; a bare domain also skips it (item URLs need a host).
-func (g *Generator) breadcrumbLD(page models.Page) map[string]interface{} {
-	if g.config.Domain == "" {
-		return nil
-	}
-	rel := strings.Trim(page.GetURL(), "/")
-	if rel == "" {
-		return nil
-	}
-	segs := strings.Split(rel, "/")
-	items := make([]interface{}, 0, len(segs)+1)
-	items = append(items, crumb(1, "Home", "https://"+g.config.Domain+"/"))
-	acc := ""
-	for i, s := range segs {
-		acc += "/" + s
-		name := titleize(s)
-		itemURL := "https://" + g.config.Domain + acc + "/"
-		if i == len(segs)-1 { // the page itself: use its real title and canonical URL
-			if page.Title != "" {
-				name = page.Title
-			}
-			itemURL = g.servedCanonical(page)
-		}
-		items = append(items, crumb(i+2, name, itemURL))
-	}
-	return map[string]interface{}{
-		"@context":        "https://schema.org",
-		"@type":           "BreadcrumbList",
-		"itemListElement": items,
-	}
 }
 
 // crumb is one BreadcrumbList ListItem.
@@ -251,8 +232,12 @@ func (g *Generator) sectionSchema(page models.Page) map[string]interface{} {
 }
 
 // contentSection returns a page's directory path relative to the content root,
-// slash-separated, or "" when it cannot be placed.
+// slash-separated, or "" when it cannot be placed. Content that has no
+// directory names its section itself (mddb.sources, #361).
 func (g *Generator) contentSection(page models.Page) string {
+	if page.Section != "" {
+		return strings.Trim(filepath.ToSlash(page.Section), "/")
+	}
 	if page.SourceDir == "" {
 		return ""
 	}

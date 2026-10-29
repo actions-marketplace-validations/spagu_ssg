@@ -8,19 +8,16 @@ on:
       - "v[0-9]+.[0-9]+.[0-9]+"
   pull_request:
     branches: [main]
-    paths-ignore:
-      # Content and the docs theme cannot change the binary or its tests:
-      # embedded.go embeds templates/simple and templates/krowy only, so
-      # templates/ssgtheme is site material like docs/ and blog/. The docs site
-      # has its own workflow, which builds and link-checks all of this.
-      # Tag pushes ignore path filters entirely, so releases are unaffected.
-      - "docs/**"
-      - "blog/**"
-      - "assets/**"
-      - "templates/ssgtheme/**"
-      - "docs-site.yaml"
-      - "*.md"
-      - ".github/workflows/docs-site.yml"
+    # A PR image build exists to catch a broken Dockerfile before the tag —
+    # so it runs only when the image definition itself changes. Go code is
+    # compiled and tested by CI on every PR already; rebuilding the image for
+    # every code change was a four-minute multi-stage build per PR that
+    # verified nothing the CI workflow had not. Tag pushes ignore path
+    # filters entirely, so releases are unaffected.
+    paths:
+      - "Dockerfile"
+      - ".dockerignore"
+      - ".github/workflows/docker.yml"
   workflow_dispatch:
 
 env:
@@ -53,10 +50,10 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
       - name: Log in to GitHub Container Registry
         if: github.event_name != 'pull_request'
@@ -101,7 +98,7 @@ jobs:
 
       - name: Build and push
         id: build
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
           platforms: linux/amd64,linux/arm64,linux/arm/v7

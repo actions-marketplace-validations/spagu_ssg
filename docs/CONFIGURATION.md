@@ -100,6 +100,50 @@ Most features are disabled by default. Defaults listed below come from the
 current `config.DefaultConfig`; omitted strings and booleans otherwise use Go's
 empty value.
 
+## Editing the config from the command line
+
+```
+ssg config view                                   # the whole file, as written
+ssg config view highlight_style                   # one value
+ssg config view taxonomies.audience               # one section
+ssg config view --effective toc_depth             # after defaults and normalisation
+ssg config set highlight_style github-dark
+ssg config set outputs [html,markdown,json]       # a list
+ssg config set taxonomies.audience.multiple true  # a nested path
+ssg config set headers."/css/*".Cache-Control "public, max-age=86400"
+ssg config set robots_rules[1].allow /docs/       # a list position
+ssg config set --json marketing '{"og_site_name":"Example"}'
+ssg config unset mermaid_background
+```
+
+**The file keeps its shape.** Setting one value changes one line: comments,
+blank lines, key order and the column trailing comments are aligned in all
+survive, because the edit is spliced into the text rather than produced by
+re-serialising the parsed config. That is not a nicety here — the configs in
+this project carry their reasoning in comments, and an editor that dropped
+them would make `ssg config set` a thing nobody could safely run twice.
+
+**Paths.** Dots descend into mappings. A key that contains dots or slashes is
+quoted (`headers."/css/*"`). A list position is `[n]`, and it must already
+exist: inventing list entries is guesswork. A path whose parent mappings do not
+exist yet is written whole.
+
+**Values** are typed the way they read: `true` is a bool, `8080` an int,
+`[a,b,c]` a list, everything else a string. `--string` forces text (for a
+version label that looks like a number), and `--json` takes any structure.
+
+**An edit that would break the config is refused.** The result is validated in
+a scratch file before the real one is touched, so a rejected edit leaves the
+config byte-for-byte as it was.
+
+Version one edits **YAML**. A TOML or JSON config is refused with a message
+rather than rewritten without its comments.
+
+The MCP designer tools (`ssg mcp`) write through the same engine, so an
+assistant and a person editing the same file get the same result — with the
+difference that MCP still restricts itself to an allow-list of presentation
+keys, while the CLI is the project owner's own tool and edits anything.
+
 ## Core and paths
 
 | Key | Default | CLI | Purpose |
@@ -111,13 +155,14 @@ empty value.
 | `description` | empty | config only | Site tagline → `.Site.Description` |
 | `colors` | empty | config only | Palette by role → `.Site.Colors.<role>` and `--ssg-color-<role>` |
 | `posts_page` | empty | config only | Where the post listing goes, e.g. `blog` → `/blog/` |
+| `paginate` | `0` | `--paginate` | Posts per page of the post listing and archives, continued at `/page/2/`; `0` puts them all on one page. Other generators call this `posts_per_page` |
 | `content_dir` | `content` | `--content-dir` | Parent of local sources |
 | `content_sources` | empty | `--content-source` (repeatable) | Extra Markdown roots merged into the site; see [CONTENT.md](CONTENT.md#extra-sources-content_sources) |
 | `auto_excerpt` | `false` | `--auto-excerpt` | Derive a missing excerpt from the opening paragraph |
 | `flat_posts` | `false` | — | Load Markdown sitting directly in `posts/` as posts, not only from folders under it |
 | `templates_dir` | `templates` | `--templates-dir` | Parent of themes |
 | `output_dir` | `output` | `--output-dir` | Generated site destination |
-| `static_dir` | `static` | `--static-dir` | Verbatim passthrough files |
+| `static_dir` | `static` | `--static-dir` | Verbatim passthrough files. A declared directory that does not exist is skipped, not an error |
 | `static_sources` | empty | config only | Extra verbatim passthrough roots, each keeping its own name |
 | `data_dir` | `data` | `--data-dir` | YAML/JSON data for `.Data` |
 | `pages_path` | `pages` | config only | Pages directory inside a source |
@@ -177,12 +222,53 @@ reported, not silent:
 move its listing off the root. In multilingual builds the language prefix comes
 first (`/pl/blog/`), and each language has its own front page.
 
+#### A front page per language
+
+Each language names its own root in `link:`. The default language's root is
+`/`, unless `prefix_default_language` is on. Every other language's root is
+its prefix. `link:` is never prefixed for you, so write it in full:
+
+```yaml
+# home.hi.md (default language)   # home.en.md                  # home.pl.md
+link: "/"                         link: "/en/"                  link: "/pl/"
+translation_key: home             translation_key: home         translation_key: home
+```
+
+Each of these pages is its language's front page. Each language's post
+listing moves to its own `posts_page` (`/en/blog/`), or is not generated when
+`posts_page` is unset. The build names every language's front page:
+
+```text
+🏠 Front page: home.hi.md
+   Post listing: /blog/
+🏠 Front page: home.en.md
+   Post listing: /en/blog/
+```
+
+Giving two languages `link: "/"` is a collision at the site root. The error
+says how to fix it.
+
+The two are usually set together with `paginate`, which decides how many posts
+each page of the listing holds:
+
+```yaml
+posts_page: blog
+paginate: 9          # /blog/, /blog/page/2/, … — 0 (the default) is one page
+```
+
 ### Extra feeds (`feeds`)
 
 `feed: true` publishes one Atom feed of every post at `/feed.xml`, plus one per
 language and one per taxonomy term. That is all-or-nothing: a site with several
 content roots cannot offer "just the blog", and "the three tags that mean
 *release*" would need three subscriptions.
+
+A term's feed is written **beside its archive** — `/category/news/feed.xml` for
+an ordinary category, `/projects-archive/feed.xml` for one served away from
+`/category/` by its own `link:`, `/category/rooms/kitchens/feed.xml` for a nested
+one — and a term whose archive was not rendered gets no feed. Before 1.8.56 the
+category feeds were addressed by slug alone, which put them next to no archive in
+the last two cases.
 
 `feeds:` declares any number of extra feeds, each choosing **what goes in**, **where
 it is written** and **in what format**. `feed: true` keeps doing exactly what it
@@ -213,9 +299,10 @@ feeds:
 
 Two things worth knowing even if you only ever want Atom:
 
-- **`feed: true` names the feed after the bare hostname.** A declared feed takes a
-  `title`, so it can be called what it actually is. That alone is a reason to
-  declare one rather than rely on `feed: true`.
+- **`feed: true` names the feed after the site's `title`**, and after the bare
+  hostname only when there is none; under i18n each language's feed adds the
+  language name, `Magna Valor (Polski)`. A declared feed takes a `title` of its
+  own, so it can be called what it actually is.
 - **SSG injects the autodiscovery `<link>` tags itself**, for every feed, into
   every page — so a theme should *not* hand-write them or the page ships
   duplicates. Turn injection off with `feed_autodiscovery: false` if the theme
@@ -232,7 +319,7 @@ Two things worth knowing even if you only ever want Atom:
 | `tags` | Tags — any of |
 | `type` | `post` (default) or `page` |
 | `items` | Item cap for this feed; defaults to `feed_items` |
-| `full_content` | Full body vs summary; defaults to `feed_full_content` |
+| `full_content` | Full body vs summary; defaults to `feed_full_content`. A full body's relative URLs are made absolute against the post's address |
 
 Selection criteria are optional and combine with **AND** — `source: blog` plus
 `tags: [release]` means release posts *from the blog folder*. A feed with no
@@ -304,6 +391,11 @@ type and title, injected into **every page including the homepage** — a reader
 offering a choice reads exactly those links, so one Atom link would hide the rest.
 A theme that advertises its own feed is left alone.
 
+On a multilingual site the `feed: true` link follows the page's language: a page
+under `/pl/` offers `/pl/feed.xml`, the feed of the posts it is written in,
+rather than the default language's `/feed.xml`. A page in a language the site
+does not declare keeps the root feed.
+
 Set `feed_autodiscovery: false` to keep the feeds but **stop the injection into
 your HTML** — for a theme that wants control over the links' order, their titles,
 or which feeds are advertised at all:
@@ -342,6 +434,28 @@ Each entry keeps its own name by default, which is the point: URLs that already
 exist keep resolving. Sources are copied **after** `static_dir`, so a later entry
 wins a collision, and a missing path is a warning rather than a failed build.
 
+**A verbatim HTML document can join `sitemap.xml`.** A copied file never becomes
+a page, so no part of the sitemap could reach it — a hand-authored SPA linked
+from every page in the nav was absent from the file the site uses to state its
+own structure. The generator cannot tell a document from an asset by looking, so
+say which one is:
+
+```yaml
+static_sources:
+  - path: editor/index.html
+    dest: editor/index.html
+    sitemap: true            # listed at /editor/
+    priority: 0.8            # optional; 0.8 is what an ordinary page gets
+```
+
+Opt-in, because most of what a site copies verbatim is an asset. A directory
+entry resolves to the `index.html` at its root; anything that is not an HTML
+document is a warning rather than a sitemap line, and a document whose own HTML
+says `noindex` keeps itself out like every other entry. The `<lastmod>` comes
+from the **source** file's last commit under `lastmod_from_git`; without it a
+copied document has no `<lastmod>`, since it has no frontmatter date and a
+file's modification time is no reliable one (1.8.74).
+
 `output_dir` is generated state. `clean: true` deletes its old contents before
 building. See [CONTENT.md](CONTENT.md) for the source directory contract.
 
@@ -365,10 +479,23 @@ See [TEMPLATES.md](TEMPLATES.md).
 | `host` | `127.0.0.1` | `--host` | Bind address |
 | `port` | `8888` | `--port` | TCP port. Taken if free; otherwise the server walks forward (8889, 8890, …, up to 64 ports) and announces where it landed. `0` = any free port |
 | `watch` | `false` | `--watch` | Rebuild after local file changes (content, templates, data and the config file) |
-| `watch_runner` | `""` | `--watch-runner` | Spawns a background watch runner process |
+| `watch_runner` | `""` | `--watch-runner` | Spawns a background watch runner process; `none` turns off the one a configured worker would start |
 | `watch_runner_config` | `""` | `--watch-runner-config` | Config file the runner should use |
 | `watch_runner_dir` | `""` | `--watch-runner-dir` | Directory the runner starts in |
 | `clean` | `false` | `--clean` | Remove previous output before builds |
+| `incremental` | `false` | `--incremental` | Rebuild only the pages a change can reach. Always on under `--watch` |
+| `markdown_cache` | `false` | `--markdown-cache` | Keep converted Markdown between builds. Off for a reason — see below |
+
+`watch_runner: none` (or `off`) keeps a configured worker for builds and
+deploys but starts no runner in `--watch`, so the preview serves only the
+static site. If the runner's command is not installed, the preview still
+starts and ssg says so once. This is the usual case in the Docker image,
+which has no Node:
+
+```text
+ℹ️  Watch runner "npx wrangler pages dev ." not started: npx is not installed here, so /api/* Functions are not served (the static preview works).
+   The ssg Docker image has no Node: run `npx wrangler pages dev output` on the host beside it, or use an image with Node.
+```
 
 `watch_runner` coordinates background execution of development emulators (like `wrangler` or `workerd`). When configured, `ssg` automatically monitors files for rebuilds and spawns the runner in parallel, piping its output and terminating it on exit. Spelled `--wrangler` (for `npx wrangler dev`) or `--workerd` (for `workerd serve`) as CLI convenience flags.
 
@@ -386,6 +513,61 @@ rather than exiting, so a half-saved file never kills a dev session.
 
 A change is detected by content, not mtime: touching a file without changing its
 bytes does not trigger a rebuild.
+
+### Rebuilding only what changed
+
+`--watch` builds incrementally: after the hash check says something did change,
+only the pages that change can reach are rendered. A one-shot build is full
+unless `--incremental` asks otherwise, because a build nobody is waiting on
+should be the simple one.
+
+An uncertain dependency means a full build, always. A changed template or
+partial, a changed configuration file, a file the last build never saw, `--clean`,
+or content coming from MDDB, external sources or a CMS import each rebuild
+everything — the graph does not model which pages those reach, and a stale page
+with a green build is a worse failure than a slow one.
+
+```bash
+ssg graph                                # what the last build recorded, or why it cannot be narrowed
+ssg graph content/site/posts/hello.md    # what changing that file rebuilds
+ssg graph --dot | dot -Tsvg > graph.svg
+```
+
+The graph is recorded by every build, incremental or not, in
+`.ssg-cache/graph/graph.json`. Delete it and the next build is full. An
+incremental build produces the same output tree as a full one, byte for byte;
+a property test asserts exactly that over random sequences of edits.
+
+What it narrows is the render phase, which on a 5 000-post corpus is about a
+fifth of a warm build — see [INCREMENTAL.md](INCREMENTAL.md) for the
+measurements and for why the wall clock moves less than the page count does.
+
+### Keeping conversions between builds
+
+`markdown_cache: true` stores each converted document under
+`.ssg-cache/markdown/` and reads it back next time. **It is off by default, and
+the measurements are the reason.**
+
+Converting Markdown is a pure function of its input, so it looked like the
+obvious thing to cache. In wall-clock terms it is not: conversion runs across
+every core, and reading a cache back does not. On a 5 000-post corpus:
+
+| Machine | Without the cache | With it |
+|---|---|---|
+| 32 cores | 1.44 s | 1.39 s |
+| 4 cores | 1.45 s | 1.41 s |
+| 2 cores | 1.74 s | 1.58 s |
+
+It costs disk equal to the size of your content — 79 MB for that corpus — to
+buy 3% on a workstation and 9% on a small runner. Turn it on for the case it
+was built for: continuous integration with two cores and a cache carried
+between runs. Leave it off on your own machine.
+
+A build with **render hooks never uses it**, whatever the setting says. A hook
+is a template and a template can call the build's helpers, so its output can
+depend on the whole site rather than on the document being converted, and a key
+over the document would be a lie. `ssg cache stats` lists the namespace;
+deleting it costs one build.
 
 `watch_runner_config` points the runner at a config file kept anywhere on disk,
 so a `wrangler.toml` does not have to sit in the project root next to `.ssg`.
@@ -471,11 +653,17 @@ fingerprinted assets.
 
 | Key | Default | CLI | Purpose |
 |---|---:|---|---|
+| `minify_html_keep_comments` | empty | config only | Comment openings `minify_html` must not delete, beyond the host directives kept by default. Name the directive (`email_off`) or the whole opening (`<!--email_off`) |
 | `sitemap_off` | `false` | `--sitemap-off` | Disable `sitemap.xml` |
+| `sitemaps` | empty | config only | Declared sub-sitemaps, each with its own `path` and selection; `sitemap.xml` becomes their index. See [Splitting the sitemap](#splitting-the-sitemap-sitemaps-sitemap_max_urls) |
+| `sitemap_max_urls` | `50000` | config only | Per-file URL ceiling; a larger set is split and indexed |
 | `robots_off` | `false` | `--robots-off` | Disable `robots.txt` |
-| `not_found_off` | `false` | `--not-found-off` | Disable the generated `404.html`. Without a 404 page, static hosts fall back to `index.html` for unmatched paths and answer `200`, so every dead URL reads to a crawler as a live copy of the home page. A page slugged `404` takes precedence |
+| `not_found_off` | `false` | `--not-found-off` | Disable the generated `404.html`. Without a 404 page, static hosts fall back to `index.html` for unmatched paths and answer `200`, so every dead URL reads to a crawler as a live copy of the home page. A page slugged `404` takes precedence, and is never listed in `sitemap.xml` |
 | `pretty_html` | `false` | `--pretty-html` | Remove blank lines from HTML |
 | `relative_links` | `false` | `--relative-links` | Convert absolute site links to relative links |
+| `base_path` | path of `domain` | config only | Path the site is served under (`/<repo>` for a GitHub project page); prefixes every root-relative URL, and `check_links` and `ssg --http` follow it. `/` forces the root. See [DEPLOYMENT.md](DEPLOYMENT.md#sites-served-under-a-path) |
+| `host_files` | `true` | config only | Write `_headers` and `_redirects`. `false` for hosts other than Cloudflare Pages and Netlify, which serve them as public files |
+| `autolink_list_items` | `true` | config only | Link a list item whose whole text is a page title to that page. Code blocks are never touched; `false` turns it off |
 | `post_url_format` | `date` behaviour | `--post-url-format` | `date` or `slug` |
 | `page_format` | `directory` behaviour | `--page-format` | `directory`, `flat` or `both` |
 | `permalinks.post` | empty | `--permalink-post` | Tokenised post URL pattern |
@@ -484,8 +672,10 @@ fingerprinted assets.
 | `strip_md_link_text` | `false` | config only | Drop `.md` from link text that is a bare filename (`[CONFIGURATION.md]…` → "CONFIGURATION") |
 | `link_rewrites` | empty | config only | Map an href prefix to a replacement, for links to repository files the site never publishes |
 | `preserve_slug_case` | `false` | config only | Do not lowercase slugs |
-| `outputs` | HTML only | `--outputs=html,json` | Add per-page JSON output |
+| `outputs` | HTML only | `--outputs=html,json` | Which representations each page publishes — a flat list, or a map per content type. See [Outputs](#outputs) |
+| `outputs_custom` | empty | config only | Formats this site defines with a template of its own |
 | `markdown_publish` | `false` | config only | Publish a Markdown copy of every page (`index.md` + `page.md`), a `text/markdown` `<head>` alternate, and a root `llms.txt` — for language models and agents |
+| `site_graph` | `false` | config only | Publish `site-graph.json`: every page, section, taxonomy, link and redirect, stamped with the build — one model for agents and tools, also queryable over MCP as `site_*`. See [AI-AGENTS.md](AI-AGENTS.md#site_graph) |
 | `clean_special_chars` | `false` | config only | Normalise AI "smart" punctuation (curly quotes, en/em dashes, ellipsis, NBSP, zero-width) to ASCII across all content; CJK and other scripts untouched |
 | `output_encoding` | `utf-8` | config only | Text-output encoding: `utf-8`, `utf-16le` or `utf-16be` (BOM added, `<meta charset>` kept in step) |
 | `output_encoding_sections` | empty | config only | Per-section `output_encoding` overrides, keyed by content directory (longest prefix wins; `home` = root) |
@@ -519,6 +709,12 @@ code blocks are left alone, and the source `.md` files are never modified.
 links to repository files that the site never publishes. It maps an href prefix
 to its replacement, longest match first, so one rule can cover a folder and
 another override a single file:
+
+**List items that name a page become links.** A list item whose entire text is
+the title of a page — `- Documentation` on a site with a page titled
+"Documentation" — is written as a link to that page. Lines inside fenced and indented code blocks are never touched (before 1.8.64
+they were, so a YAML example containing `- Documentation` rendered a Markdown
+link inside the code). `autolink_list_items: false` turns it off.
 
 ```yaml
 link_rewrites:
@@ -565,7 +761,12 @@ in `output/` after a build.
 
 Bundles are created before minification and fingerprinting. Fingerprinting
 renames CSS/JS to `name.<hash8>.ext`, emits `assets-manifest.json`, and rewrites
-HTML/CSS references in dependency order. Source maps require corresponding CSS
+HTML/CSS references in dependency order. In HTML only references are rewritten:
+URL attributes (`src`, `href`, `srcset`, `poster`, `data-*`, `style`), `<style>`
+and `<script>` blocks. Page text, `<pre>`/`<code>` samples and comments keep the
+original name. Anywhere, an absolute URL on another host keeps its name too, so
+a CDN snippet such as `https://cdn.example.org/pkg/app.js` stays copyable
+(1.8.68+). Source maps require corresponding CSS
 or JavaScript minification. SCSS is removed from final output after compilation;
 if Dart Sass is missing, the step is skipped with a warning.
 
@@ -576,6 +777,89 @@ HTML regions can opt out of minification:
 <pre>Whitespace is preserved here.</pre>
 <!-- /htmlmin:ignore -->
 ```
+
+## Outputs
+
+One page, several representations. `outputs:` says which.
+
+```yaml
+outputs:
+  page: [html, json, txt]
+  post: [html, markdown]
+```
+
+`html` is always written. The others land beside it — `index.json`,
+`index.md`, `index.txt` — and are announced in the page's `<head>` with a
+`rel="alternate"` link, so a reader or an agent can find them.
+
+**The flat form still means what it always did.** `outputs: [html, json]`
+applies to every content type, which is what every existing config says. The
+mapping form is the new one; a type the map does not name publishes HTML only.
+
+A page can override both from its own frontmatter (see
+[Content dimensions](CONTENT.md#outputs-per-page)):
+
+```yaml
+---
+title: API reference
+outputs: [html, json]
+---
+```
+
+Precedence is narrowest first: the page, then its content type, then the site.
+
+### Built-in formats
+
+| Format | File | MIME | What it is |
+|---|---|---|---|
+| `html` | `index.html` | — | Always written |
+| `json` | `index.json` | `application/json` | The page record — title, dates, taxonomies, body |
+| `markdown` | `index.md` | `text/markdown` | The Markdown copy, plus the flat `/section.md` sibling and `llms.txt` |
+| `txt` | `index.txt` | `text/plain` | The title, then the body with the markup taken out |
+
+`markdown_publish: true` is the older way to ask for the Markdown output and
+keeps working exactly as it did — it adds `markdown` to whatever the lists say.
+
+### Formats you define
+
+```yaml
+outputs:
+  page: [html, onix]
+outputs_custom:
+  - name: onix
+    suffix: index.xml
+    mime: application/xml
+    template: formats/onix.xml
+```
+
+```gotemplate
+{{/* formats/onix.xml */}}
+<?xml version="1.0" encoding="UTF-8"?>
+<record>
+  <title>{{ xmlEscape .Page.Title }}</title>
+  <url>https://{{ .Domain }}{{ .Page.GetURL }}</url>
+</record>
+```
+
+The template receives `.Page`, `.Site`, `.Domain` and `.Content` (the rendered
+body), plus your theme's helpers and `xmlEscape`.
+
+Custom formats render through **text/template**, not html/template, and that
+difference is deliberate: a custom format is by definition not HTML, and
+contextual HTML escaping is wrong everywhere else — it turns an XML declaration
+into `&lt;?xml`. The template owns its own escaping, which is what `xmlEscape`
+is for.
+
+This is also why there is no built-in XML output. A generic one would have to
+invent a schema, and a schema nobody agreed on is noise; a site that wants XML
+knows which XML it wants.
+
+### Why feeds are not outputs
+
+RSS and Atom are representations of a **collection**, not of a page. A per-page
+"RSS output" would be a one-item feed nobody can subscribe to usefully. Feeds
+stay where they are — `feed:` and `feeds:` — and are documented under
+[Blog, feeds and search](#blog-feeds-and-search).
 
 ## Images
 
@@ -632,10 +916,41 @@ rewritten HTML/CSS references serve WebP, the runtime `.png` still resolves
 | `highlight_line_numbers` | `false` | — | Prefix highlighted blocks with line numbers (needs `highlight`) |
 | `toc` | `false` | `--toc` | Expose `.TOC`; `[toc]` also expands |
 | `toc_depth` | `3` | `--toc-depth` | Maximum TOC heading level |
+| `heading_anchors` | `false` | — | Append a `#` link to its own id on each heading, so a reader can copy the section's address |
 | `math` | `false` | `--math` | Inject KaTeX on pages containing math |
 | `mermaid` | `false` | — | Render ```` ```mermaid ```` fences as diagrams |
 | `mermaid_theme` | — | — | Mermaid built-in theme: `default`, `neutral`, `dark`, `forest`, `base` |
 | `mermaid_background` | — | — | Solid CSS colour boxed behind each diagram |
+
+`heading_anchors: true` gives every `h1`–`h3` that has an id a link to itself,
+written at build time, so it works without JavaScript and every theme gets it:
+
+```html
+<h2 id="overview">Overview <a class="heading-anchor" href="#overview" aria-label="Link to the section Overview">#</a></h2>
+```
+
+The mapping form changes what is written. A mapping turns the links on unless it
+says `enabled: false`:
+
+```yaml
+heading_anchors:
+  levels: [2, 3]                   # default [1, 2, 3]
+  symbol: "¶"                      # default "#"
+  class: heading-anchor            # default
+  label: "Link to the section {text}"   # aria-label; {text} is the heading
+```
+
+The links are added to the page body only. The table of contents, the search
+index, feeds, summaries and the read-aloud audio read the Markdown, so the
+symbol never appears in them. A heading that already links to its own id, for
+example from a heading render hook, is left as it is. Style the link in the
+theme; a common choice is to show it only on hover:
+
+```css
+.heading-anchor { opacity: 0; text-decoration: none; margin-left: .25em; }
+h1:hover .heading-anchor, h2:hover .heading-anchor, h3:hover .heading-anchor,
+.heading-anchor:focus { opacity: 1; }
+```
 
 `mermaid: true` rewrites a ```` ```mermaid ```` fence into a
 `<pre class="mermaid">` block before rendering (so the diagram source is passed
@@ -709,7 +1024,10 @@ scope table is in [TEMPLATES.md](TEMPLATES.md#what-is-in-scope-inside-a-shortcod
 
 | Key | Default | CLI | Purpose |
 |---|---:|---|---|
-| `shortcode_errors` | `drop` | `--shortcode-errors` | What a shortcode that fails to render leaves in the page |
+| `shortcode_errors` | `drop` | `--shortcode-errors` | What a shortcode that fails to render — or a component call made wrongly — leaves in the page |
+| `components_dir` | `components` | `--components-dir=DIR` | Where typed content components live. See [COMPONENTS.md](COMPONENTS.md) |
+| `versions` | empty | config only | `noindex_old: true` marks superseded versions noindex. See [CONTENT.md](CONTENT.md#versions) |
+| `render_hooks` | empty | config only | A template per Markdown node kind — image, link, heading, code, table, blockquote. See [RENDER_HOOKS.md](RENDER_HOOKS.md) |
 
 - `drop` — a warning, and the shortcode is removed from the page (historical
   behaviour, so existing sites build byte-identically).
@@ -741,8 +1059,15 @@ shortcode_errors: strict
 | `feeds` | empty | config only | Extra feeds — each with its own selection, `path`, `title` and **format** (`atom`, `rss`, `json`) |
 | `feed_autodiscovery` | `true` | config only | Inject `<link rel="alternate">` for every feed into every page |
 | `feed_items` | `20` | `--feed-items` | Maximum feed items |
-| `feed_full_content` | `false` | config only | Full rendered body instead of summary |
+| `feed_full_content` | `false` | config only | Full rendered body instead of summary; its relative `src`, `href`, `srcset` and `url()` become absolute against the post's address, since a feed reader has no page to resolve them against (#347) |
 | `search_index` | `false` | `--search-index` | Emit `search-index.json` |
+| `api_docs` | empty | config only | Document JavaScript/TypeScript packages as pages of the site, with `api.json`. See [docs/API_DOCS.md](API_DOCS.md) |
+| `api_docs[].language` | detected | config only | `javascript`, `typescript`, `go`, `php` or `python`; detected from `package.json`, `go.mod`, `composer.json`, `pyproject.toml` when empty. See [docs/API_LANGUAGES.md](API_LANGUAGES.md) |
+| `api_docs[].playground` | `""` | config only | The package as an ES module URL: JavaScript `@example` blocks become runnable in the browser |
+| `api_docs[].openapi` | `""` | config only | An OpenAPI 3.0/3.1 file (YAML or JSON) to document as a REST API instead of code. See [docs/REST_API_DOCS.md](REST_API_DOCS.md) |
+| `api_docs[].try_it` | `true` | config only | The "Try it" console on every operation of an `openapi` entry |
+| `listen` | off | config only | "Listen" button that reads the article with the visitor's browser voice (Web Speech API). See [docs/AUDIO.md](AUDIO.md) |
+| `tts` | off | config only | An MP3 of each article made at build time by a TTS API (generic, OpenAI, ElevenLabs, Google), cached, with a jingle, a fallback when the API is down, and a podcast feed. See [docs/AUDIO.md](AUDIO.md) |
 | `webmcp` | `false` | `--webmcp` | Declare the site's tools to a browser agent via `navigator.modelContext` ([WebMCP](AI-AGENTS.md#webmcp)). Turns `search_index` on, which its tools read |
 
 Pagination writes page 1 at the site root and pages 2 onward under `/page/N/`.
@@ -785,6 +1110,62 @@ come exclusively from environment variables. CLI: `--offline`,
 `--external-source=NAME`. Full reference:
 [EXTERNAL_SOURCES.md](EXTERNAL_SOURCES.md).
 
+A source can also become **pages** rather than data: `mode: content` with a
+`content_map` naming which record field is the title and which is the body
+turns one record into one page, with its own URL, taxonomy archives and
+sitemap entry. See
+[Records as pages](EXTERNAL_SOURCES.md#records-as-pages).
+
+## Analytics
+
+Two sources, two consent rules.
+
+```yaml
+analytics_ids:
+  gtm: GTM-XXXXXXX
+  ga4: G-XXXXXXX
+```
+
+**Ids you declare here render on their own.** Writing one down is the decision
+`analytics: true` exists to ask for, so it does not also need that flag. Ids a
+migration's crawl recorded in `metadata.json` still do, because nobody chose
+those — they are whatever the old site happened to be running.
+
+**Google Tag Manager gets both of its halves.** The vendor's install is a
+script in `<head>` *and* an iframe immediately after `<body>`; only the first
+used to be emitted, so a visitor with JavaScript off, or a consent-mode setup
+that defers the script, was counted by neither.
+
+**Tracking reaches every page**, including the home page and the archives, and
+does not depend on `seo:`. Those were always separate decisions; before 1.8.60
+the code had them tangled, so a site with `seo: false` got no tracking at all
+despite having asked for it, and a site with both on still had an untracked
+front page.
+
+Nothing is emitted while a value is empty, and a theme that already wires the
+same id keeps its own snippet rather than getting a second one. Wiring means
+the id inside a `<script>` element, in its `src` or its body; a page that only
+mentions the id — a cookie notice listing the `_ga_<id>` cookie — still gets
+the tag.
+
+**A placeholder is not an id.** A value with four `X` in a row — the vendors'
+own `GTM-XXXXXXX` and `G-XXXXXXXXXX` — is held back from every page, so a
+config can commit the key with a stand-in for someone to fill in later without
+injecting a container that does not exist. The build says which ids it is doing
+what with:
+
+```text
+   🎯 Site metadata: gtm (rendered), ga4 (placeholder id, replace it to render)
+```
+
+An id a migration recorded and nobody declared reads
+``set `analytics: true` to render``. Every bundled
+theme carries a comment in its head pointing here, so there is no theme edit to
+make.
+
+The ids stay readable at `.Site.Analytics` either way, for a theme that wants
+to place a vendor this generator does not know how to embed.
+
 ## Server access control
 
 | Key | Default | CLI | Purpose |
@@ -807,32 +1188,57 @@ implemented.
 | Key | Default | CLI | Purpose |
 |---|---:|---|---|
 | `seo` | `false` | `--seo` | Inject missing Open Graph, Twitter and JSON-LD metadata |
+| `analytics` | `false` | — | Render the tracking snippets a migration recorded in `metadata.json` |
+| `analytics_ids` | empty | — | Tracking ids this site declares, by vendor: `gtm: GTM-XXXXXXX`, `ga4: G-XXXXXXX`. Declaring one is its own consent. See [Analytics](#analytics) |
 | `schema` | empty | — | Site-wide JSON-LD defaults merged into every page (e.g. a publisher) |
 | `schema_defaults` | empty | — | JSON-LD defaults per content section, so a section can carry an `@type` without every file repeating it |
-| `check_links` | empty | `--check-links[=warn\|strict]` | Validate internal links |
+| `check_links` | empty | `--check-links[=warn\|strict]` | Validate internal links: `href`/`src` in HTML, and `url()`/`@import` in stylesheets, reported with the stylesheet and line |
 | `check_images` | empty | `--check-images[=warn\|strict\|strict-decorative]` | Report images with **no** `alt` attribute |
 | `check_meta` | empty | `--check-meta[=warn\|strict]` | Validate `<title>` and meta description on indexable pages |
 | `check_orphans` | empty | `--check-orphans[=warn\|strict]` | Report indexable pages nothing links to |
 | `check_markup` | `warn` | `--check-markup[=warn\|strict\|off]`, `--no-check-markup` | Report source markup indented into a code block (`ssg repair --fix`) |
 | `check_schema` | `""` | `--check-schema[=MODE]` | Validate emitted JSON-LD against the properties search engines require: `""` (off), `warn`, `strict` |
+| `recipe_headings` | built-in names | config only | More section headings a Recipe's ingredients and method are read from: `{ingredients: [...], instructions: [...]}` |
+| `check_schema_recommended` | `false` | config only | With `check_schema`, also list the recommended properties a rich result shows (a Recipe's `recipeYield`, `totalTime` or `cookTime`, `nutrition`…). Advice only: never fails a strict build |
 | `check_redirects` | empty | `--check-redirects[=warn\|strict]` | Report links the host would redirect (needs `pretty_urls`) |
+| `check_api` | `""` | config only | Report documentation problems in `api_docs` entries: undocumented exports, dead `{@link}`s, unreadable code, broken OpenAPI `$ref`s and operations. `warn` or `strict` |
 | `pretty_urls` | `false` | config only | The host strips `.html` and appends trailing slashes |
 | `meta_limits` | see below | — | Advisory title/description length ranges for `check_meta` |
 | `sitemap_prune_canonical` | `false` | — | Also drop non-self-canonical pages from `sitemap.xml` |
 | `content_exclude` | empty | — | Globs for Markdown under `content_dir` that is **not** a page |
 | `content_schemas` | empty | — | Per-type frontmatter contracts, validated at build |
-| `strict` | `false` | `--strict` | Escalate schema violations and link checks to build failures |
+| `strict` | `false` | `--strict` | Escalate schema violations, link checks and unparseable frontmatter to build failures |
 | `route_manifest` | `false` | `--route-manifest` | Write `routes.json` — every route and its metadata |
-| `lastmod_from_git` | `false` | `--lastmod-from-git` | Use Git commit dates in sitemap |
+| `build_report` | `` | `--build-report[=FILE]` | Write a JSON report of the build into the output directory: version, duration, pages and files written, content by type. A bare flag writes `build.json` |
+| `profile` | `` | `--profile[=json]` | Report where the build's time went; `json` also writes `build-profile.json` |
+| `profile_pprof` | `` | `--profile-pprof=DIR` | Also write `cpu.prof` and `heap.prof` for `go tool pprof` |
+| `lastmod_from_git` | `false` | `--lastmod-from-git` | Use Git commit dates in sitemap. Needs `git` on `PATH`; the snap cannot see it (see [CONTENT.md](CONTENT.md#dates)) |
 
 SEO injection is non-destructive, and it is **not** all-or-nothing. It looks at
 what the page already rendered and fills only the gaps:
 
 | The theme emitted | SSG injects |
 |---|---|
-| no `og:title` | Open Graph, Twitter **and** JSON-LD |
+| neither | Open Graph, Twitter **and** JSON-LD |
 | `og:title`, no `application/ld+json` | **JSON-LD only** |
-| both | nothing |
+| `application/ld+json`, no `og:title` | **Open Graph and Twitter only** (1.8.77, #349) |
+| both | nothing but the breadcrumb and FAQ (below) |
+
+The two are decided apart. Until 1.8.77 a theme with its own JSON-LD but no
+`og:title` got ssg's JSON-LD beside its own, so a page could describe itself
+twice, as two different types.
+
+A theme's own JSON-LD replaces ssg's description of **what** the page is. The
+`BreadcrumbList` (where the page sits) and the `FAQPage` from `faq:` do not
+compete with that, so they are still added beside the theme's block unless
+it already has one of that type (1.8.78, #351). A theme that writes the trail
+itself has it as data: `{{ toJSON .BreadcrumbSchema }}`.
+
+Every image URL ssg writes into `og:image`, `twitter:image` and the JSON-LD
+`image` is absolute against `domain`, as Open Graph requires: a
+`featured_image: /media/hero.jpg` or `og_image: /card.png` becomes
+`https://example.com/…` (1.8.77, #350). Social networks fetch the image
+without resolving it against the page.
 
 The middle row is the useful one: a theme can own its Open Graph tags — to control
 `og:image`, say — and still get structured data generated from frontmatter, with
@@ -1143,6 +1549,127 @@ Section defaults sit **above** the derived data deliberately — overriding the
 derived `@type` is what they exist for — while a page's own `schema:` still wins
 over its section.
 
+#### Recipes
+
+A page whose structured data is a `Recipe` gets `recipeCategory` from its own
+categories: one category as a string, several as a list. It is filled only
+when nothing above set one, so a section default (`recipeCategory: Desserts`)
+or the page's own `schema:` still wins. Together with what every post already
+gets (`name`, `image`, `author`, the dates, and `keywords` from tags), a recipe
+post needs only its ingredients, method, times and yield in `schema:`:
+
+```yaml
+schema:
+  recipeYield: "16 servings"
+  cookTime: PT1H
+  recipeIngredient: ["5 large eggs", "200 g sugar"]
+  recipeInstructions: ["Set the oven to 160°C.", "Whisk the eggs with the sugar."]
+```
+
+When a Recipe's `schema:` has no `recipeIngredient` or `recipeInstructions`,
+ssg reads them from the post itself: the list under a heading named
+"Ingredients" (or "Składniki", "Zutaten", "Ingrédients", "Ingredientes",
+"Ingredienti") and the steps under "Method" (or "Instructions", "Directions",
+"Preparation", "Steps", "Przygotowanie", "Sposób przygotowania", "Zubereitung"…).
+A heading may also be a paragraph in bold (`**Ingredients**`), and may go on
+("Ingredients for 16 servings"). Steps are the list items. Without a list,
+each paragraph is a step, and bold sub-headings such as `**Step 2**` separate
+them. The page's own field wins over the one read from its body, field by
+field. Add a site's own heading names with:
+
+```yaml
+recipe_headings:
+  ingredients: ["What you need"]
+  instructions: ["How to make it"]
+```
+
+`check_schema` reports a Recipe without `image`, `recipeIngredient` or
+`recipeInstructions`. With `check_schema_recommended: true` it also lists, as
+advice, the properties a recipe card shows when they are there:
+`description`, `nutrition`, `recipeCategory`, `recipeCuisine`, `recipeYield`,
+and `totalTime` or `cookTime`.
+
+#### Print / PDF and Cook Mode
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `print.enabled` | bool | `false` | Print / PDF button plus print stylesheet |
+| `print.label` | string | `"Print / PDF"` | Button text |
+| `print.sections` | list | `[posts]` | `posts`, `pages`, or both |
+| `print.auto` | bool | `true` | Place after the first `</h1>` when the theme has no `data-ssg-print-slot` |
+| `print.labels` | map | — | `recipe`, `ingredients`, `steps`, `yield`, `prep`, `cook`, `total`, `printed` |
+| `cook_mode` | bool or map | `false` | `true` is shorthand for `{enabled: true}` |
+| `cook_mode.enabled` | bool | `false` | Cook Mode on Recipe pages with ingredients and instructions |
+| `cook_mode.label` | string | `"Cook mode"` | Button text |
+| `cook_mode.auto` | bool | `true` | Place after the first `</h1>` when the theme has no `data-ssg-cook-slot` |
+| `cook_mode.labels` | map | — | `title`, `ingredients`, `step` ("Step {n} of {total}"), `next`, `back`, `close`, `restart`, `done`, `finished` |
+
+See [PRINT_AND_COOK_MODE.md](PRINT_AND_COOK_MODE.md).
+
+#### Web Stories
+
+Google Web Stories (AMP) made from posts. See [WEB_STORIES.md](WEB_STORIES.md).
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `web_stories.enabled` | `false` | Make a story from each selected post with a featured image. `web_stories: true` is shorthand. |
+| `web_stories.publisher_logo` | — | Square image, at least 96×96, found like `imageResize` sources. Required: without it no story is made (build warning). |
+| `web_stories.sections` | `[posts]` | `posts`, `pages`, or a content directory (`posts/recipes`). |
+| `web_stories.url` | `/web-stories/` | The hub; stories live at `<url><slug>/`. |
+| `web_stories.pages` | `4` | Most photo pages between the cover and the last page. |
+| `web_stories.min_images` | `2` | Distinct images (featured included) a post needs. |
+| `web_stories.cta` | `Read the full article` | Last page's link text (overrides the i18n catalog). |
+
+Images are WebP when `webp: true` or `image_formats` includes `webp`, JPEG otherwise.
+
+#### A résumé
+
+`resume:` publishes a CV from a [Schema Resume](https://schema-resume.org)
+JSON document as a page, with `ProfilePage` structured data and the document at
+`<url>resume.json`. See [RESUME.md](RESUME.md).
+
+| Key | Default | Description |
+|---|---|---|
+| `resume.file` | — | Path to the Schema Resume JSON document; empty turns the feature off |
+| `resume.url` | `/cv/` | URL of the page (always a directory) |
+| `resume.title` | `basics.name` | Page title |
+| `resume.contact` | `false` | Publish e-mail, phone and street address in the page, JSON-LD and resume.json |
+
+```yaml
+resume:
+  file: cv.json
+  url: /cv/
+  contact: false
+```
+
+#### Questions and answers
+
+A page that lists questions in front matter gets an `FAQPage` block beside its
+main structured data:
+
+```yaml
+faq:
+  - question: Can I freeze the cheesecake?
+    answer: Yes, wrapped, for up to a month. Thaw it in the fridge.
+```
+
+Answers are Markdown, published as plain text. A theme renders the list
+itself from `.faq`.
+
+#### Listings, authors and the site
+
+With `seo: true`, the pages ssg generates carry structured data too:
+
+| Page | Blocks |
+|---|---|
+| The post listing and every archive (category, tag, date, custom taxonomy) | `ItemList` of the posts on that page, in order |
+| An author archive | `ProfilePage` with the author as `Person`, plus the `ItemList` |
+| The site's front listing | also an `Organization`: `marketing.og_site_name` (else the title), `marketing.logo`, and `marketing.social_profiles` as `sameAs` |
+
+The blocks are injected only where the theme wrote no JSON-LD of its own, as
+for every page. A theme that writes its own gets them as `.StructuredData` and
+can add them: `{{ range .StructuredData }}<script type="application/ld+json">{{ toJSON . }}</script>{{ end }}`.
+
 ### Content contracts (schemas, strict mode, route manifest)
 
 `content_schemas` declares what a page of each type must look like, so a missing
@@ -1168,9 +1695,10 @@ resolve automatically; any other name is read from the page's custom frontmatter
 
 Violations **warn** by default so a site can adopt schemas incrementally. Turn on
 `strict` (or `--strict`) to make them — and internal link checking — **hard build
-failures**: a renamed slug that orphans a link, or a post missing a required
-field, then fails the build instead of shipping. `strict` enables link checking
-even when `check_links` is unset.
+failures**: a renamed slug that orphans a link, a post missing a required
+field, or a Markdown file whose frontmatter is not valid YAML then fails the
+build instead of shipping. `strict` enables link checking even when
+`check_links` is unset.
 
 ### Validating the built output
 
@@ -1291,6 +1819,147 @@ theme bug than a deliberate exclusion, and quietly removing real pages from the
 sitemap over one would be worse than the contradiction it fixes. Opt in with
 `sitemap_prune_canonical: true`.
 
+### The site's social card (`marketing`)
+
+`og:image` decides whether a link to the site posts as a card with a picture or
+as a bare line of text. A theme that asks for `twitter:card:
+summary_large_image` and names no image gets the bare line — the format is
+*defined* by having a picture.
+
+The generator has always had a site-wide fallback for pages with no
+`featured_image`, but it was reachable only through the `metadata.json` an
+`ssg migrate` crawl writes, so a site built from scratch could not declare one.
+It is configuration now:
+
+```yaml
+marketing:
+  og_image: "/img/card.png"      # 1200×630; a site-relative path is written absolute
+  og_site_name: "SSG"
+  twitter_site: "@example"
+  theme_color: "#0f172a"
+  favicon: "/favicon.ico"
+```
+
+Values here win field by field over anything a migration recorded, the same
+precedence `title` and `description` follow — and maps (`verification`,
+`social_profiles`, `colors`) merge per key, so adding one token does not drop
+the three an export found.
+
+The bundled `ssgtheme` uses the page's own `featured_image` when it has one and
+this default otherwise, and drops `twitter:card` to `summary` when there is no
+image at all, so the tag describes what is actually there.
+
+### An empty canonical is always reported
+
+Separate from the sitemap, and needing no configuration: every build says so when
+a page ships `<link rel="canonical" href=""/>`, or an empty `og:url` or
+`twitter:url`.
+
+```text
+   ⚠️  10 page(s) name their own URL with an empty value
+      category/air-conditioning/index.html → <link rel="canonical">, og:url
+```
+
+The cause is always a template naming a value its context does not carry: Go
+templates resolve a missing key to nothing and render empty rather than failing,
+so one typo in one theme file ships an empty canonical on every page it renders,
+with a green build and a clean `check_links`. There is no site for which the
+empty value is correct, which is why this needs no mode — unlike a canonical that
+merely *disagrees* with the permalink, which needs judgement and stays behind
+`sitemap_prune_canonical`.
+
+It is a warning, never a failure: the site is publishable, and a build that
+refused to finish over a theme bug would be worked around rather than fixed.
+
+### Splitting the sitemap (`sitemaps`, `sitemap_max_urls`)
+
+One `sitemap.xml` holding everything is right for almost every site, and stays
+the default: nothing below changes a build that does not ask for it.
+
+Two things eventually ask. sitemaps.org caps **one file at 50,000 URLs** (and
+50 MB uncompressed), above which a `<sitemapindex>` is required — and Search
+Console reports indexing coverage **per submitted sitemap**, so "how much of the
+blog is indexed" is a question only a separate file can answer.
+
+**Size is handled without configuration.** A set over either ceiling —
+50,000 URLs or 50 MB (52,428,800 bytes) rendered — is split into
+`sitemap-1.xml`, `sitemap-2.xml`… and `sitemap.xml` becomes the index naming
+them. More files than one index may name (50,000) fails the build. `sitemap_max_urls` lowers the ceiling (never raises it — a larger file is
+invalid whatever the config says), which is useful for testing the shape on a
+small site.
+
+**Structure is declared**, in the shape `feeds:` already uses:
+
+```yaml
+sitemaps:
+  - path: /sitemap-blog.xml
+    source: blog                        # a content_sources path / content folder
+
+  - path: /sitemap-archives.xml
+    include: [categories, tags, authors]
+```
+
+Selectable in `include:`: `home`, `listing`, `pages`, `posts`, `static`,
+`categories`, `tags`, `authors`, `taxonomies`. An unknown name fails the build
+rather than writing an empty file. Narrowings combine with **AND**, and a spec
+with none of them claims everything still unclaimed — which is how a catch-all
+is written.
+
+Selection is a **partition, not a set of views**: a URL lands in the first spec
+that matches it, so order matters like a routing table, and no URL is listed
+twice. Whatever matches nothing goes to `sitemap-main.xml`, which is always
+written and always in the index — nothing is silently dropped by a `sitemaps:`
+block that does not cover the whole site. A spec that selects nothing is
+reported and its file is skipped, since an index entry pointing at an empty
+urlset is a fetch that teaches a crawler nothing.
+
+### What the sitemap promises
+
+What Google's *Build and submit a sitemap* asks, and what a build checks in
+its tests:
+
+- **UTF-8 XML**, every `<loc>` an absolute URL, entity-escaped (`&` → `&amp;`),
+  anything outside ASCII percent-encoded (`/usługi/` → `/us%C5%82ugi/`).
+- **Canonical URLs only**: a page that says `noindex`, a redirect, `sitemap:
+  no` and the error page stay out; `sitemap_prune_canonical` also drops pages
+  whose canonical points elsewhere.
+- **`<lastmod>` only where it is known.** A document's is its `modified`
+  (falling back to `date`), or its last commit under `lastmod_from_git`. A
+  page that lists others — the front page, a post listing, category, tag,
+  series and author archives, taxonomy indexes and terms — takes the newest
+  lastmod of what it lists (#339); one listing nothing dated has none. An index
+  entry carries the newest date of its file, never the build time.
+- `<changefreq>` and `<priority>` are written for other crawlers; Google
+  ignores them.
+
+A document with neither `date` nor `modified` in its frontmatter has **no
+`<lastmod>`** (1.8.74), as in Hugo and jekyll-sitemap. It still sorts and
+shows by its file's modification time, but that time is accurate only on the
+machine that wrote the file — a fresh clone dates every file to the clone —
+and Google trusts a sitemap's dates only while they are consistently accurate.
+Give such documents a date, or turn on `lastmod_from_git` with enough history
+to date each file. Feeds keep the fallback, because Atom requires `<updated>`.
+
+`robots.txt` is unchanged either way: it points at `/sitemap.xml`, which is now
+the index. That is exactly what the protocol expects, so a site already
+submitted to Search Console needs no resubmission.
+
+### What the sitemap lists
+
+Everything the build rendered and nothing it did not: the front page, pages,
+posts, the **post listing** (`/blog/` under `posts_page` — the hub every post
+links back to, and the site root otherwise, where the front-page entry already
+names it), and the category, tag, author and custom-taxonomy archives that were
+actually written.
+
+Only the first page of a listing or archive is named; a paginated tail is left
+out on purpose. Category archives are read from what the build wrote, so a term
+with no posts is not advertised and a term served away from `/category/` by its
+own `link:` is named where it really lives. The exporter's catch-all term —
+`Uncategorized`, `Bez kategorii` and their translations — is left out, recognised
+by its slug or name; before 1.8.56 that rule was "category id 1", which silently
+dropped a real archive on every export numbering its categories from 1.
+
 ### Excluding Markdown that is not a page
 
 `content_dir` is scanned recursively and every `.md` becomes a page. A file that
@@ -1306,7 +1975,34 @@ content_exclude:
 ```
 
 Patterns are matched before parsing, against the full path, the content-relative
-path and the filename, so each form behaves the way it reads.
+path and the filename, so each form behaves the way it reads. Excluded files
+are also left out of the "Markdown file(s) in the source tree were not read"
+warning, since leaving them out was the point.
+
+`build_report: build.json` (or `--build-report`) writes, once the last page is
+out and before the `post_build` hooks, a small report a site can publish (#338):
+
+```json
+{
+  "generator": "ssg",
+  "version": "1.8.74",
+  "buildTime": "2026-10-21T17:41:56Z",
+  "started": "2026-10-21T17:41:56Z",
+  "finished": "2026-10-21T17:42:32Z",
+  "durationSeconds": 36.2,
+  "pages": 38037,
+  "files": 38211,
+  "content": {"page": 4, "port": 35270, "post": 0}
+}
+```
+
+`pages` counts the `.html` files in the output, `files` every file but the
+report; `content` counts the loaded documents by type. `buildTime` is
+`.BuildTime` (so `SOURCE_DATE_EPOCH` pins it), `started` and `finished` are
+the clock. The report is published with the site, which is the point: a footer
+script can show "38,037 pages in 36.2 s" without shell around the build. For
+*why* a build is slow, use `--profile=json`, which writes the time of every
+phase and page to `build-profile.json` beside the project, not into the site.
 
 `route_manifest` (or `--route-manifest`) writes `routes.json` to the output root:
 a sorted, deduplicated list of every generated route — posts, pages, and category
@@ -1334,7 +2030,30 @@ readable data without executing JavaScript. Content types map to Schema.org:
 | Any other page | `WebPage` | title, description |
 
 Every non-home page additionally gets a `BreadcrumbList` built from its URL path,
-placing it in the site hierarchy.
+placing it in the site hierarchy. A step names a document the build writes —
+a page, a post listing, a taxonomy, type or date archive — with that
+document's title; a URL segment with nothing behind it is left out and the
+positions are numbered after the gap (#335). Under i18n the trail starts at
+the language's own home. The error page (slug `404`) has none.
+
+`breadcrumbs:` names the steps, or turns them off for a theme that writes its
+own:
+
+```yaml
+breadcrumbs:
+  home: "Strona główna"            # the first step; default "Home"
+  sections:                        # a URL segment → its step
+    posts:  {name: "Baza wiedzy", url: /baza-wiedzy/}   # always shown, pointing at url
+    uslugi: {name: "Usługi"}       # renames the step; shown only if /uslugi/ exists
+# breadcrumbs: false               # emit no BreadcrumbList
+```
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `breadcrumbs` | bool or map | on | `false` emits no `BreadcrumbList` |
+| `breadcrumbs.home` | string | `"Home"` | First step's label |
+| `breadcrumbs.sections.<segment>.name` | string | the page's title | Label of that segment's step |
+| `breadcrumbs.sections.<segment>.url` | string | the segment's path | Where the step points; with a URL the step is always shown |
 
 **Overrides.** Two knobs extend or replace the generated data, deep-merged in
 order (most specific wins): site-wide `schema:` in the config, then per-page
@@ -1484,6 +2203,59 @@ an explicit `link:` keeps it whole — `link:` is the highest-precedence URL
 source — so an export that already wrote `link: /de/impressum/` does not become
 `/de/de/impressum/` once the section assigns German.
 
+## Build profiling
+
+A build that has grown slow has to say where its time goes, and until now the
+only number `ssg` reported about its own work was a count of markdown
+conversions:
+
+```yaml
+profile: text     # or: ssg --profile
+```
+
+```
+⏱️  Build profile (2026-09-10 12:55:50)
+   Total                                  1.55 s
+   Loading content                          9 ms     1%
+   Generating site                        407 ms    26%
+   Search index                           655 ms    42%
+   Assets and checks                      449 ms    29%
+   Counters: pages rendered 96 · markdown conversions 81 · markdown cache hits 45
+   Slowest pages (10 of 96):
+     /configuration/                         25 ms
+```
+
+Phases appear in the order they ran and sum to the total, including the steps
+that happen after generation: images, archives, deployment. The counters are
+the tallies the build already kept — markdown conversions and cache hits,
+external sources served from cache, AI queries, images converted.
+
+`profile: json` (or `--profile=json`) additionally writes `build-profile.json`
+**beside the project, not into the output**: a build's timings are the
+project's business, not part of the site, and nobody asked to publish them.
+CI can archive that file and diff two commits. Then:
+
+```
+$ ssg profile page /configuration/
+/configuration/
+   render              25.4 ms
+   share                1.6% of a 1.56 s build
+   build           2026-09-10 12:55:42 · ssg 1.8.60
+   built from      content/site/pages/configuration.md
+                   data/nav.yaml
+```
+
+`built from` reads the dependency graph the last build recorded, so it names
+real inputs rather than a guessed tree. On a site whose builds cannot be
+narrowed it says so instead, and `ssg graph` gives the reason.
+
+`--profile-pprof=DIR` writes `cpu.prof` and `heap.prof` for `go tool pprof`.
+That is a maintainer's instrument — `--profile` answers where the time goes,
+pprof answers why.
+
+Profiling does not change a single byte of output, and measuring costs about
+120 nanoseconds per page against a page that takes milliseconds to render.
+
 ## Build hooks
 
 Hooks execute trusted local commands without a shell:
@@ -1539,6 +2311,44 @@ mddb:
 | `mddb.batch_size` | `1000` | `--mddb-batch-size` |
 | `mddb.watch` | `false` | `--mddb-watch` |
 | `mddb.watch_interval` | `30` | `--mddb-watch-interval` |
+| `mddb.sources` | empty | — (config only; replaces `collection` when set) |
+
+#### Several collections, filtered on the server
+
+`mddb.sources` reads more than one collection in a build, each with its own
+filter, content type and section:
+
+```yaml
+mddb:
+  enabled: true
+  url: http://mddb:11023
+  sources:
+    - collection: articles
+      filter: { visibility: [public] }
+      type: post
+      section: articles
+    - collection: events
+      type: post
+      section: events
+    - collection: kb
+      type: page
+```
+
+| Source key | Meaning |
+|---|---|
+| `collection` | The collection to read. Required |
+| `filter` | Metadata the documents must have: each key lists the values it accepts. Sent to MDDB as `filterMeta` |
+| `type` | `page` or `post` files every document as that. Empty uses each document's own `type` meta, which is how `collection` always worked |
+| `section` | The content section the documents belong to. `schema_defaults`, `language_sections`, `output_encoding_sections`, Web Stories sections and a declared feed's or paginated page's `source:` match it the way they match a directory |
+
+MDDB applies the filter, so a document it leaves out is never downloaded. It
+does not reach the build directory, the search index or `llms.txt`. Filtering in
+templates instead would put private documents in all three. Leave `type` out
+when you want a filter on `type` itself. A source that sets `type` reads every
+document in the collection that matches the filter. With `sources` set,
+`collection` and `--mddb-collection` are ignored. Categories, media and users
+still come from the `categories`, `media` and `users` collections. Watch mode
+rebuilds when any of the listed collections changes.
 
 `mddb.allow_http` permits the API key over plaintext `http://` to a host that is
 not loopback. It is off by default and should stay off for anything routable —
@@ -1602,7 +2412,7 @@ and GitHub Action inputs are in [DEPLOYMENT.md](DEPLOYMENT.md).
 |---|---:|---|
 | `redirects` | empty | list of `{from, to, status, force}` rules |
 | `alias_stubs` | `true` | also write meta-refresh stub pages for `aliases:` (`false` = 301 only; per-page frontmatter `alias_stubs` overrides) |
-| `headers` | empty | map of `path pattern → {header: value}` overrides |
+| `headers` | empty | map of `path pattern → {header: value}` overrides, merged into a built-in block header by header; `""` removes a header ([DEPLOYMENT.md](DEPLOYMENT.md#overriding-_headers)) |
 | `headers_defaults_off` | `false` | drop the built-in security/cache blocks |
 
 `redirects:` generates a real `_redirects` file: exact paths, `/old/*` splats
@@ -1859,6 +2669,10 @@ MDDB collection and it can:
 | `mcp.search.mddb_lang` | Language used to tokenise the query, e.g. `en` |
 | `mcp.search.mddb_fuzzy` | Typo tolerance: `0` off, `1` or `2` edit distance |
 | `mcp.search.mddb_validate` | Check each document before storing it (`ssg mddb push-theme`, MDDB 2.12.0+). Default on; warnings never fail a push |
+| `mcp.oauth.issuer` | OAuth 2.1 authorization server whose access tokens the HTTP endpoint accepts; tokens' `iss` must equal it. See [MCP_TRANSPORTS.md](MCP_TRANSPORTS.md#oauth-21) |
+| `mcp.oauth.resource` | This endpoint's public URI (`https://mcp.example.com/mcp`); tokens' `aud` must name it |
+| `mcp.oauth.scopes` | Scopes a token must carry, also advertised in the metadata |
+| `mcp.oauth.jwks_url` | The issuer's key set; discovered from its metadata when empty |
 | `mcp.media_allow_private` | Permit `media_upload` to fetch a URL resolving to a loopback or private address. Off by default: an unguarded fetch on someone else's instruction is server-side request forgery |
 | `mcp.search.mddb_allow_http` | Permit the API key over plaintext `http://` to a non-loopback host — a private container network. Off by default |
 

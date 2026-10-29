@@ -57,6 +57,41 @@ covers only the steps; the changelog covers everything else.
   <select id="upgrade-from">
     <option value="">— choose your current version —</option>
     <optgroup label="1.8.x">
+      <option value="1.8.81">1.8.81 — 2026-10-24</option>
+      <option value="1.8.80">1.8.80 — 2026-10-24</option>
+      <option value="1.8.79">1.8.79 — 2026-10-24</option>
+      <option value="1.8.78">1.8.78 — 2026-10-22</option>
+      <option value="1.8.77">1.8.77 — 2026-10-22</option>
+      <option value="1.8.76">1.8.76 — 2026-10-21</option>
+      <option value="1.8.75">1.8.75 — 2026-10-21</option>
+      <option value="1.8.74">1.8.74 — 2026-10-21</option>
+      <option value="1.8.73">1.8.73 — 2026-10-20</option>
+      <option value="1.8.72">1.8.72 — 2026-10-12</option>
+      <option value="1.8.71">1.8.71 — 2026-10-11</option>
+      <option value="1.8.70">1.8.70 — 2026-10-05</option>
+      <option value="1.8.69">1.8.69 — 2026-10-03</option>
+      <option value="1.8.68">1.8.68 — 2026-10-02</option>
+      <option value="1.8.67">1.8.67 — 2026-10-02</option>
+      <option value="1.8.66">1.8.66 — 2026-10-02</option>
+      <option value="1.8.65">1.8.65 — 2026-10-01</option>
+      <option value="1.8.64">1.8.64 — 2026-09-30</option>
+      <option value="1.8.63">1.8.63 — 2026-09-25</option>
+      <option value="1.8.62">1.8.62 — 2026-09-13</option>
+      <option value="1.8.61">1.8.61 — 2026-09-11</option>
+      <option value="1.8.60">1.8.60 — 2026-09-10</option>
+      <option value="1.8.59">1.8.59 — 2026-09-08</option>
+      <option value="1.8.58">1.8.58 — 2026-09-08</option>
+      <option value="1.8.57">1.8.57 — 2026-09-07</option>
+      <option value="1.8.56">1.8.56 — 2026-09-06</option>
+      <option value="1.8.55">1.8.55 — 2026-09-02</option>
+      <option value="1.8.54">1.8.54 — 2026-09-01</option>
+      <option value="1.8.53">1.8.53 — 2026-09-01</option>
+      <option value="1.8.52">1.8.52 — 2026-08-27</option>
+      <option value="1.8.51">1.8.51 — 2026-08-25</option>
+      <option value="1.8.50">1.8.50 — 2026-08-25</option>
+      <option value="1.8.49">1.8.49 — 2026-08-24</option>
+      <option value="1.8.48">1.8.48 — 2026-08-24</option>
+      <option value="1.8.47">1.8.47 — 2026-08-21</option>
       <option value="1.8.46">1.8.46 — 2026-08-19</option>
       <option value="1.8.45">1.8.45 — 2026-08-19</option>
       <option value="1.8.44">1.8.44 — 2026-08-18</option>
@@ -180,6 +215,633 @@ which is a longer read but never a wrong one.
   entries; never renumber existing ones.
 -->
 
+
+<div class="upgrade-step" data-since="1.8.82">
+
+### 1.8.82 — nothing to do
+
+A security release: `golang.org/x/net` 0.62.0 fixes a slow path in the HTML
+parser that every build runs. Replace the binary. `heading_anchors` is new and
+off by default, so a site that does not set it builds exactly as before.
+
+</div>
+
+<div class="upgrade-step" data-since="1.8.81">
+
+### 1.8.81 — nothing to do
+
+The unread-content warning no longer lists Markdown that `content_exclude`
+names. `mddb.sources` is new; a config without it reads its one collection as
+before. `mcp.oauth` is new: without it the MCP endpoint authenticates as before,
+and a `401` now also carries `WWW-Authenticate: Bearer`. Nothing in the built
+site changes.
+
+</div>
+
+<div class="upgrade-step" data-since="1.8.80">
+
+### 1.8.80 — nothing to do
+
+`formatNumber` is a new template function; nothing changes until a theme uses it.
+
+</div>
+
+<div class="upgrade-step" data-since="1.8.79">
+
+### 1.8.79 — nothing to do
+
+A custom output a page did not get is no longer linked from its `<head>`. The
+link pointed at a file that was never written, so nothing that worked goes
+away. The sitemap hints are new and opt-in: without them every entry reads as
+before.
+
+</div>
+
+<div class="upgrade-step" data-since="1.8.78">
+
+### 1.8.78 — nothing to do
+
+A theme that writes its own JSON-LD gets ssg's `BreadcrumbList` (and the
+`FAQPage` of a page with `faq:`) beside it again, unless it writes one of its
+own. A theme that wrote `og:title` and JSON-LD gets them for the first time.
+To write the trail yourself, `{{ toJSON .BreadcrumbSchema }}` has it.
+
+</div>
+
+<div class="upgrade-step" data-since="1.8.77">
+
+### 1.8.77 — check two things in your `<head>`
+
+- **`og:image`, `twitter:image` and the JSON-LD `image`** are now absolute
+  (`https://example.com/card.png`). Nothing to do; social cards that showed no
+  image show it now.
+- **A theme that writes its own JSON-LD but no `og:title`** no longer gets
+  ssg's JSON-LD beside it (it still gets the Open Graph tags). This also
+  dropped the `BreadcrumbList`; 1.8.78 adds it back (#351).
+
+A full-content feed now carries absolute URLs in its posts' HTML.
+
+</div>
+
+<div class="upgrade-step" data-since="1.8.76">
+
+### 1.8.76 — a build may now stop on a collision
+
+A build without i18n that has two documents at one address — two pages, a
+page and a post, a page and an external-source record — now stops with an
+error naming both, where it used to write one and drop the other without a
+word. If your build stops here after the upgrade, a page was missing from
+your site: give one of the two a distinct `link:` or `slug:`.
+
+A page made from an external source's record takes its taxonomy terms from
+`content_map.taxonomies` alone again, as before 1.8.73. A `field:` you set on
+a taxonomy to work around the doubled terms can go.
+
+</div>
+
+<div class="upgrade-step" data-since="1.8.75">
+
+### 1.8.75 — nothing to do
+
+`build.json` and the component assets' directory are written readable by
+other users, like every other output file. A `chmod` you added to work around
+the 403 can go.
+
+</div>
+
+<div class="upgrade-step" data-since="1.8.74">
+
+### 1.8.74 — upgrade; from source, Go 1.27.3
+
+Replace the binary, package or image: it is built with Go 1.27.3, which fixes
+a certificate check in `crypto/x509` (GO-2026-6809). Building ssg from source
+now needs **Go 1.27.3**.
+
+`sitemap.xml` changes in three ways: the front page, listings and archives
+gain a `<lastmod>` (the newest of what they list); a document whose
+frontmatter has no `date` or `modified` — and a `static_sources` document git
+cannot date — loses the `<lastmod>` it took from its file's modification time;
+and an index entry for a file without dates loses its build-time `<lastmod>`.
+A URL with `&` or non-ASCII characters is now written escaped. To keep a
+`<lastmod>` on such a document, give it a `date` in frontmatter or turn on
+`lastmod_from_git`.
+
+</div>
+
+<div class="upgrade-step" data-since="1.8.73">
+
+### 1.8.73 — two things in your output change
+
+Both are fixes, and both change what a build writes:
+
+- **Breadcrumbs** (`seo: true`, or a theme that prints the derived JSON-LD):
+  a step whose URL has no page behind it is gone, and the steps that remain
+  carry the page's title instead of the titled slug. A trail that pointed at
+  `/posts/` on a site without that page loses the step. To keep a step, point
+  it at a page that exists with `breadcrumbs.sections.<segment>.url`.
+- **`sitemap.xml`** no longer lists the page slugged `404`. Nothing to do; the
+  `robots: noindex` you may have added to keep it out can stay.
+
+</div>
+
+<div class="upgrade-step" data-since="1.8.72">
+
+### 1.8.72 — check your recipes' structured data
+
+Everything new in 1.8.72 is opt-in, except one thing that applies to pages
+whose structured data is a **Recipe**. ssg now fills `recipeCategory` from the
+page's categories. It also fills `recipeIngredient` and `recipeInstructions`
+from the post's "Ingredients" and "Method" sections when `schema:` has
+neither. A value in `schema:` still wins, so a site that already wrote all
+three sees no change. One that left them out now publishes them. Check one
+recipe with your search engine's rich-result test after the upgrade.
+
+With `seo: true`, listings, archives and the front page gain JSON-LD
+(`ItemList`, `ProfilePage`, `Organization`) where the theme wrote none.
+
+</div>
+
+<div class="upgrade-step" data-since="1.8.71">
+
+### 1.8.71 — upgrade now; from source, Go 1.27.2
+
+A security release, and nothing in a site changes. Replace the binary,
+package or image. Building ssg from source now needs **Go 1.27.2**: the
+`go` directive asks for it, so an older Go fetches 1.27.2 itself unless
+`GOTOOLCHAIN=local` stops it.
+
+</div>
+
+<div class="upgrade-step" data-since="1.8.70">
+
+### 1.8.70 — check three things if they apply
+
+**A non-default language with `link: "/en/"` and no `posts_page`.** That page
+is now the language's front page. Before, the post listing was also written to
+`/en/`, and render order decided which one the site served. Now the page wins
+and that language's listing is not generated. Set `posts_page: blog` to keep
+it, at `/en/blog/`.
+
+**A render hook path that exists both in the theme and in the project.**
+`render_hooks:` paths are now looked up in the theme first. If
+`templates/<theme>/hooks/image.html` and `hooks/image.html` both exist, the
+theme's copy is used. Give the project's copy an absolute path, or remove the
+one you do not want.
+
+**Worker templates you copied with `ssg new worker`** keep working: the shared
+`TURNSTILE_SECRET` is still read as a fallback. The cookie-consent log no
+longer checks Turnstile unless you set `CONSENT_TURNSTILE_SECRET`, so a site
+that sets the shared secret for another worker stores consent records again.
+Re-run `ssg new worker cookie-consent` (or copy the changed files) to get the
+focus fix and the Hindi strings.
+
+Everything else in 1.8.70 is new and opt-in.
+
+</div>
+
+<div class="upgrade-step" data-since="1.8.69">
+
+### 1.8.69 — nothing to do
+
+Documentation from code (`api_docs:`) is off until you configure it, and a
+site without it builds exactly as before. ssgtheme gains three layouts
+(`api-index`, `api-module`, `api-symbol`) that only API pages use.
+
+The live examples, OpenAPI pages and the `apidoc` theme are also opt-in
+(`playground:`, `openapi:`, `template: apidoc`). Their scripts and styles are
+added only to pages that contain an example or a REST operation.
+
+</div>
+
+<div class="upgrade-step" data-since="1.8.67">
+
+### 1.8.67 — nothing to do
+
+The first `--watch` or `--incremental` build after the upgrade is a full one,
+because the dependency graph is now tied to the ssg binary that wrote it.
+
+</div>
+
+<div class="upgrade-step" data-since="1.8.66">
+
+### 1.8.66 — the MP3 player becomes the Listen button
+
+If you use `tts:`, an article's MP3 is now offered through the same compact
+Listen button as the browser voice, next to the date or reading time, instead
+of the full-width `<audio>` bar under the title. To keep the bar:
+
+```yaml
+listen:
+  player: full
+```
+
+A theme of your own can mark where the button goes with
+`<span data-ssg-listen-slot></span>`. Without a slot it still goes after the
+first `</h1>`.
+
+</div>
+
+<div class="upgrade-step" data-since="1.8.65">
+
+### 1.8.65 — nothing to do
+
+Reading articles aloud (`listen:` and `tts:`) is off until you turn it on, and
+the output of every site is unchanged until then.
+
+</div>
+
+<div class="upgrade-step" data-since="1.8.64">
+
+### 1.8.64 — a `domain` with a path moves the links too, and linked headings get GitHub's ids
+
+**A `domain` with a path now prefixes every link.** If your `domain` is
+`<host>/<path>`, the canonical URLs, sitemap and robots.txt already used that
+path, and now every root-relative link, image, stylesheet and `url()` in the
+output does too. This is what a site served under that path needs. If yours is
+served from the root and the path in `domain` was only for canonicals, set
+`base_path: /` to keep the links as they were. A site whose `domain` is a bare
+host is unaffected.
+
+**Headings that contain a link, code or inline HTML get a new id.** It is now
+the id the heading would have without the markup, which is what GitHub
+computes: `## [1.2.0] - 2026-09-30` is `#120---2026-09-30`, not
+`#1-2-0-2026-09-30`. The old id is kept on an empty `<span>` at the start of the
+heading, so links to it still land. Plain headings are unchanged.
+
+**`_headers`: the HTML blocks start with `! Cache-Control`.** It removes the
+asset policy from a page whose URL sits under `/css/`, `/js/`, `/images/` or
+`/media/`, which Cloudflare used to send joined to the page policy. With
+`deploy: netlify` the line is not written.
+
+**List items inside code blocks are no longer turned into links.**
+
+</div>
+
+<div class="upgrade-step" data-since="1.8.63">
+
+### 1.8.63 — HTML pages revalidate, on every URL shape
+
+**The default `_headers` HTML rule changed value and reach.** Pages are now sent
+`Cache-Control: public, max-age=0, must-revalidate` instead of
+`public, max-age=3600`, and a new `/*/` block applies it to the URLs a
+`page_format: directory` site actually serves (`/blog/`, `/tag/go/`). Until now
+those URLs matched no cache rule at all, so they got whatever the platform or
+the zone defaulted to. A correction or a takedown now shows on the next request
+after a deploy. To keep the hour, override the three blocks:
+
+```yaml
+headers:
+  /*.html: { Cache-Control: "public, max-age=3600" }
+  /*/:     { Cache-Control: "public, max-age=3600" }
+  /:       { Cache-Control: "public, max-age=3600" }
+```
+
+**`ssg migrate` names the engine's own error.** A failed run now ends with
+wpexporter's `Error:` line (a DNS failure, a refused connection) instead of
+advice to upgrade an engine that is already current. The upgrade advice appears
+only when the engine rejected a flag. A script that matched the old
+`If the failure names an unknown flag` text should match `wpexporter failed:`.
+
+**Symlinks in the output directory are skipped.** The `<picture>` pass, the
+output checks (`check_images`, `check_meta` and the rest) and fingerprinting now
+work through the output directory without following symlinks. A symlinked page
+used to be rewritten *at its target*, which could be outside the output. ssg
+never writes symlinks itself, so this only matters if you add them to the output
+by hand.
+
+</div>
+
+<div class="upgrade-step" data-since="1.8.62">
+
+### 1.8.62 — a header allows your own origin, overrides merge, and checks see more
+
+**`Permissions-Policy` allows the site itself.** The default `/*` block now
+sends `geolocation=(self), microphone=(self), camera=(self)` where it sent
+`()`. The empty list disabled those APIs for your own pages too, so a "use my
+location" button was refused without the visitor ever seeing a prompt. Framed
+third parties are still blocked, and the browser still asks. If you want the old
+policy, set it back:
+
+```yaml
+headers:
+  /*:
+    Permissions-Policy: "geolocation=(), microphone=(), camera=()"
+```
+
+**A `headers:` override merges into the default block instead of replacing
+it.** The example above now changes one header and keeps the other four. If you
+had restated all of them, the output is the same. If you left a header out *to
+remove it*, it now stays: give it an empty value (`X-XSS-Protection: ""`) to
+remove it.
+
+**`check_links` reads stylesheets.** `url()` and `@import` in every `.css` file
+of the output are checked like an `href`, resolved against the stylesheet. A
+site with `check_links: strict` or `strict: true` whose CSS names a file that
+does not exist now fails, with the stylesheet and line in the report. The
+bundled themes pass.
+
+**`strict: true` also fails on frontmatter that is not valid YAML.** Such a file
+was always left out of the site; it is now listed with the likely cause in every
+build, and fails a strict one. The usual fix is quoting a value that contains a
+colon.
+
+**A missing `metadata.json` no longer fails a build.** It is treated as empty
+and the build says so in one line. A `source:` that names no directory still
+fails.
+
+**Analytics.** An `analytics_ids` value containing `XXXX` (a placeholder such as
+`GTM-XXXXXXX`) is no longer rendered. And a page that merely *mentions* an id —
+a cookie notice listing `_ga_<id>` — now gets the tag; only an id inside a
+`<script>` counts as the theme having wired it.
+
+**Output that changes without a config change**, all fixes: sitemap alternates
+for front pages and post listings on multilingual sites; the feed
+autodiscovery link names the page's language feed and the built-in feed takes
+`title:` as its name; the generated 404 uses the default language; a page
+slugged `404` has `/404.html` as its canonical; root `.Translations` sets
+`IsCurrent`.
+
+</div>
+
+<div class="upgrade-step" data-since="1.8.60">
+
+### 1.8.60 — `--watch` rebuilds less, and one external-source mode is stricter
+
+**`outputs:` grew a second shape.** The flat list you have means exactly what it
+meant. A map per content type is new, and so are the `txt` format and
+`outputs_custom`. `markdown_publish: true` is unchanged.
+
+**The new frontmatter keys are additive.** `relations:`, `version:`,
+`version_of:` and `outputs:` do nothing unless a file uses them, and they stay
+readable at `.Extra.*` as well, so a template already reading `.Extra.version`
+keeps working. One behaviour to know if you adopt versions: superseded pages
+gain a canonical pointing at the latest.
+
+**Render hooks are opt-in by config.** Without `render_hooks:` the Markdown
+renderer is untouched and the output is byte for byte what it was. With one, the
+named node kind is rendered by your template instead. See docs/RENDER_HOOKS.md.
+
+**Components are opt-in by a directory.** If your project has a `components/`
+directory it is now loaded (see docs/COMPONENTS.md); if it does not, nothing
+changes. One thing to know either way: content that quotes `{{< something >}}`
+is safe — an unknown call is left as written, and calls inside code blocks are
+not calls.
+
+**A new flag, off by default.** `ssg --http --watch --edit` opens the browser
+editor (docs/EDITING.md). Nothing changes for a build that does not pass it: the
+theme attributes it uses are stripped from every published page, which the
+golden corpora check.
+
+**One validation is stricter, deliberately.** An external source with
+`mode: content` that is not a CMS used to load and silently stay data. It now
+needs a `content_map` and is refused without one, because with GO-098 that mode
+finally does what it says. If you have such a source, either add the mapping
+(docs/EXTERNAL_SOURCES.md, "Records as pages") or drop the `mode: content` line
+that was doing nothing.
+
+**`--watch` now rebuilds incrementally.** After its hash check says something
+changed, it renders only the pages that change can reach, instead of the whole
+site. The output is the same tree either way — a property test asserts that byte
+for byte over random sequences of edits — so there is nothing to change in a
+project. What you will notice is a line naming the decision, either
+`🧩 Incremental: 1 changed file(s) affect 1 output(s)` or `🧩 Full build: …`
+with the reason.
+
+A build is full whenever the answer is not certain: a changed template or
+partial, a changed config, a file the last build never saw, `--clean`, or
+content from MDDB, external sources or a CMS import. `ssg graph` prints which of
+those applies to your site, and `ssg --incremental` asks for the same narrowing
+in a one-shot build. The graph lives in `.ssg-cache/graph/`, is listed by
+`ssg cache stats`, and deleting it costs one full build. See docs/INCREMENTAL.md.
+
+If you script around the watcher's output, note that `ssg profile page /url/`
+now ends with a `built from` list read from that graph, where it used to say the
+dependency tree required GO-094.
+
+**Otherwise purely additive.** `ssg config view|set|unset` reads and edits the config from
+the command line. One behaviour change worth knowing: the MCP `designer_config_set`
+tool now writes through the same editor, which splices the change into the text
+instead of re-encoding the document — so an edited config keeps its blank lines
+and comment alignment where it used to lose them. Nothing about which keys that
+tool may write has changed.
+
+`--profile` (or `profile: text`) reports where the build's
+time went, and `--profile=json` writes `build-profile.json` beside the project
+for `ssg profile page /url/` and for CI to archive. Off by default, and it
+changes no output.
+
+`ssg mcp` gains `site_dependencies`, which answers what a page was built from
+or what editing a file rebuilds. It reads `.ssg-cache/graph/` rather than the
+published site graph, so it needs no configuration beyond a completed build,
+and dependencies stay out of the public `site-graph.json` on purpose.
+
+`site_graph: true` publishes a `site-graph.json` describing
+the whole site and adds `site_*` tools to `ssg mcp`; off by default. Under the
+hood `routes.json` and `llms.txt` are now derived from that same model — their
+output is byte-identical, which the golden corpora check.
+
+A content page may now carry `paginate:` in its frontmatter
+and be written as `/slug/`, `/slug/page/2/`, … through its own layout, with
+`.Pager` and `.Posts` in scope. A page that does not set it renders exactly as
+before, and `paginate` in the site config keeps meaning what it meant for the
+generated listings. The golden baseline is byte-identical.
+
+One thing to know if you write a shared layout: `.Pager` is nil on an ordinary
+page, so guard it — `{{ with .Pager }}…{{ end }}` — the way `category.html`
+already does.
+
+</div>
+
+<div class="upgrade-step" data-since="1.8.59">
+
+### 1.8.59 — shorter meta descriptions, and comments that survive minification
+
+**Your meta descriptions may get shorter, and that is the fix.** A page with no
+`excerpt:` of its own gets one derived from its first paragraph, and that was
+capped at 200 characters while ssg's own `check_meta` flags anything over 160.
+The cap is 160 now, so the default path passes the default check. If you were
+relying on the longer form, set `excerpt:` explicitly — it is unchanged and
+still wins.
+
+**If you emit a host directive through `safeHTML`, check it is in your output.**
+It was being deleted by `minify_html`, so `<!--email_off-->` and friends worked
+locally and vanished in production. They survive now. If you worked around it
+with `<!--htmlmin:ignore-->`, that still works and you can drop it. A host that
+reads a directive ssg does not know about:
+
+```yaml
+minify_html_keep_comments: [acme:begin, acme:end]
+```
+
+**You can finally declare a social card without a migration.** `marketing:` is a
+config block:
+
+```yaml
+marketing:
+  og_image: "/img/card.png"     # 1200×630
+  og_site_name: "Example"
+```
+
+Values win over anything `ssg migrate` recorded, field by field. If you use
+`ssgtheme`, it now emits `og:image` and `twitter:image` from a page's
+`featured_image` or that default — **and drops `twitter:card` to `summary` when
+there is no image anywhere**, which is a visible change if you had it set to
+`summary_large_image` with nothing to show. Set `marketing.og_image` to get the
+large card back.
+
+</div>
+
+<div class="upgrade-step" data-since="1.8.58">
+
+### 1.8.58 — two settings start doing what they said, and the sitemap can be split
+
+**Nothing to configure.** Both changes make an existing setting take effect, so
+the only sites that see a difference are the ones that had already asked for it.
+
+**`taxonomies: { tag: { sitemap: false } }` now works.** It parsed and did
+nothing on the built-in `category` and `tag`, so if you set it and moved on,
+those archives have been in your `sitemap.xml` ever since — and they will
+disappear from it on this build. That is the behaviour you asked for; if you had
+worked around the old bug by making the archives indexable, you can undo that.
+`archive` is still the separate switch that decides whether an archive is written
+at all, and `author` is not configurable this way.
+
+**A site using `series:` gains sitemap entries.** Series archives have always
+been written and linked, and were in no sitemap — the only built-in taxonomy
+with no code path listing it. They appear now, one entry per series, honouring
+`taxonomies: { series: { sitemap: false } }` if you would rather they did not.
+Nothing else about them changes.
+
+**Sub-sitemaps are new and entirely opt-in.** `sitemaps:` declares files with
+their own selection and turns `sitemap.xml` into the index; `sitemap_max_urls`
+lowers the per-file ceiling. A site that sets neither writes exactly the file it
+wrote before, byte for byte. The one behaviour that changed without asking: a
+site whose sitemap exceeded **50,000 URLs** was publishing a file crawlers
+reject, and is now split and indexed instead. See
+[CONFIGURATION.md](CONFIGURATION.md#splitting-the-sitemap-sitemaps-sitemap_max_urls).
+
+**A `static_sources` entry with `sitemap: true` now carries a `<lastmod>`.** It
+never did, because the date came only from git. It now falls back to the source
+file's modification time.
+
+**A new warning may appear if you use `lastmod_from_git`:**
+
+```text
+   ⚠️  lastmod_from_git is on, but git could not date app/index.html — using the file's modification time instead
+      git has to be on PATH; a strictly confined snap cannot see the host's copy.
+```
+
+If you see it, your sitemap dates have **not** been coming from Git — they were
+falling back all along, silently. The usual cause is running ssg from the snap,
+which cannot see `git` at all. Switch to the DEB, the tarball or the Docker image
+on a site that depends on commit dates.
+
+</div>
+
+<div class="upgrade-step" data-since="1.8.57">
+
+### 1.8.57 — one file may change shape, and three things become possible
+
+**Nothing to configure**, and nothing that was working stops.
+
+**`_routes.json` may lose rules — deliberately.** Cloudflare rejects a routes
+file whose rules overlap, so a rule already covered by a splat in the same list
+is now folded into it: `/api/contact` and `/api/consent/*` beside `/api/*` are
+published as `/api/*` alone. The build names what it absorbed. If your site
+deployed before, it still deploys and routes identically; if it did **not**
+deploy — *"Overlapping rules found"* — this is the fix, and you can drop the
+workaround of repeating every specific route on the middleware worker.
+
+**Three things a theme could not do before.** All additive; no existing template
+changes meaning.
+
+- `int` and `float` convert a string to a number, so `[reviews limit="3"]` can
+  feed `first (int .Attrs.limit)`. `add`/`sub`/`mul`/`div` also accept a numeric
+  string now, so `{{ add 1 .Attrs.offset }}` works with no conversion.
+- A shortcode can read `.SiteData` (the `data/` files) and `.ExternalData`, call
+  the theme's partials with `{{ template "card" . }}`, and use the collection
+  helpers. **`.Data` inside a shortcode is unchanged** — it is still the
+  `shortcodes:` entry's own `data:` map, which is why the site-wide tree arrived
+  under a different name.
+- A `static_sources` entry takes `sitemap: true` (and an optional `priority`),
+  which lists a verbatim HTML document in `sitemap.xml`. Opt-in: nothing you
+  publish today is listed unless you ask.
+
+**If a comment you wrote is missing from your output, it always was.**
+`html/template` strips HTML comments while parsing, which silently removed
+Cloudflare's `<!--email_off-->`, SSI/ESI markers and anything similar. This
+release documents it rather than changing it; emit such a comment through
+`safeHTML`:
+
+```gotemplate
+{{ "<!--email_off-->" | safeHTML }}
+```
+
+</div>
+
+<div class="upgrade-step" data-since="1.8.56">
+
+### 1.8.56 — your sitemap gains entries, `id 1` stops being special, and empty canonicals get reported
+
+**Nothing to configure.** Three fixes change what a rebuild publishes, and each
+one adds something that was missing rather than taking anything away.
+
+**`sitemap.xml` now names the post listing.** A site using `posts_page: blog`
+publishes `/blog/` — a real, indexable document, and usually the most linked
+page after the home page — and the sitemap never mentioned it. It appears now,
+at priority `0.9`, first page only. A listing whose rendered HTML says `noindex`
+still stays out. Without `posts_page` nothing changes: the listing is the site
+root, which the front-page entry already named.
+
+**Category id 1 is an ordinary id.** The sitemap, the per-category Atom feeds
+and the `isValidCategory` / `hasValidCategories` template helpers all used to
+skip category **id 1**, on the assumption that it is WordPress's *Uncategorized*.
+Any exporter numbering categories from 1 puts a real term there, and that term's
+archive was rendered and linked but silently absent from the sitemap and given
+no feed. The catch-all is now recognised by what it is — slug or name
+`uncategorized`, `bez-kategorii` and their translations — so:
+
+- an archive at id 1 gains a sitemap entry and a `feed.xml`;
+- a catch-all term at any id loses them, if it had them;
+- `{{ if hasValidCategories . }}` in a theme starts rendering the category block
+  for posts filed only under a real id-1 category, and stops for posts filed only
+  under a catch-all that used to slip through on a different id.
+
+If your `metadata.json` was renumbered to work around the old behaviour, you can
+put the ids back.
+
+**A category feed moves if its archive is not at `/category/<slug>/`.** The
+per-category feeds were addressed by slug while the archive is written where the
+source site served it, so a category with its own `link:` had its feed at
+`/category/<slug>/feed.xml` next to no archive. The feed now sits beside the
+archive — `/projects-archive/feed.xml`, `/category/rooms/kitchens/feed.xml` — and
+a term whose archive was never rendered no longer gets one. Only sites using
+category `link:` or nested categories see any file move; if you linked a feed URL
+by hand, check it.
+
+**A new warning may appear, and it is worth reading.** Every build now says so
+when a page ships `<link rel="canonical" href=""/>`, or an empty `og:url` or
+`twitter:url`:
+
+```text
+   ⚠️  10 page(s) name their own URL with an empty value
+      category/air-conditioning/index.html → <link rel="canonical">, og:url
+```
+
+It is a warning, never a build failure, and it needs no configuration. If it
+fires on your archives, the canonical fix above is the answer; elsewhere it means
+a template names a value its context does not carry.
+
+**Archives carry `.CanonicalURL`.** Themes had no way to get an archive's own
+URL, so `<link rel="canonical" href="{{ .CanonicalURL }}"/>` in `category.html`
+silently rendered `href=""` — Go templates resolve a missing map key to empty. If
+your archives shipped an empty canonical, this release fills it in with no theme
+change. Themes reconstructing the URL by hand can drop that code; the built-in
+value is the path the archive was actually written to, which is also right for a
+category with its own `link:` and for a nested one. `authorURL` is new alongside
+it, for bylines that were hardcoding `/author/<slug>/`.
+
+</div>
 
 <div class="upgrade-step" data-since="1.8.47">
 

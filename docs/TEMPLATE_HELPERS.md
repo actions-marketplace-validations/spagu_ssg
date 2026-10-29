@@ -288,6 +288,34 @@ Duplicate keys and empty keys are **errors** (no silent overwrites).
 
 ---
 
+## Page helpers
+
+### `listen` — the article read aloud
+
+```go-html-template
+{{ listen .Post }}
+```
+
+Renders the compact "Listen" button — which plays the page's MP3 when `tts`
+made one and reads the page with the browser voice otherwise — or the `<audio>`
+bar with `listen.player: full`, or nothing. Without the function, ssg fills a
+`<span data-ssg-listen-slot></span>` in the theme, else places the block after
+the first `</h1>`; a slot is the way to choose the spot that also works with
+older ssg releases. `.AudioURL` and `.AudioLength` are there for a theme that
+builds its own player. See [AUDIO.md](AUDIO.md).
+
+### `apiHref`, `apiType` — API pages from code
+
+```go-html-template
+<a href="{{ apiHref "core/src/lex#Lexer" }}">Lexer</a>
+<code>{{ apiType .Page.Extra.api.symbol.Type }}</code>
+```
+
+`apiHref` is the URL of a documented symbol by its id. `apiType` renders a type
+from the model as HTML with every documented name linked. They are for themes
+of your own. The api-* layouts and their data are described in
+[API_DOCS.md](API_DOCS.md#themes).
+
 ## String helpers
 
 `hasPrefix`, `hasSuffix`, `startsWith`, `endsWith`, `matches`, `trimPrefix` and
@@ -299,6 +327,20 @@ Duplicate keys and empty keys are **errors** (no silent overwrites).
 
 `trimPrefix`/`trimSuffix` exist because testing for an affix without being able
 to remove one left no way to strip an extension inside a template (#103).
+
+### `upper`, `lower`, `title` — letter case
+
+```gotemplate
+{{ range .Page.Translations }}<a href="{{ .URL }}" hreflang="{{ .Lang }}">{{ upper .Lang }}</a>{{ end }}
+{{ lower "PL" }}              {{/* pl */}}
+{{ title "hello wide world" }} {{/* Hello Wide World */}}
+```
+
+Named as Hugo names them, so a theme ports over. `title` applies no language's
+special rules, because a template does not say which language a string is in.
+Available in shortcode templates too. CSS `text-transform` is not a substitute:
+it changes the glyphs, not the accessible name, and it cannot reach an attribute
+(#280).
 
 ### `toJSON` — a value as inline JSON
 
@@ -393,6 +435,18 @@ SSG registers several helper functions in the Go template engine for date format
   ```
 
   Use it for shortcode output and other pre-rendered HTML too.
+
+  **It is also the only way to emit an HTML comment.** `html/template` strips
+  comments while parsing, so `<!--email_off-->` written literally in a template
+  is simply not in the output — silently, with a green build. Any comment a host
+  is meant to read (Cloudflare's Email Obfuscation opt-out, SSI/ESI markers, a
+  CDN directive) has to go through `safeHTML`:
+
+  ```gotemplate
+  {{ "<!--email_off-->" | safeHTML }}
+  …
+  {{ "<!--/email_off-->" | safeHTML }}
+  ```
 * **`decodeHTML value`** — Unescapes standard HTML entity sequences (e.g. `&amp;` becomes `&`).
   ```gotemplate
   {{ decodeHTML .Title }}
@@ -416,6 +470,43 @@ SSG registers several helper functions in the Go template engine for date format
   {{ formatDatePL .Date }}
   ```
 
+### `duration` — an ISO 8601 time for people
+
+```gotemplate
+{{ with .Schema.cookTime }}Ready in {{ duration . $.Lang }}{{ end }}
+```
+
+`duration "PT1H25M"` gives `1 hr 25 min`. Days, hours, minutes and seconds
+are written in the page's language when a language is given (`en`, `pl`, `de`,
+`fr`, `es`, `it`), and in English otherwise. Anything that is not a duration
+comes back unchanged. Structured data stores times as ISO 8601, so a theme
+prints the same value instead of keeping a second, hand-written copy.
+
+### `formatNumber` — a number for readers
+
+```gotemplate
+{{ formatNumber .Site.Data.stats.ports }} ports       {{/* 111,381 ports */}}
+{{ formatNumber 111381 " " }}                         {{/* 111 381 */}}
+```
+
+Digits are grouped the way the page's language groups them. On a site without
+i18n the language comes from `default_language`, and without that it is
+English:
+
+| Language | `formatNumber 111381` | `formatNumber 1234.5` |
+|---|---|---|
+| en (default) | `111,381` | `1,234.5` |
+| pl, cs, sk, ru, uk, sv, fi, nb | `111 381` (no-break space) | `1 234,5` |
+| fr | `111 381` (narrow no-break space) | `1 234,5` |
+| de, es, it, nl, pt, da | `111.381` | `1.234,5` |
+| hi, mr, bn | `1,11,381` (Indian grouping) | `1,234.5` |
+
+A language not in the table writes as English does. A second argument sets
+the group separator yourself, in groups of three. Integers, floats (a JSON
+number arrives as one) and numeric strings are accepted, and a whole float
+prints without a decimal part. Anything else comes back unchanged, so a
+template never prints less than it was given.
+
 ### Taxonomy and Metadata Lookup
 * **`getCategoryName id`** — Looks up and returns the name of a category by its integer ID from `metadata.json`.
   ```gotemplate
@@ -425,7 +516,17 @@ SSG registers several helper functions in the Go template engine for date format
   ```gotemplate
   {{ getCategorySlug .Category }}
   ```
-* **`isValidCategory id`** — Returns `true` if the category ID is not `1` (ID `1` is commonly reserved for "Bez kategorii").
+* **`int value`** — Converts a string, int or float to a whole number, truncating toward zero. Every shortcode attribute arrives as a string, so this is what lets `[reviews limit="3"]` feed a helper that counts. A value that is not a number is a template error, never a silent `0`.
+  ```gotemplate
+  {{ range first (int .Attrs.limit) .SiteData.reviews }}…{{ end }}
+  {{ .Attrs.limit | default "6" | int }}   {{/* default composes in front */}}
+  ```
+* **`float value`** — The same conversion keeping the fractional part, for a numeric comparison.
+  ```gotemplate
+  {{ filter "rating" "ge" (float .Attrs.min) .SiteData.reviews }}
+  ```
+  `add`, `sub`, `mul` and `div` accept a numeric string directly too, so `{{ add 1 .Attrs.offset }}` needs no conversion.
+* **`isValidCategory id`** — Returns `true` unless the ID resolves to the exporter's catch-all term (`Uncategorized`, `Bez kategorii` and their translations, matched on slug or name). Since 1.8.56 the ID itself means nothing: `1` is whatever the export numbered first, and a real category there is valid like any other.
   ```gotemplate
   {{ if isValidCategory .Category }}...{{ end }}
   ```
@@ -433,7 +534,11 @@ SSG registers several helper functions in the Go template engine for date format
   ```gotemplate
   {{ getAuthorName .Author }}
   ```
-* **`hasValidCategories page`** — Returns `true` if the page or post has categories assigned other than ID `1`.
+* **`authorURL author`** — Returns the address of an author's archive, `/author/<slug>/`, or `""` when the value names no author. Accepts the author ID a post carries, the post itself, an author record or a display name. `termURL` covers registered taxonomies only, so this is how a byline links the archive the build published.
+  ```gotemplate
+  <a href="{{ authorURL .Post.Author }}">{{ getAuthorName .Post.Author }}</a>
+  ```
+* **`hasValidCategories page`** — Returns `true` if the page or post is filed under at least one category that is not the catch-all term.
   ```gotemplate
   {{ if hasValidCategories . }}...{{ end }}
   ```
@@ -493,7 +598,8 @@ theme actually needs (column splits, "page N of M", index offsets).
   every helper above.
 - **Shortcode templates**: the safe, deterministic subset — `slice`, `append`, `in`,
   `notIn`, `contains`, `startsWith`, `endsWith`, `hasPrefix`, `hasSuffix`,
-  `matches`, `isNil`, `isEmpty`, `ternary` — plus the image helpers
+  `trimPrefix`, `trimSuffix`, `matches`, `isNil`, `isEmpty`, `ternary`, `upper`,
+  `lower`, `title` — plus the image helpers
   (`imageResize`, `imageSrcSet`, …) and the read-only external-source helpers
   (`getExternal`, `getExternalMeta`). Collection helpers that walk site-wide
   data stay theme-only.

@@ -177,30 +177,6 @@ func metadataToProtoMeta(meta map[string][]any) map[string]*pb.MetaValues {
 	return protoMeta
 }
 
-// Get fetches a single document by collection and key
-func (c *GRPCClient) Get(req GetRequest) (*Document, error) {
-	ctx, cancel := c.contextWithAuth()
-	defer cancel()
-
-	protoReq := &pb.GetRequest{
-		Collection: req.Collection,
-		Key:        req.Key,
-		Lang:       req.Lang,
-	}
-
-	if req.Env != nil {
-		protoReq.Env = req.Env
-	}
-
-	resp, err := c.client.Get(ctx, protoReq)
-	if err != nil {
-		return nil, fmt.Errorf("gRPC Get: %w", err)
-	}
-
-	doc := protoDocToDocument(resp, req.Collection)
-	return &doc, nil
-}
-
 // Search fetches multiple documents matching filters
 func (c *GRPCClient) Search(req SearchRequest) ([]Document, int, error) {
 	ctx, cancel := c.contextWithAuth()
@@ -255,8 +231,12 @@ func (c *GRPCClient) GetAll(collection string, lang string, batchSize int) ([]Do
 
 // GetByType fetches all documents filtered by type (page or post) with pagination
 func (c *GRPCClient) GetByType(collection string, docType string, lang string) ([]Document, error) {
-	return getAllPaginated(c.Search, collection, lang,
-		map[string][]any{"type": {docType}}, c.batchSize)
+	return c.GetMatching(collection, lang, map[string][]any{"type": {docType}})
+}
+
+// GetMatching fetches every document whose metadata matches filterMeta (#361).
+func (c *GRPCClient) GetMatching(collection, lang string, filterMeta map[string][]any) ([]Document, error) {
+	return getAllPaginated(c.Search, collection, lang, filterMeta, c.batchSize)
 }
 
 // Health checks if the mddb server is available using Stats RPC

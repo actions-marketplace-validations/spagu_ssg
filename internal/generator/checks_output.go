@@ -14,6 +14,7 @@ package generator
 
 import (
 	"fmt"
+	"io/fs"
 	"net/url"
 	"os"
 	"path"
@@ -27,6 +28,7 @@ import (
 	"golang.org/x/net/html"
 
 	"github.com/spagu/ssg/internal/models"
+	"github.com/spagu/ssg/internal/parser"
 )
 
 // finding is one reported problem: the output file and what is wrong in it.
@@ -38,13 +40,19 @@ type finding struct {
 // walkOutputHTML calls visit for every generated HTML file, with its parsed tree
 // and its output-relative path. Unreadable or unparseable files are skipped
 // rather than failing the build — a check must not be the thing that breaks it.
+// Files are opened through an os.Root, so a symlink cannot lead a check outside
+// the output tree; symlinked pages are skipped.
 func (g *Generator) walkOutputHTML(visit func(rel string, doc *html.Node)) error {
-	root := g.config.OutputDir
-	return filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() || !strings.EqualFold(filepath.Ext(path), ".html") {
+	root, err := os.OpenRoot(g.config.OutputDir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+	return fs.WalkDir(root.FS(), ".", func(rel string, d fs.DirEntry, err error) error {
+		if err != nil || !d.Type().IsRegular() || !strings.EqualFold(path.Ext(rel), ".html") {
 			return err
 		}
-		f, e := os.Open(path) // #nosec G304 -- CLI reads its own output
+		f, e := root.Open(rel)
 		if e != nil {
 			return nil
 		}
@@ -53,8 +61,7 @@ func (g *Generator) walkOutputHTML(visit func(rel string, doc *html.Node)) error
 		if e != nil {
 			return nil
 		}
-		rel, _ := filepath.Rel(root, path)
-		visit(filepath.ToSlash(rel), doc)
+		visit(rel, doc)
 		return nil
 	})
 }
@@ -173,7 +180,10 @@ const (
 	defaultTitleMin       = 30
 	defaultTitleMax       = 60
 	defaultDescriptionMin = 70
-	defaultDescriptionMax = 160
+	// The same bound the parser truncates a derived excerpt to, taken from it
+	// rather than restated: when they were two numbers they disagreed, and an
+	// auto-derived excerpt could never pass this check (#265).
+	defaultDescriptionMax = parser.ExcerptMaxRunes
 )
 
 // limitOr returns the configured bound, or def when it is unset. An explicit 0

@@ -34,6 +34,11 @@ accounts for most of that size; no external libraries or runtimes are needed.
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/spagu/ssg/main/install.sh | bash
+
+The installer downloads over HTTPS only and verifies the tarball's SHA-256
+against the release's `checksums.sha256` before anything is moved into place —
+a mismatch stops it before `sudo` is ever asked for. `SSG_VERSION` pins a
+release, `SSG_INSTALL_DIR` changes the target directory.
 ```
 
 ---
@@ -59,7 +64,7 @@ sudo apt install ssg
 ```bash
 # Pick the version you want — see all releases (incl. previous versions):
 # https://github.com/spagu/ssg/releases
-VERSION=1.8.52
+VERSION=1.8.82
 
 # AMD64 (x86_64)
 wget https://github.com/spagu/ssg/releases/download/v${VERSION}/ssg_${VERSION}_amd64.deb
@@ -105,7 +110,7 @@ sudo dnf install ssg
 ```bash
 # Pick the version you want — see all releases (incl. previous versions):
 # https://github.com/spagu/ssg/releases
-VERSION=1.8.52
+VERSION=1.8.82
 
 # AMD64 (x86_64)
 wget https://github.com/spagu/ssg/releases/download/v${VERSION}/ssg-${VERSION}-1.x86_64.rpm
@@ -126,6 +131,29 @@ sudo dnf install libwebp-tools
 
 ## Linux - Snap (Ubuntu)
 
+> **On WSL, prefer the [DEB package](#linux---debianubuntu-deb).** The snap is
+> strictly confined, so running it needs snapd to build a private mount
+> namespace — something WSL's kernel does not always allow. The symptom is not
+> an ssg error but a snapd one, before ssg starts at all:
+>
+> ```
+> cannot preserve mount namespace of process NNNNN as static-site-generator.mnt: Invalid argument
+> unexpected eof from helper process
+> ```
+>
+> It typically appears right after a `snap refresh`, when a namespace from the
+> previous revision is left behind. Clear it and retry:
+>
+> ```bash
+> sudo umount /run/snapd/ns/static-site-generator.mnt 2>/dev/null
+> sudo rm -f /run/snapd/ns/static-site-generator.mnt
+> sudo systemctl restart snapd.service
+> ```
+>
+> If it persists, `wsl --shutdown` from Windows clears every namespace at once.
+> snapd also needs systemd, which WSL enables only with `systemd=true` under
+> `[boot]` in `/etc/wsl.conf`. The DEB has none of these moving parts.
+
 ### Install from Snap Store
 
 ```bash
@@ -139,6 +167,21 @@ sudo snap alias static-site-generator ssg
 ```
 
 Now you can use `ssg` instead of `static-site-generator`.
+
+### The snap's private `/tmp`
+
+The snap is strictly confined, so its `/tmp` and `/var/tmp` are private
+copies. `ssg --output-dir /tmp/site` succeeds and prints the path, but
+`/tmp/site` on your machine stays empty. ssg warns when the output, content or
+templates directory is in one of them:
+
+```text
+⚠️  The snap has its own private /tmp: the output directory /tmp/site is inside it, not on the host.
+```
+
+Build into a directory under your home instead. In CI, or anywhere else a
+script builds to a temporary directory, use the DEB package, the binary or
+Docker.
 
 ---
 
@@ -271,7 +314,7 @@ scoop install ssg
 
 ### Requirements
 
-- Go 1.27.0 or later
+- Go 1.27.3 or later
 - Git
 
 ### Build and Install
@@ -291,6 +334,20 @@ sudo mv ssg /usr/local/bin/
 make build
 sudo make install
 ```
+
+### With `go install`
+
+Where there is no package for the release yet — a FreeBSD jail, say — Go
+installs a tagged version straight from the module:
+
+```bash
+go install github.com/spagu/ssg/cmd/ssg@v1.8.74
+ssg --version        # ssg version 1.8.74
+```
+
+Since 1.8.74 such a binary reports the version it was installed at; before,
+only release builds did, and a `go install` one said `dev` (#337). The
+binary lands in `$(go env GOPATH)/bin`.
 
 ---
 

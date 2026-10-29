@@ -135,10 +135,11 @@ func TestBuildOpenGraphEmitsFeaturedImage(t *testing.T) {
 		Slug:          "post",
 		FeaturedImage: "/media/hero.jpg",
 	}, true)
+	// Absolute, as Open Graph requires (#350).
 	for _, want := range []string{
-		`<meta property="og:image" content="/media/hero.jpg">`,
-		`<meta name="twitter:image" content="/media/hero.jpg">`,
-		`"image":"/media/hero.jpg"`,
+		`<meta property="og:image" content="https://example.com/media/hero.jpg">`,
+		`<meta name="twitter:image" content="https://example.com/media/hero.jpg">`,
+		`"image":"https://example.com/media/hero.jpg"`,
 	} {
 		if !strings.Contains(og, want) {
 			t.Errorf("buildOpenGraph missing %q in:\n%s", want, og)
@@ -176,7 +177,7 @@ func TestFeedSummaryTruncationRuneSafe(t *testing.T) {
 func TestMinifyHTMLPreservesPreBlocks(t *testing.T) {
 	pre := "<pre><code>line1\n  indented\n\nline3</code></pre>"
 	html := "<html>\n  <body>\n    " + pre + "\n  <script>\nvar a = 1;\n</script>\n</body>\n</html>"
-	out := minifyHTMLString(html)
+	out := minifyHTMLString(html, nil)
 	if !strings.Contains(out, pre) {
 		t.Errorf("pre block must survive minification unchanged:\n%s", out)
 	}

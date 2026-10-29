@@ -1,6 +1,6 @@
 # SSG — Static Site Generator
 
-[![Go Version](https://img.shields.io/badge/Go-1.27.0+-00ADD8?style=flat&logo=go)](https://go.dev/)
+[![Go Version](https://img.shields.io/badge/Go-1.27.3+-00ADD8?style=flat&logo=go)](https://go.dev/)
 [![CI](https://github.com/spagu/ssg/actions/workflows/ci.yml/badge.svg)](https://github.com/spagu/ssg/actions/workflows/ci.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/spagu/ssg)](https://goreportcard.com/report/github.com/spagu/ssg)
 [![codecov](https://codecov.io/gh/spagu/ssg/branch/main/graph/badge.svg)](https://codecov.io/gh/spagu/ssg)
@@ -22,7 +22,7 @@ documentation, company sites, portfolios and landing pages.
 
 - Fast, deterministic builds with a single Go binary
 - Markdown content with YAML frontmatter
-- Built-in `simple` and `krowy` themes
+- Built-in `simple`, `krowy` and `apidoc` (documentation) themes
 - Go, Pongo2, Mustache and Handlebars template engines
 - Sitemap, robots.txt, Atom feeds, search index and SEO metadata
 - WebP conversion, responsive images, SCSS, minification and fingerprinting
@@ -43,6 +43,7 @@ Linux and macOS:
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/spagu/ssg/main/install.sh | bash
+# verifies the download against the release's checksums.sha256 before installing
 ```
 
 Other supported installation methods:
@@ -136,7 +137,7 @@ ssg my-blog simple example.com --http --watch
 Open <http://127.0.0.1:8888>. SSG rebuilds the site when its files change.
 The generated site is written to `output/`; do not edit that directory by hand.
 
-The `simple` and `krowy` themes are embedded in the binary and scaffolded when
+The `simple`, `krowy` and `apidoc` themes are embedded in the binary and scaffolded when
 first used, so this example does not require a local `templates/simple/` folder.
 
 ## Command model
@@ -299,6 +300,20 @@ Common options:
 | Validate frontmatter contracts | `content_schemas: {post: {required: [title, date]}}` | config only |
 | Fail the build on any violation | `strict: true` | `--strict` |
 | Emit a route manifest (`routes.json`) | `route_manifest: true` | `--route-manifest` |
+| Publish a build report (version, duration, pages) | `build_report: build.json` | `--build-report` |
+| Publish the site's model for agents (`site-graph.json` + MCP `site_*`) | `site_graph: true` | config only |
+| Report where the build's time went | `profile: text` | `--profile[=json]` |
+| Rebuild only what a change reaches | `incremental: true` | `--incremental` |
+| Keep converted Markdown between builds | `markdown_cache: true` | `--markdown-cache` |
+| See what a change rebuilds, and why | — | `ssg graph [file]`, MCP `site_dependencies` |
+| Read and edit the config from the CLI | — | `ssg config view\|set\|unset` |
+| Turn records from a file or API into pages | `mode: content` + `content_map:` | config only |
+| Edit frontmatter and body text in the browser, with AI proposals that never save | — | `--http --watch --edit` |
+| Declare tracking ids (GTM both halves, GA4) | `analytics_ids: {gtm: GTM-…}` | config only |
+| Typed content components with a props schema | a `components/` directory | `--components-dir=DIR` |
+| Decide the markup for images, links, headings, code | `render_hooks: {image: …}` | config only |
+| Name relations between pages, and version a document | `relations:` / `version_of:` in frontmatter | config only |
+| Publish a page as JSON, Markdown, text or your own format | `outputs: {page: [html, json]}` | `--outputs=html,json` |
 | Validate internal links | `check_links: strict` | `--check-links=strict` |
 | Fail on unrenderable shortcodes | `shortcode_errors: strict` | `--shortcode-errors=strict` |
 | Pull Markdown from other folders | `content_sources: [{path: docs}]` | `--content-source=docs` |
@@ -322,6 +337,8 @@ ssg --help
 | Task | Command |
 |---|---|
 | Preview while editing | `ssg my-blog simple example.com --http --watch` |
+| Let a client edit a page in the browser | `ssg my-blog simple example.com --http --watch --edit` |
+| See what editing one file rebuilds | `ssg graph content/my-blog/posts/hello.md` |
 | Production build | `ssg my-blog simple example.com --clean --minify-all` |
 | WebP and responsive images | `ssg my-blog simple example.com --webp --image-sizes=480,960,1600` |
 | Feed, search and SEO | `ssg my-blog simple example.com --feed --search-index --seo` |
@@ -340,8 +357,17 @@ and accepted values live in [.ssg.yaml.example](.ssg.yaml.example).
 
 | Area | Available capabilities |
 |---|---|
-| Authoring | Shortcodes, table of contents, syntax highlighting, KaTeX math, raw HTML sanitization |
+| Authoring | Shortcodes, table of contents, heading self-links (`heading_anchors`), syntax highlighting, KaTeX math, raw HTML sanitization; a file dropped for a missing `status:` or unparseable frontmatter is named with the likely cause (`strict: true` fails the build on the latter) ([docs/CONTENT.md](docs/CONTENT.md#markdown-and-frontmatter)) |
 | Blog | Pagination, tags, categories, series, reading time, Atom feeds, related content |
+| API docs from code | `api_docs:` reads JavaScript (and TypeScript declarations) with their doc comments into pages of the site — packages, modules, classes, cross-links, source links — plus `api.json`, `check_api`, and MCP/WebMCP tools for agents; no Node needed for JS. `@example` blocks can run in the browser (`playground:`) ([docs/API_DOCS.md](docs/API_DOCS.md)) |
+| API docs for Go, PHP, Python | The same pages from Go (standard library parser), PHP and Python (built-in declaration scanners): nothing to install, language detected from `go.mod`, `composer.json`, `pyproject.toml` ([docs/API_LANGUAGES.md](docs/API_LANGUAGES.md)) |
+| Web Stories | Google Web Stories (AMP) from your posts: cover, captioned photo pages, a link back to the article, a hub page and sitemap entries ([docs/WEB_STORIES.md](docs/WEB_STORIES.md)) |
+| Print / PDF and Cook Mode | A print button with a clean print stylesheet and a printable recipe card, and a full-screen step-by-step recipe view that keeps the screen awake; every theme, built from the Recipe structured data ([docs/PRINT_AND_COOK_MODE.md](docs/PRINT_AND_COOK_MODE.md)) |
+| Résumé / CV | A [Schema Resume](https://schema-resume.org) JSON document as a page in any theme, with ProfilePage/Person JSON-LD and the document at `/cv/resume.json`; contact details stay private by default ([docs/RESUME.md](docs/RESUME.md)) |
+| Recipes and structured data | Recipe fields from the post (ingredients, method, category), `faq:` → FAQPage, ItemList on listings, ProfilePage for authors, Organization from `marketing:` ([docs/CONFIGURATION.md](docs/CONFIGURATION.md#recipes)) |
+| REST API docs from OpenAPI | `api_docs: - openapi: openapi.yaml` turns an OpenAPI 3.0/3.1 file into pages: endpoints by tag, parameters, bodies, responses, schemas, and a "Try it" console that sends real requests with keys kept in memory only ([docs/REST_API_DOCS.md](docs/REST_API_DOCS.md)) |
+| `apidoc` theme | A documentation-only theme: guides and references in one sidebar, search, "On this page", light/dark, WCAG 2.2 AA ([templates/apidoc/README.md](templates/apidoc/README.md)) |
+| Read aloud | A "Listen" button with the visitor's own browser voice, and/or an MP3 per article from a TTS API at build time — cached, with a jingle, a fallback when the API is down, a podcast feed, and a self-hostable Docker TTS server ([docs/AUDIO.md](docs/AUDIO.md)) |
 | Taxonomies | Custom dynamic taxonomies with term archives, metadata, per-term feeds and template helpers ([docs/TAXONOMIES.md](docs/TAXONOMIES.md)) |
 | SEO and migration | Sitemap, robots.txt, aliases, configurable permalinks, canonical URLs, link checking, `.md` link rewriting |
 | Site migration | `ssg migrate wordpress <url>` — scaffold + content pull (wpexporter) + build in one command; completes `title`/`description`/`timezone`/`colors` from the source site; pages, posts, media, a theme's own post types and reader comments; `--watch --http` migrates live in the browser ([docs/MIGRATE.md](docs/MIGRATE.md)) |
@@ -350,11 +376,11 @@ and accepted values live in [.ssg.yaml.example](.ssg.yaml.example).
 | Several projects at once | `ssg daemon` watches every project in `.ssg_projects` from one process; editing the file reloads the fleet in place, leaving untouched projects running ([docs/DAEMON.md](docs/DAEMON.md)) |
 | Staying current | Every build's first line names the binary that produced it; `ssg self-update-check` says whether a newer release is out and prints the upgrade command for **your** install — snap, Homebrew, apt, dnf, Docker or the releases page. It never self-updates and never contacts the network on its own ([docs/INSTALL.md](docs/INSTALL.md#staying-up-to-date)) |
 | Redirects | `redirects:` → real Cloudflare/Netlify `_redirects` (splats, chain flattening, aliases as 301s), **served by the built-in preview** so a rule can be checked before it ships, `ssg import redirects` from a JS `redirects()` config ([docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)) |
-| Dynamic endpoints | Cloudflare Pages Functions via `worker:` + `ssg new worker` templates (contact form, Stripe, dynamic pricing, conversions proxy, cookie consent, comments, republish trigger), configurable `_headers` ([docs/WORKERS.md](docs/WORKERS.md)) |
+| Dynamic endpoints | Cloudflare Pages Functions via `worker:` + `ssg new worker` templates (contact form, Stripe, dynamic pricing, conversions proxy, cookie consent, comments, newsletter sign-up, rate limit, republish trigger), configurable `_headers` ([docs/WORKERS.md](docs/WORKERS.md)) |
 | Assets | WebP, responsive variants, build-time image helpers, SCSS, bundles, minification, source maps, fingerprinting |
 | Data | YAML/JSON data files, custom variables and static passthrough files |
 | External sources | Unified `.ExternalData` from local files (YAML/JSON/TOML/CSV/XML), HTTP APIs with a hardened client + disk cache, read-only SQL (MySQL/MariaDB/PostgreSQL/SQLite) and CMS imports (WordPress, Drupal, Movable Type) ([docs/EXTERNAL_SOURCES.md](docs/EXTERNAL_SOURCES.md)) |
-| Localisation | Full i18n: translation keys, dictionaries + `t`, language routing, `hreflang`/`x-default`, per-language feeds and search, `language_sections:` to assign a language to a whole directory ([docs/I18N.md](docs/I18N.md)) |
+| Localisation | Full i18n: translation keys, dictionaries + `t`, language routing, `hreflang`/`x-default` in the head and in the sitemap (front pages and post listings included), per-language feeds each advertised on its own language's pages, search, `language_sections:` to assign a language to a whole directory, `upper`/`lower`/`title` for a switcher's labels ([docs/I18N.md](docs/I18N.md)) |
 | Content sources | Local Markdown or MDDB over HTTP/gRPC, including watched remote content |
 | Output | Directory/flat pages, JSON output, feeds, search index, ZIP, tar.gz and tar.xz |
 | Server | File watching, gzip, TLS, automatic certificates, HTTP/2, HTTP/3, resource limits, basic/JWT auth, IP allow/block lists and per-IP rate limiting |
@@ -500,8 +526,9 @@ workflow examples are available in [examples/workflows](examples/workflows/).
 
 ## Development
 
-Building SSG itself requires Go 1.27.0 or newer — the version the `go` directive
-in [go.mod](go.mod) asks for. The floor was 1.26.6 before that, because earlier
+Building SSG itself requires Go 1.27.3 or newer — the version the `go` directive
+in [go.mod](go.mod) asks for. 1.27.2 carries GO-2026-6809 (crypto/x509), which
+ssg reaches through every TLS connection. The floor was 1.26.6 before 1.27, because earlier
 Go 1.26 releases contain standard-library vulnerabilities relevant to this
 project.
 
@@ -511,18 +538,35 @@ cd ssg
 make all
 ```
 
-Useful targets:
+Useful targets — `make help` lists every one of them:
 
 | Command | Purpose |
 |---|---|
 | `make build` | Build `build/ssg` |
+| `make build-all` | Cross-compile for Linux, macOS, Windows, FreeBSD and OpenBSD |
+| `make install` / `make uninstall` | Install or remove the binary and its man page |
 | `make test` | Run tests |
 | `make test-coverage` | Run tests and generate coverage |
 | `make lint` | Run static checks |
 | `make security` | Run security scanners |
 | `make golden` | Check generated output against the recorded baseline |
+| `make golden-update` | Re-record the baseline after an intended output change |
 | `make determinism` | Check the worker count does not change the output |
 | `make bench` | Measure build throughput on a synthetic corpus |
+| `make site` | Build this project's own documentation site into `.site/` |
+| `make site-watch` | Serve the documentation site and rebuild on change |
+| `make site-edit` | The same, with the browser editor on — edits land on a branch |
+| `make version-check` | Fail if any packaging file drifts from `VERSION` |
+| `make version-sync` | Propagate `VERSION` into every file that states it |
+| `make package-all` | Build the DEB, RPM and Snap packages |
+| `make release VERSION=v1.2.3` | Tag and push a release |
+
+CI holds a **96% statement-coverage floor twice**: on the module as a whole and
+on every package individually, both computed without the generated protobuf. A
+pull request that drops either fails the `Test` job — see
+[CONTRIBUTING.md](CONTRIBUTING.md) for the exact check and how to run it
+locally. `BENCH_INCREMENTAL=1 make bench` times a one-post edit under
+`--incremental` beside a full build.
 | `make all` | Dependencies, lint, tests and build |
 | `make install` | Install the binary and manual page |
 
@@ -543,7 +587,19 @@ Development workflow and review requirements are in
 |---|---|
 | [.ssg.yaml.example](.ssg.yaml.example) | Complete configuration reference |
 | [docs/INSTALL.md](docs/INSTALL.md) | Platform installation guide |
+| [docs/API_DOCS.md](docs/API_DOCS.md) | API documentation from JavaScript/TypeScript code: configuration, doc comments, links, live examples, themes, `api.json`, agents |
+| [docs/API_LANGUAGES.md](docs/API_LANGUAGES.md) | API docs for Go, PHP and Python: what each reader understands and its limits |
+| [docs/WEB_STORIES.md](docs/WEB_STORIES.md) | Google Web Stories from posts: what is generated, images, theming, validation |
+| [docs/PRINT_AND_COOK_MODE.md](docs/PRINT_AND_COOK_MODE.md) | The Print / PDF button, the printable recipe card and Cook Mode |
+| [docs/RESUME.md](docs/RESUME.md) | A CV from a Schema Resume document: page, structured data, privacy |
+| [docs/REST_API_DOCS.md](docs/REST_API_DOCS.md) | REST API documentation from OpenAPI: pages, the Try it console, checks, theming |
+| [docs/AUDIO.md](docs/AUDIO.md) | Articles read aloud: the browser button, build-time MP3 through a TTS API, the podcast feed |
+| [services/tts-server/README.md](services/tts-server/README.md) | Self-hosted TTS API (Docker, Swagger, espeak-ng and Piper voices) that ssg's `generic` provider talks to |
 | [docs/MCP.md](docs/MCP.md) | MCP server for AI agents: roles, tools, find-then-edit, MDDB search, git write-back |
+| [docs/RENDER_HOOKS.md](docs/RENDER_HOOKS.md) | Render hooks: responsive images for content, an external-link policy, wrapping code blocks |
+| [docs/COMPONENTS.md](docs/COMPONENTS.md) | Typed content components: the props schema, the call syntax, assets per page, `components.json` |
+| [docs/INCREMENTAL.md](docs/INCREMENTAL.md) | `--incremental` and `ssg graph`: what a change rebuilds, when a build is full anyway, what it saves |
+| [docs/EDITING.md](docs/EDITING.md) | `--edit`: editing frontmatter in the browser — what a theme marks, where a save goes, the security rules |
 | [docs/UPGRADING.md](docs/UPGRADING.md) | Version-to-version upgrade steps, with a picker for your current version |
 | [docs/CONTENT.md](docs/CONTENT.md) | Content structure, frontmatter and URL rules |
 | [docs/MIGRATE.md](docs/MIGRATE.md) | `ssg migrate`: providers, content selection, live `--watch --http` mode |
@@ -562,6 +618,11 @@ Development workflow and review requirements are in
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Development and contribution workflow |
 | [CHANGELOG.md](CHANGELOG.md) | Release history and migration notes |
 | [SECURITY.md](SECURITY.md) | Vulnerability reporting policy |
+
+Three posts cover 1.8.60 for the people who maintain client sites:
+[what an agency does between builds](blog/the-client-wants-to-fix-a-typo.md),
+[what breaks if I change this](blog/what-breaks-if-i-change-this.md) and
+[the paragraph you clicked is not in the file](blog/the-paragraph-you-clicked-is-not-in-the-file.md).
 
 The project blog also covers the reasoning behind recent MCP work, including
 [smaller context for targeted edits](blog/ai-agent-should-not-read-5000-tokens-for-one-css-value.md)

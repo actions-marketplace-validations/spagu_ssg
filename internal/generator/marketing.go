@@ -51,7 +51,7 @@ func (g *Generator) buildMarketingHead(existing string) string {
 	addMeta("property", "og:site_name", m.OGSiteName, "og:site_name")
 	// og:image is per-page when the page has a featured image; this is the
 	// site-wide fallback for pages that have none.
-	addMeta("property", "og:image", m.OGImage, "og:image")
+	addMeta("property", "og:image", g.socialURL(m.OGImage), "og:image")
 	addMeta("name", "twitter:site", m.TwitterSite, "twitter:site")
 
 	// Verification tokens keep search-console and business-manager ownership
@@ -67,14 +67,14 @@ func (g *Generator) buildMarketingHead(existing string) string {
 // left in .Site.Analytics for a theme to place deliberately, because guessing
 // a vendor's snippet wrong is worse than not emitting it.
 func (g *Generator) analyticsSnippet(existing string) string {
-	ids := g.siteData.Analytics
-	if !g.config.Analytics || len(ids) == 0 {
+	ids := g.analyticsIDs()
+	if len(ids) == 0 {
 		return ""
 	}
 	var b strings.Builder
 	for _, vendor := range sortedKeys(ids) {
 		id := strings.TrimSpace(ids[vendor])
-		if id == "" || strings.Contains(existing, id) { // already wired by the theme
+		if id == "" || scriptMentions(existing, id) { // already wired by the theme
 			continue
 		}
 		switch strings.ToLower(vendor) {
@@ -94,6 +94,123 @@ func (g *Generator) analyticsSnippet(existing string) string {
 	return b.String()
 }
 
+// scriptMentions reports whether id appears inside a <script> element of page
+// — in its src or its body — which is where a theme that wired the tag itself
+// has it (#285).
+//
+// The test used to be the whole document, so a page that merely named the id
+// lost the tag: a cookie notice has to list GA4's `_ga_<id>` cookie, and the
+// one page documenting the tracking shipped without it, silently. Text, a
+// table cell or an attribute elsewhere is not wiring.
+func scriptMentions(page, id string) bool {
+	lower := strings.ToLower(page)
+	for from := 0; ; {
+		open := strings.Index(lower[from:], "<script")
+		if open < 0 {
+			return false
+		}
+		open += from
+		end := strings.Index(lower[open:], "</script")
+		if end < 0 {
+			end = len(lower) - open
+		}
+		if strings.Contains(page[open:open+end], id) {
+			return true
+		}
+		from = open + end
+	}
+}
+
+// analyticsIDs is the set of tracking ids this build will emit.
+//
+// Two sources with different consent rules (FE-001). Ids the site declares in
+// `analytics_ids:` are the owner asking for them, so they render on their own.
+// Ids a migration's crawl recorded still need `analytics: true`, because
+// nobody chose those — they are what the old site happened to be running.
+//
+// A placeholder id is never emitted, from either source (#276): a committed
+// `GTM-XXXXXXX` waiting for a human to replace it would otherwise inject a
+// container that does not exist into every page.
+func (g *Generator) analyticsIDs() map[string]string {
+	source := g.config.AnalyticsIDs
+	if g.config.Analytics {
+		source = g.siteData.Analytics
+	}
+	if len(source) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(source))
+	for vendor, id := range source {
+		if strings.TrimSpace(id) != "" && !isPlaceholderID(id) {
+			out[vendor] = id
+		}
+	}
+	return out
+}
+
+// isPlaceholderID reports an id that is a stand-in rather than a container:
+// the vendor docs' own `GTM-XXXXXXX` / `G-XXXXXXXXXX`, which is also the form
+// the bundled ssgtheme ships inert. Four X in a row does not occur in a real
+// id by accident.
+func isPlaceholderID(id string) bool {
+	return strings.Contains(strings.ToUpper(id), "XXXX")
+}
+
+// injectAnalytics places both halves of the tracking snippets: the scripts in
+// the head, and the tag manager's iframe right after <body>.
+func (g *Generator) injectAnalytics(s string) string {
+	if head := g.analyticsSnippet(s); head != "" {
+		if i := strings.LastIndex(s, "</head>"); i >= 0 {
+			s = s[:i] + head + s[i:]
+		} else {
+			s = head + s
+		}
+	}
+	return injectAnalyticsNoscript(s, g.analyticsNoscript())
+}
+
+// analyticsNoscript is the half of Google Tag Manager that goes in the body.
+//
+// GTM is two tags: a script in the head and an iframe right after <body>. Only
+// the first was ever emitted, so a visitor with JavaScript off — or a
+// consent-mode setup that defers the script — was counted by neither. A tag
+// manager that is half installed is not installed.
+func (g *Generator) analyticsNoscript() string {
+	var b strings.Builder
+	ids := g.analyticsIDs()
+	for _, vendor := range sortedKeys(ids) {
+		id := strings.TrimSpace(ids[vendor])
+		if id == "" {
+			continue
+		}
+		switch strings.ToLower(vendor) {
+		case "gtm", "google_tag_manager", "googletagmanager":
+			fmt.Fprintf(&b, `<noscript><iframe src="https://www.googletagmanager.com/ns.html?id=%s"`+
+				` height="0" width="0" style="display:none;visibility:hidden"></iframe></noscript>`+"\n",
+				stdhtml.EscapeString(id))
+		}
+	}
+	return b.String()
+}
+
+// injectAnalyticsNoscript places the body half immediately after <body>, where
+// the vendor requires it.
+func injectAnalyticsNoscript(s, snippet string) string {
+	if snippet == "" || strings.Contains(s, "googletagmanager.com/ns.html") {
+		return s
+	}
+	i := strings.Index(s, "<body")
+	if i < 0 {
+		return s
+	}
+	end := strings.Index(s[i:], ">")
+	if end < 0 {
+		return s
+	}
+	at := i + end + 1
+	return s[:at] + "\n" + snippet + s[at:]
+}
+
 // jsString escapes an id for a single-quoted JavaScript literal. Tracking ids
 // are plain tokens, but they come from a crawled page — treat them as data.
 func jsString(s string) string {
@@ -106,7 +223,12 @@ func jsString(s string) string {
 
 // marketingSummary describes what a build inherited from the source site, so
 // the operator sees it once instead of discovering it in the page source.
-func marketingSummary(m models.Marketing, analytics map[string]string, analyticsOn bool) string {
+//
+// found is every id the build knows of; rendered is the set analyticsIDs will
+// actually emit. The line used to derive its verdict from `analytics: true`
+// alone, so an id declared in `analytics_ids:` — which renders on its own — was
+// reported as waiting for the flag (#276).
+func marketingSummary(m models.Marketing, found, rendered map[string]string) string {
 	var parts []string
 	if m.Favicon != "" || m.AppleTouchIcon != "" {
 		parts = append(parts, "icons")
@@ -120,15 +242,37 @@ func marketingSummary(m models.Marketing, analytics map[string]string, analytics
 	if len(m.Verification) > 0 {
 		parts = append(parts, fmt.Sprintf("%d verification token(s)", len(m.Verification)))
 	}
-	if len(analytics) > 0 {
-		state := "set `analytics: true` to render"
-		if analyticsOn {
-			state = "rendered"
-		}
-		parts = append(parts, fmt.Sprintf("%s (%s)", strings.Join(sortedKeys(analytics), "+"), state))
-	}
+	parts = append(parts, analyticsStates(found, rendered)...)
 	if len(parts) == 0 {
 		return ""
 	}
 	return strings.Join(parts, ", ")
+}
+
+// analyticsStates groups the vendors by what the build does with their ids:
+// rendered, held back as a placeholder, or waiting for `analytics: true`.
+func analyticsStates(found, rendered map[string]string) []string {
+	const (
+		stateRendered    = "rendered"
+		statePlaceholder = "placeholder id, replace it to render"
+		stateGated       = "set `analytics: true` to render"
+	)
+	byState := map[string][]string{}
+	for _, vendor := range sortedKeys(found) {
+		state := stateGated
+		switch {
+		case rendered[vendor] != "":
+			state = stateRendered
+		case isPlaceholderID(found[vendor]):
+			state = statePlaceholder
+		}
+		byState[state] = append(byState[state], vendor)
+	}
+	var out []string
+	for _, state := range []string{stateRendered, statePlaceholder, stateGated} {
+		if vendors := byState[state]; len(vendors) > 0 {
+			out = append(out, fmt.Sprintf("%s (%s)", strings.Join(vendors, "+"), state))
+		}
+	}
+	return out
 }

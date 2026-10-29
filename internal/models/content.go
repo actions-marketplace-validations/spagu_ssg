@@ -57,16 +57,26 @@ func (fi *FlexInt) UnmarshalJSON(data []byte) error {
 
 // Page represents a page or post content with frontmatter metadata
 type Page struct {
-	ID         int       `yaml:"id"`
-	Title      string    `yaml:"title"`
-	Slug       string    `yaml:"slug"`
-	Date       time.Time `yaml:"date"`
-	Modified   time.Time `yaml:"modified"`
-	Status     string    `yaml:"status"`
-	Type       string    `yaml:"type"`
-	Link       string    `yaml:"link"`
-	Author     int       `yaml:"author"`
-	Categories []int     `yaml:"categories,omitempty"`
+	ID       int       `yaml:"id"`
+	Title    string    `yaml:"title"`
+	Slug     string    `yaml:"slug"`
+	Date     time.Time `yaml:"date"`
+	Modified time.Time `yaml:"modified"`
+	// DateFromFile and ModifiedFromFile say the date above was not written
+	// by anyone: the frontmatter had none and the file's modification time
+	// stood in. Good enough to order a listing; not a lastmod, since a fresh
+	// clone makes every file as new as the clone.
+	DateFromFile     bool `yaml:"-"`
+	ModifiedFromFile bool `yaml:"-"`
+	// FromRecord marks a page made from an external source's record by a
+	// content_map. Its Extra is the raw record, there for templates; its
+	// taxonomies come from content_map.taxonomies alone (#344).
+	FromRecord bool   `yaml:"-"`
+	Status     string `yaml:"status"`
+	Type       string `yaml:"type"`
+	Link       string `yaml:"link"`
+	Author     int    `yaml:"author"`
+	Categories []int  `yaml:"categories,omitempty"`
 
 	// Raw fields for flexible parsing (string or int values before resolution)
 	AuthorRaw     interface{}   `yaml:"-" json:"-"` // Unresolved author (int or string)
@@ -77,6 +87,14 @@ type Page struct {
 	PageFormat    string        `yaml:"-"` // Page output format: "directory", "flat", or "both" (set by generator)
 	SourceDir     string        `yaml:"-"` // Source directory path (for co-located asset copying)
 	SourceFile    string        `yaml:"-"` // Source filename (e.g. "AUTHENTICATION.md") for .md link rewriting
+	// Section places content that has no source directory, such as an MDDB
+	// collection, in a content section (#361). Empty for files, whose section is
+	// their directory.
+	Section string `yaml:"-" json:"-"`
+	// AudioURL is the site-relative URL of the article read aloud, and
+	// AudioLength its size in bytes, when tts produced one (1.8.65).
+	AudioURL    string `yaml:"-" json:"-"`
+	AudioLength int64  `yaml:"-" json:"-"`
 
 	// SEO and metadata fields
 	Description    string            `yaml:"description"`
@@ -88,9 +106,41 @@ type Page struct {
 	Canonical      string            `yaml:"canonical"`
 	Robots         string            `yaml:"robots"`
 	Sitemap        string            `yaml:"sitemap"`
-	FeaturedImage  string            `yaml:"featured_image"`
-	Tags           []string          `yaml:"tags,omitempty"`
-	Category       string            `yaml:"category"`
+	// SitemapChangefreq and SitemapPriority are the page's own <changefreq>
+	// and <priority> (#356); empty keeps the build's defaults.
+	SitemapChangefreq string   `yaml:"sitemap_changefreq"`
+	SitemapPriority   string   `yaml:"sitemap_priority"`
+	FeaturedImage     string   `yaml:"featured_image"`
+	Tags              []string `yaml:"tags,omitempty"`
+	Category          string   `yaml:"category"`
+
+	// Relations are the links this page declares to other pages, by name:
+	// `relations: {supersedes: [api-auth-v3], see_also: [oauth-setup]}`
+	// (GO-096). The built-in relationships — series, translations, related —
+	// keep their own machinery; this is for the ones only an author knows.
+	//
+	// Values are slugs. RelatedPages holds them once resolved, so a template
+	// gets pages rather than strings.
+	Relations    map[string][]string `yaml:"-"`
+	RelatedPages map[string][]*Page  `yaml:"-" json:"-"`
+
+	// Version and VersionOf place a page in a chain of versions of one
+	// document (GO-096). `version_of` is the group; `version` orders it, and
+	// the highest is the one search engines should see. Versions is filled by
+	// the generator with the whole chain, newest first.
+	Version   string  `yaml:"-"`
+	VersionOf string  `yaml:"-"`
+	Versions  []*Page `yaml:"-" json:"-"`
+	IsLatest  bool    `yaml:"-"`
+
+	// Outputs overrides the site's `outputs:` for this page (GO-096): a
+	// reference page can publish JSON while the rest of the site does not.
+	Outputs []string `yaml:"-"`
+
+	// Paginate asks the generator to split a collection over this page and its
+	// /page/N/ siblings, each rendered through the page's own layout with
+	// .Pager and .Posts in scope (#267). nil = an ordinary page.
+	Paginate *PaginateSpec `yaml:"paginate,omitempty"`
 
 	// Sticky pins a post to the top of the listings that sort by date — the
 	// index, the posts page and term archives — the way an editor pinned it in
@@ -159,10 +209,18 @@ type Page struct {
 // Posts without Link: use URLFormat ("date" or "slug")
 // Pages without Link: use slug
 // PageFormat "flat" returns .html suffix, "directory"/"both" returns trailing slash
+// queryOnlyLink reports whether a parsed link carries its meaning entirely in
+// the query string — a root path plus a query, like "/?cpt=123". Such a link
+// names a dynamic address; a static build serves nothing there, so it is
+// ignored and the page falls back to its slug-derived address (#234).
+func queryOnlyLink(u *url.URL) bool {
+	return (u.Path == "" || u.Path == "/") && u.RawQuery != ""
+}
+
 func (p Page) GetURL() string {
 	// Link field ALWAYS takes priority (for both posts and pages)
 	if p.Link != "" {
-		if u, err := url.Parse(p.Link); err == nil {
+		if u, err := url.Parse(p.Link); err == nil && !queryOnlyLink(u) {
 			path := u.Path
 			if !strings.HasPrefix(path, "/") {
 				path = "/" + path
@@ -182,10 +240,26 @@ func (p Page) GetURL() string {
 	}
 
 	basePath := p.getBasePath()
-	if p.PageFormat == "flat" {
+	// The generator writes a page whose path is "404" to /404.html whatever
+	// page_format says, because that flat file is what static hosts serve for
+	// an unmatched path. The address has to say the same, or the canonical,
+	// og:url and hreflang name a /404/ directory that was never written — and
+	// strict link checking fails the build on the page's own head (#284).
+	if p.PageFormat == "flat" || basePath == notFoundBasePath {
 		return basePath + ".html"
 	}
 	return basePath + "/"
+}
+
+// notFoundBasePath is the base path the generator writes as the root 404.html.
+const notFoundBasePath = "/404"
+
+// IsNotFound reports whether this is the site's error page — the one the
+// generator writes as the root 404.html. It is not content: the sitemap never
+// lists it, and a theme can use `.Page.IsNotFound` to mark it noindex and
+// leave out canonical, hreflang and og:url without hard-coding the slug (#333).
+func (p Page) IsNotFound() bool {
+	return p.getBasePath() == notFoundBasePath
 }
 
 // getBasePath returns the base URL path without trailing slash or extension,
@@ -229,7 +303,15 @@ func (p Page) GetOutputPath() string {
 	// Link field ALWAYS takes priority (for both posts and pages); no language prefix.
 	if p.Link != "" {
 		if u, err := url.Parse(p.Link); err == nil {
-			return SanitizeRelPath(u.Path)
+			if rel := SanitizeRelPath(u.Path); rel != "" || u.RawQuery == "" {
+				return rel
+			}
+			// A link that is all query — "/?modula-gallery=1289" — names a
+			// dynamic address a static build cannot serve. Taking its empty
+			// path at face value claimed the site root and overwrote the
+			// front page with whichever such page rendered last (#234). The
+			// slug-derived path below is somewhere; the root belongs to the
+			// one page that names it plainly with link: "/".
 		}
 	}
 
@@ -386,17 +468,28 @@ func isASCIILetter(b byte) bool {
 	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
 }
 
-// HasValidCategories returns true if post has categories other than "Bez kategorii" (ID 1)
+// HasValidCategories reports whether the post is filed under any category.
+//
+// Deprecated: it used to answer "any category other than id 1", on the
+// assumption that id 1 is WordPress's "Uncategorized" — an assumption that is
+// only ever right by coincidence, and that hid a real archive on every export
+// numbering its categories from 1 (#243). Without the site's category table
+// there is nothing here to recognise the catch-all term by, so this reports
+// membership only. Use [Page.HasCategoriesOtherThanCatchAll], which resolves the
+// ids and applies [IsCatchAllCategory]; the `hasValidCategories` template helper
+// already does.
 func (p Page) HasValidCategories() bool {
-	for _, catID := range p.Categories {
-		if catID != 1 { // 1 is usually "Bez kategorii"
-			return true
-		}
-	}
-	return false
+	return len(p.Categories) > 0
 }
 
 // Category represents a content category
+// Every field here is theme-facing API, reached as `.Site.Categories`, and
+// several are read by nothing in the generator itself (GO-045). That is not
+// dead weight: `Count` renders "12 posts" beside a term, `Parent` builds a
+// nested category menu, `Link` is the URL the source CMS served the archive
+// at, which a migrated site may still want to link. They are documented in
+// docs/TEMPLATES.md rather than removed, because removing them would break
+// themes silently and save nothing.
 type Category struct {
 	ID          int    `json:"id"`
 	Count       int    `json:"count"`
@@ -415,6 +508,15 @@ type Author struct {
 }
 
 // MediaItem represents a media file
+// Like Category, this is theme-facing API at `.Site.Media` (GO-045). The
+// generator itself reads only MediaDetails.File, when it resolves a featured
+// image; everything else is here for a template — MimeType to choose an icon
+// for a document link, Width/Height to write the attributes that stop a page
+// shifting as images load, SourceURL to point at the original on a site that
+// did not copy its media across. Documented in docs/TEMPLATES.md.
+//
+// FlexInt on Width/Height is load-bearing rather than decorative: an export
+// writes them as strings about as often as numbers.
 type MediaItem struct {
 	ID           int    `json:"id"`
 	Slug         string `json:"slug"`
@@ -507,21 +609,28 @@ type SiteInfo struct {
 // Marketing is the site-level identity a migrated site would otherwise lose:
 // verification tokens, social defaults, profile links and brand assets. Every
 // field is best-effort — an absent one is empty, never invented.
+//
+// The yaml/toml tags carry the same names as the json ones. Until 1.8.60 the
+// struct had json tags only, so `marketing:` in a YAML config — the block #264
+// added — decoded by lowercased field name: `og_site_name` was an unknown key
+// and `og_image` was silently dropped. The feature shipped, and the config
+// path to it did not work. A struct read from more than one format needs a tag
+// per format, and a test that loads it through each.
 type Marketing struct {
-	Verification   map[string]string `json:"verification"`
-	SocialProfiles map[string]string `json:"social_profiles"`
-	OGSiteName     string            `json:"og_site_name"`
-	OGImage        string            `json:"og_image"`
-	TwitterSite    string            `json:"twitter_site"`
-	Favicon        string            `json:"favicon"`
-	AppleTouchIcon string            `json:"apple_touch_icon"`
-	Logo           string            `json:"logo"`
-	ThemeColor     string            `json:"theme_color"`
+	Verification   map[string]string `json:"verification" yaml:"verification" toml:"verification"`
+	SocialProfiles map[string]string `json:"social_profiles" yaml:"social_profiles" toml:"social_profiles"`
+	OGSiteName     string            `json:"og_site_name" yaml:"og_site_name" toml:"og_site_name"`
+	OGImage        string            `json:"og_image" yaml:"og_image" toml:"og_image"`
+	TwitterSite    string            `json:"twitter_site" yaml:"twitter_site" toml:"twitter_site"`
+	Favicon        string            `json:"favicon" yaml:"favicon" toml:"favicon"`
+	AppleTouchIcon string            `json:"apple_touch_icon" yaml:"apple_touch_icon" toml:"apple_touch_icon"`
+	Logo           string            `json:"logo" yaml:"logo" toml:"logo"`
+	ThemeColor     string            `json:"theme_color" yaml:"theme_color" toml:"theme_color"`
 	// Colors is the source theme's palette by role ("primary", "secondary",
 	// "accent", "text", "background", "link"), read by the exporter from the
 	// theme's own CSS custom properties (wpexporter >= 1.8.2). It is the one
 	// part of a site's look a migration can carry verbatim (#128).
-	Colors map[string]string `json:"colors"`
+	Colors map[string]string `json:"colors" yaml:"colors" toml:"colors"`
 }
 
 // Empty reports whether nothing was discovered, so callers can skip the whole
@@ -683,4 +792,30 @@ func resolveCategories(p *Page, byName, bySlug map[string]int) {
 			}
 		}
 	}
+}
+
+// Slugify converts an arbitrary label into a URL-safe slug: lowercase, with
+// every run of anything else collapsed to a single hyphen.
+//
+// It lives here rather than in the generator because two producers need it —
+// the generator, for series and term names (AX-005), and the external-source
+// mapper, for pages built from records (GO-098). Two implementations would
+// eventually disagree about a URL, and a URL is a promise.
+func Slugify(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	var b strings.Builder
+	prevDash := false
+	for _, r := range s {
+		switch {
+		case (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'):
+			b.WriteRune(r)
+			prevDash = false
+		default:
+			if !prevDash {
+				b.WriteByte('-')
+				prevDash = true
+			}
+		}
+	}
+	return strings.Trim(b.String(), "-")
 }

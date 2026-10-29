@@ -63,6 +63,25 @@ link_rewrites:
   "../.github/": "https://github.com/spagu/ssg/blob/main/.github/"
   "../.ssg.yaml.example": "https://github.com/spagu/ssg/blob/main/.ssg.yaml.example"
 check_links: warn
+# The docs site runs the checks it documents. check_meta reports a page with no
+# <title> or no meta description, and flags a description outside the 70–160
+# window search engines actually display — which is how 32 pages here were found
+# to be over it at once, by a third-party crawl rather than by the build.
+check_meta: warn
+
+# The card every page posts as. Without it the theme asked for
+# summary_large_image and named no image, so an Ahrefs crawl reported "Open
+# Graph tags incomplete" on all 20 sampled pages (#264). No page here has a hero
+# photograph, so the site default is the whole answer.
+marketing:
+  og_site_name: "SSG"
+  # og_image: "/img/ssg-card.png"
+  #
+  # Uncomment once a card exists at that path (1200x630 PNG or JPEG, under 5 MB,
+  # published through static_dir). Until then the theme emits twitter:card
+  # "summary" rather than claiming summary_large_image with no image to show —
+  # and pointing this at a file that is not there would be worse than leaving it
+  # unset, which is the whole lesson of the past week.
 shortcode_errors: strict
 
 # docs/*.md have no "## Excerpt" section; derive one from the opening paragraph
@@ -89,11 +108,24 @@ pretty_html: true
 sitemap_off: false
 robots_off: false
 search_index: true
+# Blog posts can be listened to with the reader's own browser voice (1.8.65).
+# Build-time MP3 (tts:) needs a TTS endpoint reachable from CI; see docs/AUDIO.md.
+listen:
+  enabled: true
+  sections: [posts]
 
 # Markdown for agents (GO-085): publish index.md + page.md next to every page,
 # a text/markdown <head> alternate, and a root llms.txt. Agents and LLMs that
 # read Markdown (ChatGPT Search among them) get the authored source directly.
 markdown_publish: true
+# The site's own model, published: pages, sections, taxonomies, links and
+# redirects in one stamped file, and site_* over MCP. This site eats its own
+# dog food (GO-095).
+site_graph: true
+
+# This project's own worked example, kept out of the default `components/` path
+# so a build run from the repository root does not pick it up implicitly.
+components_dir: examples/components
 
 # Explicit crawler policy (GO-089). The AI crawlers are welcomed because the
 # published Markdown/llms.txt above is written precisely for them; Google reads
@@ -216,7 +248,7 @@ variables:
   logo: logo.png # assets/logo.png, transparent, resized at build time
   hero_image: river.jpg # assets/river.jpg, resized at build time
   github_repo: spagu/ssg # enables the header star count
-  version: "1.8.52"
+  version: "1.8.82"
 
   # Google Analytics 4 (gtag.js). ssgtheme renders it Consent-Mode-v2-aware:
   # storage defaults to denied and the cookie-consent banner grants
@@ -269,6 +301,12 @@ variables:
     - i18n
     - workers
     - mcp
+    - api_docs         # reference from code
+    - api_languages    # Go, PHP, Python
+    - rest_api_docs    # reference from OpenAPI
+    - resume           # a CV from Schema Resume
+    - web_stories      # Google Web Stories from posts
+    - print_and_cook_mode  # Print / PDF and Cook Mode
     - deployment       # then ship it
     - upgrading        # and keep it current
 

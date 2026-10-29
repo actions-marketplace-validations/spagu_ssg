@@ -7,6 +7,7 @@
     "Title" $title
     "Desc" .Post.Excerpt
     "Canonical" .Post.GetURL
+    "Image" .Post.FeaturedImage
     "OgType" "article"
     "Ctx" .) }}
     <meta property="article:published_time" content="{{ .Post.Date.Format "2006-01-02" }}">
@@ -15,20 +16,20 @@
 {{ template "sc-header" . }}
 
 <main class="main-content" id="main-content">
-    <div class="container">
-        <article class="article prose" id="post-{{ .Post.Slug }}">
+    <div class="container post-layout">
+        <article class="article prose" id="post-{{ .Post.Slug }}" data-ssg-edit="body">
             <p class="eyebrow">Post</p>
-            <h1>{{ .Post.Title }}</h1>
+            <h1 data-ssg-edit="frontmatter:title">{{ .Post.Title }}</h1>
             <p class="article-meta">
-                <time datetime="{{ .Post.Date.Format "2006-01-02" }}">
+                <time data-ssg-edit="frontmatter:date" datetime="{{ .Post.Date.Format "2006-01-02" }}">
                     {{ .Post.Date.Format "2 January 2006" }}
                 </time>
-                <span>{{ .Post.ReadingTime }} min read</span>
+                <span>{{ .Post.ReadingTime }} min read</span><span data-ssg-listen-slot></span><span data-ssg-print-slot></span><span data-ssg-cook-slot></span>
                 {{ with index .Site.Authors .Post.Author }}<span>{{ .Name }}</span>{{ end }}
             </p>
             {{ if .Post.Tags }}
             <p class="article-meta">
-                {{ range .Post.Tags }}<a class="badge" href="{{ termURL "tag" . }}">{{ . }}</a>{{ end }}
+                {{ range .Post.Tags }}<a class="badge" data-ssg-edit="frontmatter:tags" href="{{ termURL "tag" . }}">{{ . }}</a>{{ end }}
             </p>
             {{ end }}
 
@@ -45,6 +46,27 @@
             </nav>
             {{ end }}
         </article>
+
+        {{/* What to read next, ranked by shared tags and keywords (`related`,
+             since 1.8.16). After the article in source order — it is an
+             appendix, and only the grid moves it into the column beside the
+             prose. A post with nothing related renders no aside at all rather
+             than an empty heading. */}}
+        {{ with related .Post 6 }}
+        <aside class="post-aside" aria-labelledby="related-heading">
+            <h2 class="post-aside__title" id="related-heading">Related posts</h2>
+            <ul class="post-aside__list">
+                {{ range . }}
+                <li>
+                    <a class="post-aside__link" href="{{ .GetURL }}">
+                        {{ .Title }}
+                        <span class="post-aside__meta">{{ .Date.Format "2 Jan 2006" }} · {{ .ReadingTime }} min</span>
+                    </a>
+                </li>
+                {{ end }}
+            </ul>
+        </aside>
+        {{ end }}
 
         {{/* Comments — rendered only when variables.comments is set, so the
              theme stays generic. Assets come from the comments worker's
