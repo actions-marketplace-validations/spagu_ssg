@@ -67,8 +67,11 @@ type SitemapSpec struct {
 
 	// Selection — optional, combined with AND; none of them claims everything
 	// still unclaimed.
-	Source  string   `yaml:"source" toml:"source" json:"source"`    // a content_sources path / content folder
+	Source  string   `yaml:"source" toml:"source" json:"source"`    // a content folder, MDDB section or external_sources name (#386)
 	Include []string `yaml:"include" toml:"include" json:"include"` // pages, posts, categories, tags, authors, taxonomies, static, home, listing
+	// Prefix selects by URL path, after the base path and any language
+	// prefix, whole segments only: /net/ does not claim /netbsd/ (#386).
+	Prefix PathList `yaml:"prefix" toml:"prefix" json:"prefix"`
 }
 
 // FeedSpec is one declared syndication feed (#86). It answers two questions the
@@ -86,7 +89,8 @@ type FeedSpec struct {
 	Format string `yaml:"format" toml:"format" json:"format"` // atom (default) | rss | json
 
 	// Selection — all optional, combined with AND.
-	Source     string   `yaml:"source" toml:"source" json:"source"`             // a content_sources path / content folder
+	Source     string   `yaml:"source" toml:"source" json:"source"`             // a content folder, MDDB section or external_sources name (#386)
+	Prefix     PathList `yaml:"prefix" toml:"prefix" json:"prefix"`             // URL path prefix(es), as in SitemapSpec (#386)
 	Categories []string `yaml:"categories" toml:"categories" json:"categories"` // category name or slug
 	Tags       []string `yaml:"tags" toml:"tags" json:"tags"`
 	Type       string   `yaml:"type" toml:"type" json:"type"` // "post" (default) or "page"
@@ -108,6 +112,18 @@ type FeedSpec struct {
 	// feed_full_content rather than repeating them per entry.
 	Items       *int  `yaml:"items" toml:"items" json:"items"`
 	FullContent *bool `yaml:"full_content" toml:"full_content" json:"full_content"`
+
+	// Merchant holds the site-wide values of a `format: google-merchant` feed
+	// for attributes a product page does not state (#196).
+	Merchant MerchantDefaults `yaml:"merchant" toml:"merchant" json:"merchant"`
+}
+
+// MerchantDefaults are a merchant feed's fallbacks. A page's JSON-LD and its
+// `merchant:` front matter win over them.
+type MerchantDefaults struct {
+	Availability string `yaml:"availability" toml:"availability" json:"availability"` // in_stock, out_of_stock, preorder, backorder
+	Condition    string `yaml:"condition" toml:"condition" json:"condition"`          // new (default), used, refurbished
+	Brand        string `yaml:"brand" toml:"brand" json:"brand"`
 }
 
 // FeedInput is one input of an aggregating feed (#89): either an external feed

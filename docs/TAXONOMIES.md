@@ -25,6 +25,9 @@ taxonomies:
     case_sensitive: false  # "Go" and "go" merge into one term by default
     slugify: true          # URL slugs derived from term names
     generate_empty: false  # true = archives for zero-post terms from data files
+    outputs: [html]        # custom formats beside the index and every term (see below)
+    outputs_index: []      # overrides outputs for the index only
+    outputs_term: []       # overrides outputs for the term archives only
 ```
 
 `paginate` sets the page size for this taxonomy's term archives, overriding the
@@ -95,10 +98,23 @@ Archive pages pick the first template that exists in the theme:
 | Term archive (`/technology/go/`) | `term_template:` override → `taxonomy-<name>-term.html` → `taxonomy-term.html` → `archive.html` → `category.html` |
 
 The index context provides `.Taxonomy` (`Name/Label/Singular/Path/URL`),
-`.Terms` (each `Name/Slug/URL/Description/Count/Weight/Data`) and, like every
-other archive, `.CanonicalURL`. The term context
-provides `.Taxonomy`, `.Term`, `.Posts` (newest first), `.Pager` and — for
-compatibility with `category.html` — `.Category`, `.Kind` and `.Name`. With
+`.Terms` (each `Name/Slug/URL/Description/Count/Weight/Data`), `.Site`,
+`.Lang`, `.Domain`, `.Vars`, `.Data`, `.ExternalData`, `.BuildTime`, `.SSG`,
+`.Modified` (the newest lastmod of any post with a term) and, like every other
+archive, `.CanonicalURL`. So that the `archive.html` → `category.html` end of
+the chain renders on any theme, it also carries the archive-shaped fields
+those templates read: `.Category` (`Name` = the taxonomy label, `Slug` = its
+path), `.Kind` (the taxonomy name), `.Name` (the label), `.Posts` (always
+empty — an index lists terms, not posts) and `.Pager` (a single page). Before
+1.8.85 the index had none of them, and a theme without `taxonomy.html` failed
+the build on `can't evaluate field Category` (#377). A category template still
+shows an empty post list there, so a theme should ship a `taxonomy.html` (or
+`taxonomy-<name>.html`) that ranges over `.Terms`; the bundled `simple` theme
+ships `taxonomy.html` and `taxonomy-term.html`. The term context is the archive context described in
+[TEMPLATES.md](TEMPLATES.md#category-tag-author-and-series-archives) —
+`.Posts` (newest first), `.Pager`, `.Modified`, `.StructuredData` and, for
+compatibility with `category.html`, `.Category`, `.Kind` and `.Name` — plus
+`.Taxonomy` and `.Term`. With
 `paginate` set, term archives paginate to `/technology/go/page/2/`, and
 `.CanonicalURL` names the page currently being rendered.
 
@@ -132,6 +148,48 @@ rather than a frontmatter field, so it is driven outside the registry and
 a post carries, the post itself, an author record or a display name, and returns
 `/author/<slug>/` (see
 [docs/TEMPLATE_HELPERS.md](TEMPLATE_HELPERS.md)).
+
+## Custom output formats
+
+A format from `outputs_custom` can be written beside the taxonomy pages too,
+the same way it is beside content pages (since 1.8.83, #367):
+
+```yaml
+outputs_custom:
+  - name: api
+    suffix: index.json
+    mime: application/json
+    template: formats/api.json
+taxonomies:
+  license:
+    outputs: [html, api]   # /license/index.json and /license/<term>/index.json
+```
+
+`outputs` applies to the index and to every term; `outputs_index` or
+`outputs_term` overrides it for one of the two. The default is HTML only.
+
+The template gets the data the HTML view gets, as a map. The index has
+`.Taxonomy` and `.Terms`; a term has `.Taxonomy`, `.Term` and `.Posts`; both
+have `.Site`, `.Domain`, `.Vars`, `.Data` and the theme's helpers, including
+`getExternal`. One template can serve both views:
+
+```gotemplate
+{{if .Term}}{"term": {{ toJSON .Term.Name }}, "count": {{ len .Posts }}}
+{{else}}{"terms": [{{range $i, $t := .Terms}}{{if $i}},{{end}}{"name": {{ toJSON $t.Name }}, "count": {{ $t.Count }}}{{end}}]}{{end}}
+```
+
+The index and page 1 of each term announce every format that has a `mime` in
+their `<head>`, as content pages do (since 1.8.84, #370):
+`<link rel="alternate" type="application/json" href="/license/index.json">`.
+A format the theme already links is not announced twice.
+
+A paginated term writes its format once, beside page 1, and `.Posts` there is
+every post of the term, not the first page: an API client wants the whole term.
+Each language's taxonomy base gets its own file. Only custom formats apply —
+`json`, `markdown` and `txt` describe a page's front matter and body, which a
+taxonomy view does not have — so any other name is skipped with a warning. The
+built-in `category`, `tag` and `series` keep their legacy output and take no
+formats.
 
 ## Multilingual builds
 

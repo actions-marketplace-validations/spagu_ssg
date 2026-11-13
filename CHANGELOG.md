@@ -7,6 +7,502 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.9.6] - 2026-11-10
+
+### Added
+
+- **Music volume in story mode.** The settings panel (the gear button) has a
+  *Music volume* slider. The reader's level is kept in their browser and wins
+  over the configured one. `story.music_volume` sets the default level for
+  tracks without their own `volume` (0.4 when neither is set). While the
+  narrator speaks, the music still drops to `narrator.duck` of the current
+  level, and moving the slider mid-sentence keeps it lowered. New label:
+  `labels.music`.
+- **`story.figures: all`: any photo in the article becomes a slide** (#407).
+  This covers a photo inside a paragraph of text and a bare `<img>`, as
+  Markdown and WordPress content has them. Its caption is the `<em>` right
+  after it, or its alt text. `figures: true` (the default) still takes only
+  `<figure>`s and paragraphs holding nothing but a photo. The docs now say
+  that the Presentation button needs at least one slide.
+- **An assistant can turn on the features added since 1.8.16** (#410).
+  `designer_config_set` (MCP) now also accepts:
+  - switches: `story`, `listen`, `print`, `cook_mode`, `heading_anchors`,
+    `og_cards`, `breadcrumbs`;
+  - publishing for agents: `markdown_publish`, `site_graph`, `webmcp`,
+    `search_index`, `outputs`;
+  - `image_formats`, `clean_special_chars`, `autolink_list_items`,
+    `strip_md_link_text`;
+  - the share identity, key by key: `marketing.og_site_name`, `og_image`,
+    `twitter_site`, `theme_color`, `logo`, `favicon`, `apple_touch_icon`.
+
+  A switch writes `<key>.enabled`, so the feature's other settings stay as the
+  author wrote them; a key already written as `listen: true` stays a scalar.
+  Lists are given comma-separated (`"webp,avif"`). A list never replaces a
+  mapping (`outputs:` per content type): that write is refused.
+  `marketing.verification` (search-console tokens) stays refused. `webp`
+  stays on the list.
+
+### Fixed
+
+- **The title card's photo loads on staging** (#408). `og:image` is absolute
+  on the production domain. On any other host (a staging copy,
+  `ssg --http`, before a DNS move), the presentation now loads the same path
+  from the host the page is on. A card photo that still fails falls back to
+  the first slide. `byline: auto` takes the `<time>` inside the meta line
+  when there is one, instead of the whole line with its links.
+- **The settings panel opens above the presentation's photo and sponsor
+  strip.** Opened from the presentation's bar, the voice, speed and subtitles
+  panel was cut off under both.
+
+### Changed
+
+- Dependencies: quic-go 0.65.0, golang.org/x/image 0.48.0, x/text 0.44.0,
+  x/sync 0.25.0, x/sys 0.50.0.
+
+## [1.9.5] - 2026-11-09
+
+### Added
+
+- **`web_stories.background_audio`: a soundtrack for Web Stories** (#403).
+  - It is a site path (a file in `static/`) or a URL, rendered as
+    `amp-story background-audio`. Viewers hear it after tapping the speaker.
+  - A post's `story_audio:` front matter overrides it, and
+    `story_audio: false` makes that post's story silent. A post's own story
+    mode `audio` track for the day comes before it.
+  - `StoryContext` gains `.BackgroundAudio` for themes with their own
+    `story.html`.
+
+### Fixed
+
+- **`web_stories.publisher_logo` accepts a path from the project root**
+  (#402): `assets/logo.png` now works as well as `logo.png`. When the logo is
+  not found, the warning lists the directories it looked in. It used to say the
+  file was "not an image of this site", which sent you looking for a
+  file-format problem. The docs now say how the path is resolved.
+
+Story mode (#405, found while switching it on for a live site):
+
+- **The buttons fit on a phone.** The labelled controls were 504px wide at
+  390px and ran off the left edge. Below 700px they now show only their icons,
+  keep their names for screen readers, and wrap inside the gutters.
+- **Accent-coloured text meets WCAG contrast.** The widget's big number used
+  the brand accent on the paper, which is 2.5:1 for a typical orange. It now
+  uses `--story-accent-text`, which defaults to the accent mixed half with
+  black. `theme.accent_text` sets it outright, and `theme` keys in snake_case
+  now reach their custom property.
+- **Widget text uses the widget's colours.** A site's own `p`/`h3` colours
+  (light grey for a dark page) no longer apply on the widget's light paper.
+- **A narrator without a voice no longer jumps to the end.** In a browser
+  with no working speech voice, each utterance ended at once and the
+  presentation raced to its closing card. The narrator now gives up when its
+  first utterance fails or does not start within 4 s: it stops, hands the pace
+  back to the slideshow timer, and stops starting with the presentation.
+- **Landmarks and names.** Everything story mode adds sits in one named region.
+  The photo stage has a name before its first photograph. Widgets are notes,
+  not unnamed `<aside>` landmarks.
+- **`check_links` accepts `.webp` and `.avif` references** that the post-build
+  image pass will write from a `.jpg` or `.png` already in the output, as a
+  Web Story's logo and promotion images from `story:` settings do. The check
+  runs before that pass, so it reported them as broken.
+
+## [1.9.4] - 2026-11-09
+
+### Added
+
+- **Story mode** (`story:`, [docs/STORY.md](docs/STORY.md)). Articles become
+  a reading companion and a fullscreen presentation. Everything runs in the
+  page's own scripts, written once to `/assets/ssg-story/`.
+  - **Reading:** a reading bar with the time left, a photo stage that follows
+    the paragraph being read, and widgets anchored to passages (tips, numbers,
+    quotes, a recipe card with ticks and a step counter).
+  - **Presentation:** fullscreen slides with title and closing cards, a header
+    and a footer for promotions or an ad, autoplay, transitions, and gestures
+    like phone stories.
+  - **Narrator:** the browser's voice, with the paragraph highlighted,
+    subtitles, and the reader's choice of voice and speed.
+  - **Music:** chosen by date window (`MM-DD`, full dates for moving feasts, a
+    playlist in random order), quieter while the narrator speaks.
+  - **Sharing:** the Web Share API with a menu fallback, `#story=N` deep links,
+    `ssg-story` events, `dataLayer` analytics and Media Session.
+  - **Settings layers:** a page's settings are the site's, then every
+    `story.rules` entry that matches it (by category, tags, section or text),
+    then `<name>.story.yaml` beside the post, then its `story:` front matter.
+    `slides`, `widgets`, `figure_skip` and `hide` add up across layers.
+    `story: false` keeps a post out. Keys may be `snake_case` or `camelCase`.
+- **Pronunciation rules for the narrator.** Built-in sets for Polish and
+  British English: units, spoons and cups, °C, ranges, fractions and
+  abbreviations. Sites and posts add rules in `narrator.pronounce` or turn one
+  off with `null`.
+  - The syntax covers plural forms in CLDR order (`gram|gramy|gramów|grama`)
+    and numbers in words in the noun's gender (`{num:jedna|dwie}`: "1 łyżeczka"
+    is read "jedna łyżeczka", "2 min" is read "dwie minuty").
+  - The page and the subtitles keep the written text. Abbreviations the rules
+    know no longer end a sentence.
+  - The browser's engine and the Go engine run the same tests: `make
+    test-story` and `go test`.
+- **Narrated Web Stories:** `web_stories.narration: true` records each page's
+  text (title, captions, link) through `tts:`, with the same pronunciation
+  rules. Each page moves on when its recording ends (`auto-advance-after`).
+  Recordings are cached by text and voice, and a failed page keeps AMP's
+  default timing.
+- **Web Stories take what AMP allows from the post's `story:` settings:** the
+  header's logo on every page, widgets flying in over the photographs, the
+  footer's promotions rotating by CSS plus a page listing them, today's music,
+  and the recipe's `recipeIngredient` as an "Ingredients" panel (never the
+  method). A post without `story:` gets none of this. New i18n keys:
+  `web_stories.ingredients` and `web_stories.recommended`.
+- `tts.Duration`: the playing time of an MP3, counted from its frame headers.
+- `make test-story` runs the story scripts' tests (Node).
+
+### Changed
+
+- **Web Stories support landscape** (`supports-landscape`). On a desktop screen
+  a story fills the window instead of a phone-shaped column. This changes the
+  output of every story.
+
+## [1.9.3] - 2026-11-09
+
+### Fixed
+
+- **WebP rewriting reaches lazy-load attributes** (#400). With `webp: true`,
+  `data-src`, `data-srcset` and `data-bg` follow their image to `.webp` like
+  `src` and `srcset` do, so images a script promotes later (a carousel slide,
+  a lightbox, a lazy loader) no longer stay on the `.jpg`, and templates no
+  longer need to hard-code `.webp` names. As with every other reference, a
+  value moves only when its `.webp` was actually written; other prefixed
+  attributes (`data-original`, `x-src`) stay untouched. This changes output for
+  sites using those attributes.
+- **The cookie-consent dialog no longer scrolls the page when it opens**
+  (#399). Focus moves to its first button with `preventScroll`. Before the
+  stylesheet applies, the dialog sits at the end of `<body>`, and a plain
+  `focus()` scrolled a first visit to the bottom of the page.
+- **A tag publishes its release again.** v1.9.2 built its binaries but skipped
+  the DEB and RPM packages, the GitHub release and the Homebrew tap: those jobs
+  relied on the implicit `success()`, which counts the checks skipped by the
+  1.9.2 *Already tested* gate as not successful. They now check the result of
+  the job they need directly. v1.9.2 shipped as Docker and Snap only; 1.9.3 is
+  the first release with the tested-once pipeline end to end.
+
+## [1.9.2] - 2026-11-08
+
+### Fixed
+
+- **A hook whose program is missing stops the build before it renders**
+  (#397). Every `pre_build` and `post_build` hook's program is looked up first.
+  A `post_build` hook that called a missing program used to fail only after
+  every page had rendered. In the snap, the error now says why: strict
+  confinement hides programs installed on the host (`node`, `python`), whatever
+  `PATH` says, and names the install methods that can run them. `post_page`
+  hooks keep their non-fatal behaviour and carry the same explanation when they
+  fail. The snap detection the migrate engine search and the upgrade hint
+  already did is now one package, `internal/snapenv`, used by all three.
+
+### Changed
+
+- **CI tests a release once, not three times.** A release used to run Test,
+  Lint and the TTS server checks on the pull request, again on the merge commit
+  pushed to `main`, and a third time on the tag at that commit. A new
+  `already-tested` step (`.github/actions/already-tested`) checks whether the
+  pushed merge commit's PR head passed those checks on the same code — `main`
+  may differ only in files CI ignores (docs, blog, `*.md`). When it did, the
+  `main` and tag runs skip them, and a tag goes straight to building the
+  release. The GitHub Action tests (`test-action.yml`) skip the same way. The
+  Security Scan still runs on `main`, whose SARIF upload refreshes the default
+  branch's code-scanning alerts. Only check runs created by GitHub Actions
+  count, and a failed lookup runs the checks.
+
+## [1.9.1] - 2026-11-08
+
+### Added
+
+- **The license is named next to the version.** `ssg --version` prints a
+  second line, `License: Business Source License 1.1 (BUSL-1.1)`. The first
+  line is unchanged, so scripts that read it still work. The new
+  `ssg --license` prints the terms in a few lines and points at `LICENSE` and
+  `docs/LICENSING.md`. The help text, the hint a bare `ssg` prints, and the
+  first line of a build log (`🧱 ssg 1.9.1 · BUSL-1.1`) name it too. Someone
+  who installed `latest` sees the change from BSD without reading the
+  repository.
+
+### Fixed
+
+- **`{{.OGCard}}` is set in page templates** (#395). The card was drawn and
+  stored on the page, but the flat map a page template receives copied
+  `FeaturedImage` and not `OGCard`. A theme that writes its own `og:image` got
+  an empty value on pages and fell back to the site-wide image, so the drawn
+  cards were never referenced. Posts and `.Page.OGCard` were not affected.
+  `.ExternalSource`, documented in the same table, was missing from the map
+  too and is set now.
+
+### Changed
+
+- **Dependencies:** `go-jose/v4` 4.1.9, `pgx/v5` 5.12.0, `goldmark` 1.8.7,
+  `modernc.org/sqlite` 1.62.0 (`modernc.org/libc` 1.80.1), and the `golang:1.27.3-alpine`
+  builder image at its new digest. Replaces Dependabot PRs #387–#391.
+
+## [1.9.0] - 2026-11-08
+
+### Changed
+
+- **License: Business Source License 1.1** replaces BSD-3-Clause from this
+  version on. Production use stays free of charge. A non-commercial site has no
+  further condition; a commercial site — a business, a shop, paid advertising,
+  a site built for a client — keeps the "Built with ssg" notice, unless a
+  commercial license says otherwise. Offering ssg itself — as a hosted service,
+  inside a paid product, as a white-labelled copy — needs a commercial license;
+  building sites for clients does not, and redistributing ssg under the license
+  stays free. Your content and the sites you generate are yours. Each version becomes
+  BSD-3-Clause again four years after its release (1.9.0 on 2030-10-31). There
+  is no price list; the launch grant is free for everyone, and a later change
+  can apply to later versions only. Versions up to 1.8.85 remain BSD-3-Clause.
+  The reasons, the FAQ and how to arrange a commercial license are in
+  [docs/LICENSING.md](docs/LICENSING.md). The SPDX identifier (`BUSL-1.1`) is
+  updated in the Docker image labels, the snap, the RPM spec, the Homebrew
+  formula and the FreeBSD/OpenBSD port Makefiles; the GitHub Action and
+  `install.sh` print one line about the license after installing.
+- **`mem_limit` is now an alias of `resources.memory`** and applies to every
+  command, not only the server; an invalid size stops the command (it was a
+  warning). `--mem-limit` writes `resources.memory`, so the flag beats the file.
+  Default worker pools follow `GOMAXPROCS` instead of the raw CPU count, which
+  is the same number unless a CPU limit is in effect.
+
+### Added
+
+- **`attribution`** (default `true`) writes `<meta name="generator" content="ssg">` into every page's head and `Built with <a href="https://ssg.tradik.com/">ssg</a>`
+  before `</body>`, unless the theme has a notice of its own (an element with
+  `data-ssg-attribution`, or any link to the project page). AMP pages and web
+  stories are exempt, redirect stubs get the meta tag only. `attribution: false`
+  removes both; a non-commercial site may, a commercial one under a commercial
+  license only. The bundled
+  `apidoc` and `ssgtheme` mark their existing footer credit, so they render as
+  before; every other theme gains the notice at the end of `<body>`, styled
+  through `.ssg-attribution`. The golden corpora are re-baselined for it.
+- **`mddb.trusted`** (`--mddb-trusted`, default `false`). An MDDB build now
+  runs rendered content through the HTML sanitizer unless the server is marked
+  trusted, so a compromised or shared MDDB server cannot plant `<script>` in the
+  generated pages (SEC-003). `sanitize_html: true` still forces the sanitizer.
+  **Output changes** for an MDDB site that relied on raw HTML: set
+  `mddb.trusted: true` to keep it.
+- **Pinned and verified online themes** (SEC-005). `online_theme` accepts
+  `repo@ref` for GitHub and GitLab, fetching that tag, branch or commit instead
+  of the moving main branch. `online_theme_sha256` (`--online-theme-sha256`,
+  action input `online-theme-sha256`) is the archive's expected SHA-256: a
+  mismatch stops the build before anything is extracted. Without it the build
+  warns and prints the sum it saw.
+- **`og_cards`**: a social preview card for every page without a
+  `featured_image`. Each card shows the title, the category and the site's name,
+  1200×630 PNG (or JPEG), drawn at build time in pure Go with no browser and no
+  service. Off by default, and the site states the look: `text_color` and
+  `background` (or `background_image`) are required, otherwise the build stops
+  naming the missing key. Optional: accent colour, font, overlay, logo, format.
+  The build warns when contrast is under WCAG AA. Cards
+  are cached in `.ssg-cache/ogcards/`, and the file name carries the card's key,
+  so a changed title is a new URL that the platforms fetch again. With `seo:
+  true` the card becomes `og:image`, `twitter:image` and the JSON-LD `image`,
+  with `og:image:width`/`height`. Themes read it as `.Page.OGCard`, and
+  `ssgtheme` uses it. The `webp`/`avif` passes skip the card directory (new
+  `SkipDirs` option), because previews must stay PNG/JPEG. See
+  [docs/CONFIGURATION.md](docs/CONFIGURATION.md#a-card-for-every-page-og_cards).
+- **The GitHub Action verifies the ssg binary** against the release's
+  `checksums.sha256` before extracting it, as `install.sh` already did; a
+  mismatch or a missing entry fails the step (SEC-005).
+- **`sitemaps:` and `feeds:` select by external source and by URL prefix**
+  (#386). `source:` also names an `external_sources` entry: a `mode: content`
+  page now records the source it was built from (`Page.ExternalSource`), so a
+  site generated from records can give each source its own sitemap. `prefix:`
+  (a path or a list) matches the URL path after `base_path` and any language
+  prefix, whole segments only, so `/net/` does not claim `/netbsd/x/`; it works
+  for every kind of URL. A `source:` that is neither a content folder nor an
+  external source now fails the build instead of writing nothing. See
+  [docs/CONFIGURATION.md](docs/CONFIGURATION.md#splitting-the-sitemap-sitemaps-sitemap_max_urls).
+- **`resources:` — a CPU and memory ceiling for every command** (#384):
+  build, `--watch`, `--http`, `ssg mcp`, `ssg daemon`, `ssg migrate`.
+  `cpu` (`--cpu-limit`) caps `GOMAXPROCS` and every worker pool, `build_workers`
+  included, so the external encoders stay inside it; `memory` (`--mem-limit`) is
+  a soft limit for the whole process; `gc_percent` (`--gc-percent`) sets the
+  collector's headroom. Without a configured memory ssg fits 90% of a cgroup v2
+  `memory.max`; `memory: none` opts out. The effective limits are printed once
+  at startup (on stderr for `ssg mcp`). `--profile` now reports peak RSS and
+  GC cycles (`memory` in `build-profile.json`). New package
+  `internal/resources`. See
+  [docs/CONFIGURATION.md](docs/CONFIGURATION.md#running-on-a-small-machine-resources).
+
+### Fixed
+
+- **`webp_keep_original` keeps share cards on the original** (#385). Since
+  1.8.77 the site's own absolute URLs are rewritten to `.webp`, which also caught
+  a theme's hard-coded `og:image`/`twitter:image` `.png` even though the PNG is
+  still published. With `webp_keep_original: true` those two metas are no
+  longer rewritten — some link-preview consumers (LinkedIn's Post Inspector
+  among them) do not render WebP. Page images, srcsets and JSON-LD still move to
+  WebP; replace mode (the default) is unchanged.
+- **Platform icons stay PNG under `webp: true`** (#392). The WebP pass
+  rewrote `<link rel="apple-touch-icon">` to the `.webp` sibling. In replace
+  mode it also deleted the PNG. iOS and iPadOS take only a PNG touch icon,
+  so the home-screen icon broke. Icons are now neither converted nor
+  re-pointed. That covers what pages link as `icon`, `shortcut icon`,
+  `apple-touch-icon(-precomposed)` or `mask-icon`, and the `icons` listed in a
+  web app manifest (linked, or `manifest.webmanifest` / `site.webmanifest` /
+  `manifest.json` at the root). The same PNG used as an `<img>` stays PNG
+  too. A `.webp` left by an earlier build no longer attracts the link.
+- **`markdown_publish` leaves out the pages the site keeps out of search**
+  (#393). A `robots: noindex` page, a `sitemap: no` page, a redirect and the 404
+  page get no Markdown copy, no `text/markdown` alternate and no `llms.txt`
+  line. That is the sitemap's own rule. A page whose own `outputs:` lists
+  `markdown` still gets its copy, but `llms.txt` does not list it while it says
+  `noindex`.
+- **A `noindex` page no longer takes over the home page silently** (#394). A
+  page at `/` replaces the theme's home page since #129. A WordPress export
+  often keeps the old static front page as `link: "https://example.com/"` with
+  `robots: noindex`, so an upgraded site shipped a noindexed home page with no
+  warning. The build now stops and names the file: remove its `link:` to keep
+  the theme's home page, or remove the `noindex` to make it the front page. A
+  root redirect and the old `sitemap: "no"` workaround still pass. The
+  front-page line now reads `🏠 Front page: home.md — replaces the theme's home
+  page`.
+
+### Security
+
+- **`golang.org/x/crypto` v0.58.1-0.20261009181718-2f1f834330b2** — drops the
+  unmaintained `openpgp` package (GO-2026-5932). ssg never imported it;
+  govulncheck now reports no findings at module level either.
+
+## [1.8.85] - 2026-10-30
+
+Fixes from the documentation audit of 1.8.84: the docs were checked against
+the code, and these are the places where the code was wrong.
+
+### Fixed
+
+- **`ssg cache clean --dry` no longer deletes** (#373). `--dry` was parsed and
+  then ignored, so asking what `clean` would remove removed it — paid TTS and AI
+  results included. It now reports `would remove N entries` and leaves the
+  cache alone, like `cache gc --dry`.
+- **CLI flags** (#374). `ssg mcp` takes `--listen`, `--token`, `--allow-origin`
+  and `--role` as `--flag value` as well as `--flag=value`, like every other
+  value flag. A bare `--check-markup` is accepted (it means `warn`, the
+  default) instead of being reported as unknown. `--seo-off` is described as
+  what it is — it turns off a config's `seo: true` — and a hint for
+  `ssg migrate --no-custom-types`, a flag ssg accepts, is gone.
+- **Image helpers use the site's `webp_quality` / `avif_quality`** (#375).
+  `resize`, `srcset` and `picture` output used the image package's own
+  defaults (WebP 82, AVIF 80) instead of the configured qualities and the
+  pipeline's 60/45. The configured quality is now part of the cache key, so
+  changing it regenerates the helper variants that set no quality of their own
+  (they are re-encoded once). Cached AVIF variants are checked from their
+  header instead of with a decoder Go does not have, so `avifenc` no longer
+  runs on every build. A static GIF with `format: auto` is published as PNG
+  instead of failing, and the `<picture>` fallback `<img>` carries its own
+  `srcset` (`.FallbackSrcSet`).
+- **External sources: `${NAME}` secrets, SQL rows as pages, full format list**
+  (#376). `dsn` and the `auth` secret fields resolve `"${NAME}"` like `"$NAME"`;
+  a malformed reference such as `"${NAME"` is refused with a message naming
+  both spellings instead of looking up the wrong variable. A SQL source with
+  `mode: content` now produces one page per row (it produced one broken
+  record), and `transform.select` works on SQL sources and picks the query
+  whose rows become pages — required when there are several queries. The
+  "unsupported format" error lists every format, `changelog` and `feed`
+  included.
+- **A custom taxonomy index renders on themes without `taxonomy.html`** (#377).
+  The index fell back to `archive.html` → `category.html` with a context that
+  had no `.Category`, `.Posts`, `.Kind`, `.Name` or `.Pager`, so a site on
+  `simple` (or `krowy`, or `apidoc`) that added `taxonomies: {technology: {}}`
+  failed with "can't evaluate field Category". The index now carries those
+  fields too (the taxonomy as `.Category`, an empty `.Posts`, a one-page
+  `.Pager`), and `simple` ships `taxonomy.html` and `taxonomy-term.html`, the
+  latter with the term's own canonical instead of `/category/<slug>/`.
+- **Front matter the parser reads stays out of `.Extra`** (#378). `schema` and
+  `alias_stubs` were parsed and also copied into `Extra`, so they reached the
+  template root a second time. The list of known keys is now built from the
+  front-matter struct itself, so a new field cannot leak again. `--watch` also
+  watches `resume.file`, which can live outside every watched directory.
+- **The contact-form worker sends mail again** (#379). It called MailChannels
+  without an API key, which MailChannels no longer accepts from Workers, and
+  its Resend branch was commented out. Like the newsletter worker it now takes
+  `CONTACT_RESEND_API_KEY` or `CONTACT_MAILCHANNELS_API_KEY` (sent as
+  `X-Api-Key`) and answers a clear 503 when neither — or `CONTACT_TO` /
+  `CONTACT_FROM` — is set, before spending the visitor's Turnstile token. The
+  old `RESEND_API_KEY` still works as a Resend fallback, read last. Its tests
+  run with `make test-workers`.
+- **The GitHub Action resolves `version: latest` without the API** (#382). It
+  asked the REST API, which rate-limits unauthenticated calls from shared
+  runner IPs; the answer then had no `tag_name`, and `pipefail` ended the step
+  before its error message, so the job failed in milliseconds with no cause.
+  The action now follows the `releases/latest` redirect and, if that fails,
+  says so and suggests pinning `version`.
+- **CI** (#380). The coverage gate is 97%, for the module and per package — the
+  floor every package has met since 1.8.82 — instead of 96%. The release notes
+  name the snap correctly: `snap install static-site-generator`.
+
+## [1.8.84] - 2026-10-30
+
+### Added
+
+- **Google Merchant Center product feed** (#196). `feeds:` takes
+  `format: google-merchant` and writes the selected pages' products as RSS 2.0
+  in the `g:` namespace, which Google fetches on its own schedule. Rows come
+  from the merged JSON-LD each page already gets, so a page with valid
+  `Product` + `Offer` data needs no extra authoring. `id` is the `sku`, then
+  `merchant.id` in front matter, then the URL (with a warning, because a
+  changed slug is a new product to Google). Schema.org availability and
+  condition are mapped to Google's values; a `ProductGroup` gives one row per
+  variant with a shared `item_group_id`. A page's `merchant:` front matter and
+  the feed's `merchant:` defaults fill what the JSON-LD does not say. Products
+  Google would reject are left out with a warning, and the feed is not
+  advertised to feed readers.
+
+### Fixed
+
+- **Taxonomy pages announce their formats** (#370). Since 1.8.83 a taxonomy
+  writes its `outputs_custom` formats beside its pages, but only content pages
+  carried the `<link rel="alternate">` for them, so a client that discovers the
+  API from the page could not find `/license/index.json`. The taxonomy index
+  and page 1 of each term — where the file is written — now announce every
+  format that has a MIME type and was actually written, the way content pages
+  do. A format the theme already links is not announced twice, and the link
+  follows `base_path`. The formats are now written before the page, so a
+  template error in a format no longer leaves a link to a missing file.
+- **One `og:image` per page** (#371). `marketing.og_image` is the fallback for
+  pages with no image of their own, but the marketing block could not see the
+  `og:image` the SEO block had just written from the page's `featured_image`,
+  so such a page carried two. It now gets only its own; a page without an image
+  still gets the site's. The palette's `theme-color` follows the same rule.
+
+## [1.8.83] - 2026-10-30
+
+### Added
+
+- **Custom output formats beside taxonomy pages** (#367). A custom taxonomy
+  takes `outputs:` — or `outputs_index:` / `outputs_term:` for one of the two
+  views — and every listed `outputs_custom` format is written beside the
+  taxonomy index (`/license/index.json`) and each term archive
+  (`/license/mit/index.json`). The template gets the view's data as a map:
+  `.Taxonomy` and `.Terms` on the index, `.Taxonomy`, `.Term` and `.Posts` on a
+  term, plus `.Site`, `.Domain`, `.Vars` and the theme's helpers, so one
+  template can serve both with `{{if .Term}}`. A paginated term writes the
+  format once, beside page 1, with every post of the term. Built-in formats and
+  unknown names are skipped with a warning. The default stays HTML only.
+- **Web Push notifications about new posts** (#368). A new worker template,
+  `ssg new worker web-push`: subscriptions in D1, and `POST /api/push/notify`,
+  gated by a key and called from CI after a deploy, reads the feed (Atom, RSS
+  or JSON Feed) and sends one notification per new post. The first call only
+  records the newest post, so turning it on does not announce the archive.
+  Encryption (RFC 8291) and VAPID (RFC 8292) use WebCrypto only, subscriptions
+  a push service reports gone are removed, and only known push services are
+  accepted as endpoints. `web_push: true` in the site config writes
+  `manifest.webmanifest` (iOS needs it) and puts the manifest link and the
+  subscribe script in every page's head; the theme adds only the button.
+  `make test-workers` runs the worker's tests.
+
+### Changed
+
+- `heading_anchors` and `web_push` share one decoder for the "switch or
+  mapping" form of a setting. Behaviour is unchanged.
+
+### Dependencies
+
+- `docker/login-action` 4.6.0 → 4.7.0 in the Docker workflow (#366).
+
 ## [1.8.82] - 2026-10-28
 
 ### Added
@@ -271,7 +767,11 @@ Which ssg built the site, in the site; a sitemap held to Google's guidelines, hu
   TLS connection ssg makes. Release builds, the Docker image and the
   tts-server image are built with 1.27.3; building from source needs it.
 
-## [1.8.73] - 2026-10-18
+### Dependencies
+- `ossf/scorecard-action` 2.4.4 → 2.5.0 (#334) and `actions/download-artifact`
+  8.0.1 → 8.0.2 (#331) in CI.
+
+## [1.8.73] - 2026-10-20
 
 Breadcrumbs that only point at pages that exist, an error page that stays out
 of the sitemap, and records from an external source that keep all their
@@ -627,7 +1127,7 @@ See [docs/API_DOCS.md](docs/API_DOCS.md) and
   `listen.player: full` brings the `<audio>` bar back. Without JavaScript, a
   page with an MP3 shows a "Listen (MP3)" link.
 
-## [1.8.65] - 2026-10-01
+## [1.8.65] - 2026-10-02
 
 Articles you can listen to, two ways: with the reader's own browser voice, or
 as an MP3 made once at build time by a text-to-speech API.
@@ -739,7 +1239,7 @@ links deleted so anchors matched GitHub.
   1.1.0, `klauspost/cpuid/v2` 2.4.0, `ncruces/go-strftime` 1.1.0, genproto
   2026-09-28; the `golang:1.27.1-alpine` builder image digest.
 
-## [1.8.63] - 2026-09-24
+## [1.8.63] - 2026-09-25
 
 Two reports, a security pass and a snap that shipped a graphics stack. The
 Snap Store flagged libxml2 in a package that never parses XML. The cause was
@@ -799,7 +1299,7 @@ viewer brought in Mesa, LLVM and libxml2.
   `github.com/quic-go/quic-go` 0.62.0 → 0.63.0, and the `alpine:3.24` runtime
   image digest (#294).
 
-## [1.8.62] - 2026-09-13
+## [1.8.62] - 2026-09-14
 
 Fourteen reports, eleven of them from building one three-language site by hand.
 None of them broke a build outright; each one cost time because the build said
@@ -942,7 +1442,7 @@ nothing, or said something that was not true.
 - 📖 `--markdown-cache` appears in `--help`; it was documented in the manpage
   and the guides but not where the flag is discovered.
 
-## [1.8.60] - 2026-09-10
+## [1.8.60] - 2026-09-11
 
 ### Changed
 - 🧪 **Every package now meets the 96% coverage floor** (TEST-001). The gate in
@@ -2649,7 +3149,7 @@ nothing, or said something that was not true.
   unchanged — only its spelling — and the corpora stay byte-identical.
 
 
-## [1.8.46] - 2026-08-19
+## [1.8.46] - 2026-08-20
 
 ### Changed
 - 🐹 **Built with and targeting Go 1.27.0** (from 1.26.6), with golangci-lint
@@ -3381,7 +3881,7 @@ and the dev server giving up on a port instead of taking the next one.
   in place with `ssg repair --fix` rather than requiring a re-migration.
 
 
-## [1.8.30] - 2026-08-12
+## [1.8.30] - 2026-08-13
 
 ### Fixed
 - 🧭 **`--content` no longer strips a migrated site of its navigation** —
@@ -3553,7 +4053,7 @@ and the dev server giving up on a port instead of taking the next one.
   so a site can spell out its policy for AI and search crawlers (GPTBot,
   OAI-SearchBot, Googlebot…). Empty keeps the allow-all default.
 
-## [1.8.24] - 2026-08-09
+## [1.8.24] - 2026-08-10
 
 ### Added
 - 🧩 **`check_schema`** (#111) — validates the JSON-LD each page emits against the
@@ -5148,7 +5648,7 @@ output byte-equivalent for generated pages.
   table, richer argument/path-resolution docs, and a "Common Recipes (task → command)"
   cheat-sheet.
 
-## [1.8.1] - 2026-07-10
+## [1.8.1] - 2026-07-11
 
 Server-hardening and packaging release. The built-in server gains optional public-facing
 capabilities (TLS, HTTP/2, HTTP/3, compression, limits); the build gains extra archive
@@ -5471,7 +5971,7 @@ Audit hardening round: 5 security + 3 correctness fixes from the local audit bac
   - Config-defined fields (Title, Text, Url, etc.) remain available alongside inline attrs
   - Unknown shortcodes are left untouched (no silent removal)
 
-## [1.7.11] - 2026-04-06
+## [1.7.11] - 2026-04-08
 
 ### Added
 - ✨ **Flexible author and category fields** - Frontmatter `author` and `categories` now accept both integer IDs and string values
@@ -5574,7 +6074,7 @@ Audit hardening round: 5 security + 3 correctness fixes from the local audit bac
 - 📖 Updated man page with all MDDB options (protocol, watch, batch-size)
 - 📖 Updated docs/INSTALL.md to require Go 1.26
 
-## [1.7.1] - 2026-03-30
+## [1.7.1] - 2026-03-31
 
 ### Added
 - 📎 **Co-located content assets** - Images and media files placed alongside Markdown content files are automatically copied to the corresponding output directory
@@ -6001,7 +6501,72 @@ Audit hardening round: 5 security + 3 correctness fixes from the local audit bac
 - Cross-platform build support (Linux, macOS, Windows)
 
 <!-- Compare links (DOC-011) -->
-[Unreleased]: https://github.com/spagu/ssg/compare/v1.8.24...HEAD
+[Unreleased]: https://github.com/spagu/ssg/compare/v1.9.3...HEAD
+[1.9.3]: https://github.com/spagu/ssg/compare/v1.9.2...v1.9.3
+[1.9.2]: https://github.com/spagu/ssg/compare/v1.9.1...v1.9.2
+[1.9.1]: https://github.com/spagu/ssg/compare/v1.9.0...v1.9.1
+[1.9.0]: https://github.com/spagu/ssg/compare/v1.8.85...v1.9.0
+[1.8.85]: https://github.com/spagu/ssg/compare/v1.8.84...v1.8.85
+[1.8.84]: https://github.com/spagu/ssg/compare/v1.8.83...v1.8.84
+[1.8.83]: https://github.com/spagu/ssg/compare/v1.8.82...v1.8.83
+[1.8.82]: https://github.com/spagu/ssg/compare/v1.8.81...v1.8.82
+[1.8.81]: https://github.com/spagu/ssg/compare/v1.8.80...v1.8.81
+[1.8.80]: https://github.com/spagu/ssg/compare/v1.8.79...v1.8.80
+[1.8.79]: https://github.com/spagu/ssg/compare/v1.8.78...v1.8.79
+[1.8.78]: https://github.com/spagu/ssg/compare/v1.8.77...v1.8.78
+[1.8.77]: https://github.com/spagu/ssg/compare/v1.8.76...v1.8.77
+[1.8.76]: https://github.com/spagu/ssg/compare/v1.8.75...v1.8.76
+[1.8.75]: https://github.com/spagu/ssg/compare/v1.8.74...v1.8.75
+[1.8.74]: https://github.com/spagu/ssg/compare/v1.8.73...v1.8.74
+[1.8.73]: https://github.com/spagu/ssg/compare/v1.8.72...v1.8.73
+[1.8.72]: https://github.com/spagu/ssg/compare/v1.8.71...v1.8.72
+[1.8.71]: https://github.com/spagu/ssg/compare/v1.8.70...v1.8.71
+[1.8.70]: https://github.com/spagu/ssg/compare/v1.8.69...v1.8.70
+[1.8.69]: https://github.com/spagu/ssg/compare/v1.8.68...v1.8.69
+[1.8.68]: https://github.com/spagu/ssg/compare/v1.8.67...v1.8.68
+[1.8.67]: https://github.com/spagu/ssg/compare/v1.8.66...v1.8.67
+[1.8.66]: https://github.com/spagu/ssg/compare/v1.8.65...v1.8.66
+[1.8.65]: https://github.com/spagu/ssg/compare/v1.8.64...v1.8.65
+[1.8.64]: https://github.com/spagu/ssg/compare/v1.8.63...v1.8.64
+[1.8.63]: https://github.com/spagu/ssg/compare/v1.8.62...v1.8.63
+[1.8.62]: https://github.com/spagu/ssg/compare/v1.8.61...v1.8.62
+[1.8.61]: https://github.com/spagu/ssg/compare/v1.8.60...v1.8.61
+[1.8.60]: https://github.com/spagu/ssg/compare/v1.8.59...v1.8.60
+[1.8.59]: https://github.com/spagu/ssg/compare/v1.8.58...v1.8.59
+[1.8.58]: https://github.com/spagu/ssg/compare/v1.8.57...v1.8.58
+[1.8.57]: https://github.com/spagu/ssg/compare/v1.8.56...v1.8.57
+[1.8.56]: https://github.com/spagu/ssg/compare/v1.8.55...v1.8.56
+[1.8.55]: https://github.com/spagu/ssg/compare/v1.8.54...v1.8.55
+[1.8.54]: https://github.com/spagu/ssg/compare/v1.8.53...v1.8.54
+[1.8.53]: https://github.com/spagu/ssg/compare/v1.8.52...v1.8.53
+[1.8.52]: https://github.com/spagu/ssg/compare/v1.8.51...v1.8.52
+[1.8.51]: https://github.com/spagu/ssg/compare/v1.8.50...v1.8.51
+[1.8.50]: https://github.com/spagu/ssg/compare/v1.8.49...v1.8.50
+[1.8.49]: https://github.com/spagu/ssg/compare/v1.8.48...v1.8.49
+[1.8.48]: https://github.com/spagu/ssg/compare/v1.8.47...v1.8.48
+[1.8.47]: https://github.com/spagu/ssg/compare/v1.8.46...v1.8.47
+[1.8.46]: https://github.com/spagu/ssg/compare/v1.8.45...v1.8.46
+[1.8.45]: https://github.com/spagu/ssg/compare/v1.8.44...v1.8.45
+[1.8.44]: https://github.com/spagu/ssg/compare/v1.8.43...v1.8.44
+[1.8.43]: https://github.com/spagu/ssg/compare/v1.8.42...v1.8.43
+[1.8.42]: https://github.com/spagu/ssg/compare/v1.8.41...v1.8.42
+[1.8.41]: https://github.com/spagu/ssg/compare/v1.8.40...v1.8.41
+[1.8.40]: https://github.com/spagu/ssg/compare/v1.8.39...v1.8.40
+[1.8.39]: https://github.com/spagu/ssg/compare/v1.8.38...v1.8.39
+[1.8.38]: https://github.com/spagu/ssg/compare/v1.8.37...v1.8.38
+[1.8.37]: https://github.com/spagu/ssg/compare/v1.8.36...v1.8.37
+[1.8.36]: https://github.com/spagu/ssg/compare/v1.8.35...v1.8.36
+[1.8.35]: https://github.com/spagu/ssg/compare/v1.8.34...v1.8.35
+[1.8.34]: https://github.com/spagu/ssg/compare/v1.8.33...v1.8.34
+[1.8.33]: https://github.com/spagu/ssg/compare/v1.8.32...v1.8.33
+[1.8.32]: https://github.com/spagu/ssg/compare/v1.8.31...v1.8.32
+[1.8.31]: https://github.com/spagu/ssg/compare/v1.8.30...v1.8.31
+[1.8.30]: https://github.com/spagu/ssg/compare/v1.8.29...v1.8.30
+[1.8.29]: https://github.com/spagu/ssg/compare/v1.8.28...v1.8.29
+[1.8.28]: https://github.com/spagu/ssg/compare/v1.8.27...v1.8.28
+[1.8.27]: https://github.com/spagu/ssg/compare/v1.8.26...v1.8.27
+[1.8.26]: https://github.com/spagu/ssg/compare/v1.8.25...v1.8.26
+[1.8.25]: https://github.com/spagu/ssg/compare/v1.8.24...v1.8.25
 [1.8.24]: https://github.com/spagu/ssg/compare/v1.8.23...v1.8.24
 [1.8.23]: https://github.com/spagu/ssg/compare/v1.8.22...v1.8.23
 [1.8.22]: https://github.com/spagu/ssg/compare/v1.8.21...v1.8.22
@@ -6011,11 +6576,15 @@ Audit hardening round: 5 security + 3 correctness fixes from the local audit bac
 [1.8.18]: https://github.com/spagu/ssg/compare/v1.8.17...v1.8.18
 [1.8.17]: https://github.com/spagu/ssg/compare/v1.8.16...v1.8.17
 [1.8.16]: https://github.com/spagu/ssg/compare/v1.8.15...v1.8.16
+[1.8.15]: https://github.com/spagu/ssg/compare/v1.8.14...v1.8.15
+[1.8.14]: https://github.com/spagu/ssg/compare/v1.8.13...v1.8.14
+[1.8.13]: https://github.com/spagu/ssg/compare/v1.8.12...v1.8.13
+[1.8.12]: https://github.com/spagu/ssg/compare/v1.8.11...v1.8.12
+[1.8.11]: https://github.com/spagu/ssg/compare/v1.8.10...v1.8.11
 [1.8.10]: https://github.com/spagu/ssg/compare/v1.8.9...v1.8.10
 [1.8.9]: https://github.com/spagu/ssg/compare/v1.8.8...v1.8.9
 [1.8.8]: https://github.com/spagu/ssg/compare/v1.8.7...v1.8.8
-[1.8.7]: https://github.com/spagu/ssg/compare/v1.8.6...v1.8.7
-[1.8.6]: https://github.com/spagu/ssg/compare/v1.8.5...v1.8.6
+[1.8.7]: https://github.com/spagu/ssg/compare/v1.8.5...v1.8.7
 [1.8.5]: https://github.com/spagu/ssg/compare/v1.8.4...v1.8.5
 [1.8.4]: https://github.com/spagu/ssg/compare/v1.8.3...v1.8.4
 [1.8.3]: https://github.com/spagu/ssg/compare/v1.8.2...v1.8.3
@@ -6028,3 +6597,31 @@ Audit hardening round: 5 security + 3 correctness fixes from the local audit bac
 [1.7.12]: https://github.com/spagu/ssg/compare/v1.7.11...v1.7.12
 [1.7.11]: https://github.com/spagu/ssg/compare/v1.7.10...v1.7.11
 [1.7.10]: https://github.com/spagu/ssg/compare/v1.7.9...v1.7.10
+[1.7.9]: https://github.com/spagu/ssg/compare/v1.7.8...v1.7.9
+[1.7.8]: https://github.com/spagu/ssg/compare/v1.7.7...v1.7.8
+[1.7.7]: https://github.com/spagu/ssg/compare/v1.7.6...v1.7.7
+[1.7.6]: https://github.com/spagu/ssg/compare/v1.7.4...v1.7.6
+[1.7.4]: https://github.com/spagu/ssg/compare/v1.7.3...v1.7.4
+[1.7.3]: https://github.com/spagu/ssg/compare/v1.7.2...v1.7.3
+[1.7.2]: https://github.com/spagu/ssg/compare/v1.7.1...v1.7.2
+[1.7.1]: https://github.com/spagu/ssg/compare/v1.7.0...v1.7.1
+[1.7.0]: https://github.com/spagu/ssg/compare/v1.6.2...v1.7.0
+[1.6.2]: https://github.com/spagu/ssg/compare/v1.6.1...v1.6.2
+[1.6.1]: https://github.com/spagu/ssg/compare/v1.6.0...v1.6.1
+[1.6.0]: https://github.com/spagu/ssg/compare/v1.5.4...v1.6.0
+[1.5.4]: https://github.com/spagu/ssg/compare/v1.5.1...v1.5.4
+[1.5.1]: https://github.com/spagu/ssg/compare/v1.5.0...v1.5.1
+[1.5.0]: https://github.com/spagu/ssg/compare/v1.4.9...v1.5.0
+[1.4.9]: https://github.com/spagu/ssg/compare/v1.4.8...v1.4.9
+[1.4.8]: https://github.com/spagu/ssg/compare/v1.4.5...v1.4.8
+[1.4.5]: https://github.com/spagu/ssg/compare/v1.4.4...v1.4.5
+[1.4.4]: https://github.com/spagu/ssg/compare/v1.4.3...v1.4.4
+[1.4.3]: https://github.com/spagu/ssg/compare/v1.4.2...v1.4.3
+[1.4.2]: https://github.com/spagu/ssg/compare/v1.4.1...v1.4.2
+[1.4.1]: https://github.com/spagu/ssg/compare/v1.4.0...v1.4.1
+[1.4.0]: https://github.com/spagu/ssg/compare/v1.3.4...v1.4.0
+[1.3.4]: https://github.com/spagu/ssg/compare/v1.3.3...v1.3.4
+[1.3.3]: https://github.com/spagu/ssg/compare/v1.3.2...v1.3.3
+[1.3.2]: https://github.com/spagu/ssg/compare/v1.3.1...v1.3.2
+[1.3.1]: https://github.com/spagu/ssg/compare/v1.2.0...v1.3.1
+[1.2.0]: https://github.com/spagu/ssg/releases/tag/v1.2.0

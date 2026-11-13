@@ -96,9 +96,9 @@ domain: example.com
 ssg my-blog simple example.com
 ```
 
-Most features are disabled by default. Defaults listed below come from the
-current `config.DefaultConfig`; omitted strings and booleans otherwise use Go's
-empty value.
+Most features are disabled by default. Defaults listed below are the effective
+ones: `config.DefaultConfig` plus the values the build applies when a key is
+unset; omitted strings and booleans otherwise use Go's empty value.
 
 ## Editing the config from the command line
 
@@ -206,15 +206,20 @@ posts_page: blog     # the listing moves to /blog/ and /blog/page/2/
 ```
 
 ```text
-🏠 Front page: home.md
+🏠 Front page: home.md — replaces the theme's home page
    Post listing: /blog/
 ```
+
+A front page that says `robots: noindex` stops the build (#394). It is
+nearly always a migration leftover, and it would make the site's home page
+noindex. Remove its `link:` to keep the theme's home page, or remove the
+`noindex`. A redirect at `/` and `sitemap: "no"` are allowed.
 
 Without `posts_page` the listing has nowhere to go, so it is not generated —
 reported, not silent:
 
 ```text
-🏠 Front page: home.md
+🏠 Front page: home.md — replaces the theme's home page
    8 post(s) are not listed anywhere — set posts_page: "blog" to publish the listing
 ```
 
@@ -239,9 +244,9 @@ listing moves to its own `posts_page` (`/en/blog/`), or is not generated when
 `posts_page` is unset. The build names every language's front page:
 
 ```text
-🏠 Front page: home.hi.md
+🏠 Front page: home.hi.md — replaces the theme's home page
    Post listing: /blog/
-🏠 Front page: home.en.md
+🏠 Front page: home.en.md — replaces the theme's home page
    Post listing: /en/blog/
 ```
 
@@ -278,7 +283,7 @@ does today, so adding this changes nothing that already works.
 feeds:
   - path: /blog/feed.xml       # a whole content root
     title: "Blog"
-    source: blog               # a content_sources path, or a content folder
+    source: blog               # a content folder, MDDB section or external source
 
   - path: /blog/rss.xml        # the same posts, a second format
     title: "Blog"
@@ -313,8 +318,9 @@ Two things worth knowing even if you only ever want Atom:
 |---|---|
 | `path` | Output path — also the URL. Required |
 | `title` | Feed title; defaults to the site domain |
-| `format` | `atom` (default), `rss` (2.0) or `json` (JSON Feed 1.1) |
-| `source` | A content root: matches that folder and everything beneath it |
+| `format` | `atom` (default), `rss` (2.0), `json` (JSON Feed 1.1) or `google-merchant` (a product feed, see below) |
+| `source` | A content root: matches that folder and everything beneath it; also an MDDB section or an `external_sources` entry by name (1.9.0) |
+| `prefix` | URL path prefix, or a list of them, as in [`sitemaps:`](#splitting-the-sitemap-sitemaps-sitemap_max_urls) (1.9.0) |
 | `categories` | Category names or slugs — any of |
 | `tags` | Tags — any of |
 | `type` | `post` (default) or `page` |
@@ -325,6 +331,60 @@ Selection criteria are optional and combine with **AND** — `source: blog` plus
 `tags: [release]` means release posts *from the blog folder*. A feed with no
 criteria covers every post, at a path you choose.
 
+### Product feed for Google Merchant Center
+
+`format: google-merchant` writes the site's products as a Merchant Center feed
+(RSS 2.0 in the `g:` namespace). Google fetches the file on a schedule you set
+in Merchant Center, so nothing has to run or hold credentials (since 1.8.84,
+#196).
+
+```yaml
+feeds:
+  - path: /merchant.xml
+    format: google-merchant
+    title: "Example Shop"
+    source: shop               # the usual selection; without type: both posts and pages
+    merchant:                  # for what a product page does not say
+      availability: in_stock
+      brand: Example
+      condition: new
+```
+
+The rows come from the JSON-LD the page already gets (`.Schema`: site, section
+and page `schema:` merged), so a page that ships valid `Product` + `Offer` data
+needs no extra authoring. Every product is listed — `feed_items` does not cap a
+catalogue; `items:` does when set.
+
+| Google attribute | From |
+|---|---|
+| `id` | `sku`, then `merchant.id` in front matter, then the page's URL |
+| `title`, `description` | `name`, `description`; else the page's title and description |
+| `link` | `url` of the product or offer; else the page's canonical URL |
+| `image_link` | `image` (a URL, a list or an `ImageObject`), made absolute |
+| `price` | `offers.price` + `offers.priceCurrency` → `12.50 PLN` |
+| `availability` | `offers.availability` (`InStock` → `in_stock`, `OutOfStock`/`SoldOut`/`Discontinued` → `out_of_stock`, `PreOrder` → `preorder`, `BackOrder` → `backorder`); else the feed's `merchant.availability`; else `in_stock` with a warning |
+| `condition` | `itemCondition` (`UsedCondition` → `used`, `RefurbishedCondition` → `refurbished`); new is left out, as Google asks |
+| `brand` | `brand` (text or a `Brand`); else the feed's `merchant.brand` |
+| `gtin`, `mpn` | `gtin`/`gtin13`/`gtin12`/`gtin14`/`gtin8`, `mpn` |
+| `item_group_id` | a `ProductGroup`'s `productGroupID` (or `sku`): each of its `hasVariant` products is a row of its own and inherits what it leaves out |
+
+A page's `merchant:` front matter (`id`, `availability`, `condition`, `brand`,
+`gtin`, `mpn`) wins over the JSON-LD. `merchant.id` applies only to a page with
+one product; variants need their own `sku`.
+
+**Keep the id stable.** To Google a changed `id` is a new product, and the old
+one's history is gone. An id taken from the URL changes when the slug does, so
+the build says how many products use one — give them a `sku` or `merchant.id`.
+
+**Stock is what it was at build time.** Rebuild when it changes, or let Google
+update price and availability from the structured data on the product pages
+(Merchant Center's automatic item updates). The build warns about products
+that state no availability at all.
+
+A product Google would reject — no title, description, link, image or price —
+is left out with a warning naming the page. The feed is not offered to readers
+in the pages' autodiscovery links.
+
 ### Aggregating feeds (a "planet")
 
 A feed can merge several inputs — other sites' feeds and **your own posts** —
@@ -333,12 +393,12 @@ into one published feed. Read the sources with `format: feed`, then list them:
 ```yaml
 external_sources:
   sources:
-    ssg:  { type: http, url: https://ssg.tradik.com/feed.xml,  format: feed }
-    mddb: { type: http, url: https://mddb.tradik.com/feed.xml, format: feed }
+    ssg:  { type: http, url: https://blog.example.com/feed.xml,  format: feed }
+    mddb: { type: http, url: https://docs.example.com/feed.xml, format: feed }
 
 feeds:
   - path: /planet.xml
-    title: "Planet Tradik"
+    title: "Planet Example"
     format: rss
     aggregate:
       - source: ssg
@@ -348,7 +408,7 @@ feeds:
         exclude:
           tags: [events]        # narrow this source only
       - site: blog              # your own content — "*" for every post
-        label: "Tradik"
+        label: "Example"
     exclude:
       words: [sponsored]        # applies to the whole feed
     items: 200                  # how many entries the feed carries at all
@@ -464,12 +524,18 @@ building. See [CONTENT.md](CONTENT.md) for the source directory contract.
 | Key | Default | CLI | Purpose |
 |---|---:|---|---|
 | `engine` | Go behaviour | `--engine` | `go`, `pongo2`, `mustache` or `handlebars` |
-| `online_theme` | empty | `--online-theme` | GitHub, GitLab or direct ZIP theme URL |
+| `online_theme` | empty | `--online-theme` | GitHub, GitLab or direct ZIP theme URL; `repo@ref` pins a tag, branch or commit |
+| `online_theme_sha256` | empty | `--online-theme-sha256` | Expected SHA-256 of the theme archive; a mismatch stops the build before extraction |
 
 The `template` core value names the destination/local theme directory. Engine
 aliases accepted by the CLI include `jinja2`/`django` for Pongo2 and `hbs` for
 Handlebars. Non-Go themes must ship their own templates in the chosen syntax.
 See [TEMPLATES.md](TEMPLATES.md).
+
+A downloaded theme is code: its templates run during the build. Pin it to a tag
+or commit (`https://github.com/user/theme@v1.2.0`) and set
+`online_theme_sha256` to the archive's sum. Without a sum the build warns and
+prints the sum it saw, ready to copy into the config.
 
 ## Development server
 
@@ -479,6 +545,7 @@ See [TEMPLATES.md](TEMPLATES.md).
 | `host` | `127.0.0.1` | `--host` | Bind address |
 | `port` | `8888` | `--port` | TCP port. Taken if free; otherwise the server walks forward (8889, 8890, …, up to 64 ports) and announces where it landed. `0` = any free port |
 | `watch` | `false` | `--watch` | Rebuild after local file changes (content, templates, data and the config file) |
+| `auto_reload` | on with `--http --watch` | `--auto-reload`, `--no-auto-reload` | Inject a live-reload client into served HTML so the browser refreshes after each successful rebuild; `false` opts out |
 | `watch_runner` | `""` | `--watch-runner` | Spawns a background watch runner process; `none` turns off the one a configured worker would start |
 | `watch_runner_config` | `""` | `--watch-runner-config` | Config file the runner should use |
 | `watch_runner_dir` | `""` | `--watch-runner-dir` | Directory the runner starts in |
@@ -626,7 +693,8 @@ tls_key: key.pem
 http3: true
 gzip: true
 max_conns: 1024
-mem_limit: 512MiB
+resources:
+  memory: 512MiB
 ```
 
 | Key | Default | CLI | Purpose |
@@ -638,7 +706,7 @@ mem_limit: 512MiB
 | `http3` | `false` | `--http3` | Add HTTP/3/QUIC alongside HTTPS |
 | `gzip` | `false` | `--gzip` | Compress accepted responses |
 | `max_conns` | `0` | `--max-conns` | Connection limit; `0` is unlimited |
-| `mem_limit` | empty | `--mem-limit` | Go runtime soft memory limit |
+| `mem_limit` | empty | `--mem-limit` | Alias of `resources.memory`, which wins when both are set. Since 1.9.0 it applies to every command, not only the server — see [Running on a small machine](#running-on-a-small-machine-resources) |
 
 TLS enables HTTP/2 automatically through ALPN. HTTP/3 requires TLS and uses the
 same UDP port. Manual certificate/key configuration takes priority over
@@ -691,6 +759,12 @@ Google ranking; ssg's standard SEO surface (`seo`, `schema`, canonical,
 `sitemap`, `check_meta`/`check_images`, hreflang) covers Google's AI-optimization
 guidance. `robots_rules` lets you state crawler policy explicitly for both.
 
+Pages the site keeps out of search get no Markdown copy and no `llms.txt`
+line (1.9.0, #393). That means `robots: noindex`, `sitemap: no`, redirects
+and the 404 page, the same rule the sitemap applies. A page that lists
+`markdown` in its own `outputs:` still gets the file, but `llms.txt` leaves it
+out while it says `noindex`.
+
 The `permalinks` map contains the optional `post` and `page` patterns. Permalink
 tokens are `:year`, `:month`, `:day`, `:slug` and `:category`.
 
@@ -699,7 +773,7 @@ tokens are `:year`, `:month`, `:day`, `:slug` and `:category`.
 `?query` across. **Only in-repository links**: an href with a scheme or a `//`
 prefix is left alone, so a link to a file's history on a code host stays where
 it points even though it ends in `.md`. The emitted URL follows
-[`pretty_urls`](#link-checking), so the rewriter and `check_redirects` agree
+[`pretty_urls`](#links-the-host-redirects-pretty_urls-check_redirects), so the rewriter and `check_redirects` agree
 about the same link. `strip_md_link_text` complements it at publish time: when a
 link's visible text is exactly a filename ending in `.md`, the `.md` is dropped
 (`[CONFIGURATION.md](CONFIGURATION.md)` renders as "CONFIGURATION"). Only bare
@@ -718,8 +792,8 @@ link inside the code). `autolink_list_items: false` turns it off.
 
 ```yaml
 link_rewrites:
-  "../examples/": "https://github.com/spagu/ssg/tree/main/examples/"
-  "../.ssg.yaml.example": "https://github.com/spagu/ssg/blob/main/.ssg.yaml.example"
+  "../examples/": "https://code.example.com/ssg/tree/main/examples/"
+  "../.ssg.yaml.example": "https://code.example.com/ssg/blob/main/.ssg.yaml.example"
 ```
 
 With both set, `check_links` on a documentation site can reach zero warnings.
@@ -844,6 +918,10 @@ outputs_custom:
 The template receives `.Page`, `.Site`, `.Domain` and `.Content` (the rendered
 body), plus your theme's helpers and `xmlEscape`.
 
+A custom taxonomy can publish these formats beside its index and term pages
+too, with `outputs:` on the taxonomy; the template then gets the taxonomy view's
+data instead of `.Page`. See [TAXONOMIES.md](TAXONOMIES.md#custom-output-formats).
+
 Custom formats render through **text/template**, not html/template, and that
 difference is deliberate: a custom format is by definition not HTML, and
 contextual HTML escaping is wrong everywhere else — it turns an XML declaration
@@ -861,6 +939,56 @@ RSS and Atom are representations of a **collection**, not of a page. A per-page
 stay where they are — `feed:` and `feeds:` — and are documented under
 [Blog, feeds and search](#blog-feeds-and-search).
 
+## Running on a small machine (`resources`)
+
+A build uses the whole machine by default: one worker per CPU and as much
+memory as the site needs. Next to other services on a small VPS, on a shared CI
+runner or in a container with a memory limit, one block sets a ceiling for
+**every command**: a build, `--watch`, `--http`, `ssg mcp`, `ssg daemon` and
+`ssg migrate` (1.9.0).
+
+```yaml
+resources:
+  cpu: 2            # use at most 2 CPUs; also caps build_workers
+  memory: 512MiB    # soft memory limit for the whole process; "none" = no limit
+  gc_percent: 50    # optional; lower = smaller heap, more GC work
+```
+
+| Key | Default | CLI | Purpose |
+|---|---:|---|---|
+| `resources.cpu` | no cap | `--cpu-limit=N` | Caps `GOMAXPROCS` and every worker pool (pages, images, WebP/AVIF, TTS). An explicit `build_workers` above it is lowered to it, and the external encoders, started one per worker, stay inside it too |
+| `resources.memory` | 90% of a cgroup limit | `--mem-limit=SIZE` | Soft limit for the process: `512MiB`, `2GiB`, `500MB`, a byte count, or `none` |
+| `resources.gc_percent` | Go's `100` | `--gc-percent=N` | Heap growth allowed between collections; `-1` turns the collector off |
+
+The older keys still work: `mem_limit` is `resources.memory` when the block
+leaves it unset, and `build_workers` still sets the worker count. A command-line
+flag overrides the file.
+
+**These are ceilings, not guarantees.** Go's memory limit is soft: the
+collector works harder as the heap nears it, and a single allocation larger
+than the limit still succeeds. A limit keeps a build polite on a shared
+machine; it does not make a site that needs 2 GiB fit in 512 MiB, it makes it
+slower until it does not fit at all.
+
+**In a container**, when no memory is configured, ssg reads the cgroup v2
+`memory.max` of its own cgroup and sets the limit to 90% of the tightest one,
+so the collector tries harder before the kernel's OOM killer acts. `memory:
+none` turns that off. Go already fits `GOMAXPROCS` to a cgroup CPU limit by
+itself. The effective values are printed once at startup:
+
+```text
+   🧠 memory limit 512 MiB · ⚙️ 2 CPU(s)
+```
+
+`ssg mcp` prints the line on stderr, since its stdout is the protocol. `ssg
+daemon` and `ssg migrate` have no site config of their own and take the flags
+only. Each project the daemon runs is an ordinary `ssg --watch` process, so
+it applies its own `resources:` block; the daemon's flags limit the supervisor.
+
+To tune the numbers, build with `--profile`: the report shows the peak
+resident memory and the number of GC cycles (`memory.peak_rss_bytes` and
+`memory.gc_cycles` in `build-profile.json`; Windows reports no RSS).
+
 ## Images
 
 | Key | Default | CLI | Purpose |
@@ -871,7 +999,9 @@ stay where they are — `feed:` and `feeds:` — and are documented under
 | `reconvert_images` | `false` | `--reconvert-images` | Ignore existing conversion result |
 | `image_sizes` | empty | `--image-sizes` | Responsive widths; no upscaling |
 | `image_sizes_attr` | `100vw` | `--image-sizes-attr` | Generated HTML `sizes` value |
-| `build_workers` | one per CPU | `--workers=N` | Parallel build workers; `0` = off (sequential) |
+| `build_workers` | one per CPU | `--workers=N` | Parallel build workers; `0` = off (sequential); capped at `resources.cpu` |
+| `images_gc` | `false` | `--images-gc` | After the build, prune image-cache entries the build no longer references |
+| `images_gc_dry` | `false` | `--images-gc-dry` | Only report what `images_gc` would remove |
 
 `build_workers` (`--workers=N`) sets how many **pages/posts render and images
 convert to WebP in parallel**. Leave it unset to use the **whole machine** (one
@@ -891,9 +1021,18 @@ just images under your content. There is no per-directory exclude list;
 `webp_keep_original` (below) is the escape hatch when something must keep its
 original extension.
 
+**Platform icons are the exception** (1.9.0, #392). They are never converted
+and their links are never rewritten. iOS takes only a PNG touch icon, and a
+manifest is JSON that the rewrite does not read. An icon is anything a page
+links with `rel` `icon`, `shortcut icon`, `apple-touch-icon(-precomposed)` or
+`mask-icon`, plus the `icons` of a web app manifest. The manifest can be linked
+with `rel="manifest"` or sit at the root as `manifest.webmanifest`,
+`site.webmanifest` or `manifest.json`.
+
 By default WebP conversion **replaces** each original in the output (the
 historical behaviour): `logo.png` becomes `logo.webp` and references are
-rewritten to match. Rewriting covers `<img src>`/`srcset`, `href`, CSS
+rewritten to match. Rewriting covers `<img src>`/`srcset`, the lazy-load
+`data-src`/`data-srcset`/`data-bg` attributes (since 1.9.3), `href`, CSS
 `url(...)`, the `og:image`/`twitter:image` social-preview metas and the JSON-LD
 `image` value — so share previews follow the conversion instead of pointing at a
 removed `.jpg`. Only references SSG cannot resolve to a local file stay on the
@@ -906,17 +1045,23 @@ from JS, set `webp_keep_original: true` to emit the `.webp` next to the original
 rewritten HTML/CSS references serve WebP, the runtime `.png` still resolves
 (v1.8.5) — or reference it from HTML/CSS instead so the rewrite can reach it.
 
+With `webp_keep_original: true` the `og:image` and `twitter:image` metas keep
+pointing at the original (since 1.9.0). The original is still published, and
+some link-preview consumers — LinkedIn's among them — do not render a WebP
+share card. Page images and the JSON-LD `image` still move to WebP.
+
 ## Authoring
 
 | Key | Default | CLI | Purpose |
 |---|---:|---|---|
-| `sanitize_html` | `false` | `--sanitize-html` | Apply bluemonday's UGC policy to rendered content |
+| `sanitize_html` | `false` (`true` for an MDDB build without `mddb.trusted`) | `--sanitize-html` | Apply bluemonday's UGC policy to rendered content |
 | `highlight` | `false` | `--highlight` | Highlight fenced code with Chroma |
 | `highlight_style` | `github` | `--highlight-style` | Chroma style name |
 | `highlight_line_numbers` | `false` | — | Prefix highlighted blocks with line numbers (needs `highlight`) |
 | `toc` | `false` | `--toc` | Expose `.TOC`; `[toc]` also expands |
 | `toc_depth` | `3` | `--toc-depth` | Maximum TOC heading level |
 | `heading_anchors` | `false` | — | Append a `#` link to its own id on each heading, so a reader can copy the section's address |
+| `attribution` | `true` | — | Keep the generator meta tag and the "Built with ssg" notice in every page. `false` is allowed on non-commercial sites; a commercial site needs a commercial license — [LICENSING.md](LICENSING.md) |
 | `math` | `false` | `--math` | Inject KaTeX on pages containing math |
 | `mermaid` | `false` | — | Render ```` ```mermaid ```` fences as diagrams |
 | `mermaid_theme` | — | — | Mermaid built-in theme: `default`, `neutral`, `dark`, `forest`, `base` |
@@ -1053,10 +1198,10 @@ shortcode_errors: strict
 | `type_archives` | empty | — | Which content types get a listing at `/<type>/` — the archive the source CMS renders and links to from its own menu, which is not a document and so is in no export. Keyed by type slug: `realizacje: true` builds it, `reviews: false` refuses it even when the export says the source had one. Rendered by `category.html` with `Kind: "type"`. See [Custom post type archives](#custom-post-type-archives) |
 | `sanitize_output` | `on` | — | Remove invisible characters from generated HTML — zero-width spaces, bidi overrides, tag characters. `warn` reports without changing, `off` does neither. Never touches `<pre>`/`<code>`. See [Invisible characters](#invisible-characters) |
 | `image_metadata` | `strip` | — | Remove EXIF/IPTC/XMP from published images. `keep` publishes it |
-| `image_formats` | `[webp]` | — | Formats to publish images in, in preference order — `[avif, webp]` offers AVIF first. See [Image formats](#image-formats) |
-| `avif_quality` | `45` | — | `avifenc -q` for the AVIF pass |
+| `image_formats` | `[webp]` | `--image-formats=avif,webp` | Formats to publish images in, in preference order — `[avif, webp]` offers AVIF first. See [Image formats](#image-formats) |
+| `avif_quality` | `45` | `--avif-quality` | `avifenc -q` for the AVIF pass |
 | `feed` | `false` | `--feed` | Root and category/tag **Atom** feeds at `/feed.xml` |
-| `feeds` | empty | config only | Extra feeds — each with its own selection, `path`, `title` and **format** (`atom`, `rss`, `json`) |
+| `feeds` | empty | config only | Extra feeds — each with its own selection, `path`, `title` and **format** (`atom`, `rss`, `json`, `google-merchant`) |
 | `feed_autodiscovery` | `true` | config only | Inject `<link rel="alternate">` for every feed into every page |
 | `feed_items` | `20` | `--feed-items` | Maximum feed items |
 | `feed_full_content` | `false` | config only | Full rendered body instead of summary; its relative `src`, `href`, `srcset` and `url()` become absolute against the post's address, since a feed reader has no page to resolve them against (#347) |
@@ -1210,7 +1355,7 @@ implemented.
 | `strict` | `false` | `--strict` | Escalate schema violations, link checks and unparseable frontmatter to build failures |
 | `route_manifest` | `false` | `--route-manifest` | Write `routes.json` — every route and its metadata |
 | `build_report` | `` | `--build-report[=FILE]` | Write a JSON report of the build into the output directory: version, duration, pages and files written, content by type. A bare flag writes `build.json` |
-| `profile` | `` | `--profile[=json]` | Report where the build's time went; `json` also writes `build-profile.json` |
+| `profile` | `` | `--profile[=json]` | Report where the build's time went, with peak RSS and GC cycles; `json` also writes `build-profile.json` |
 | `profile_pprof` | `` | `--profile-pprof=DIR` | Also write `cpu.prof` and `heap.prof` for `go tool pprof` |
 | `lastmod_from_git` | `false` | `--lastmod-from-git` | Use Git commit dates in sitemap. Needs `git` on `PATH`; the snap cannot see it (see [CONTENT.md](CONTENT.md#dates)) |
 
@@ -1245,7 +1390,8 @@ The middle row is the useful one: a theme can own its Open Graph tags — to con
 no need to hand-write JSON-LD. It also fills in a missing meta description from the
 frontmatter `description:`.
 
-The old `seo_off`/`--seo-off` setting is a deprecated no-op. Plain `--check-links`
+`seo_off: true` and `--seo-off` are deprecated: SEO is off unless you turn it
+on, so their only effect is to force it off over `seo: true`. Plain `--check-links`
 selects warning mode; strict mode fails the build.
 
 ### Invisible characters
@@ -1613,14 +1759,32 @@ Google Web Stories (AMP) made from posts. See [WEB_STORIES.md](WEB_STORIES.md).
 | Key | Default | Description |
 |-----|---------|-------------|
 | `web_stories.enabled` | `false` | Make a story from each selected post with a featured image. `web_stories: true` is shorthand. |
-| `web_stories.publisher_logo` | — | Square image, at least 96×96, found like `imageResize` sources. Required: without it no story is made (build warning). |
+| `web_stories.publisher_logo` | — | Square image, at least 96×96, found like `imageResize` sources: inside `assets/`, the static dir, the content source or the theme, or from the project root (`assets/logo.png`). Required: without it no story is made (the warning lists where it looked). |
 | `web_stories.sections` | `[posts]` | `posts`, `pages`, or a content directory (`posts/recipes`). |
 | `web_stories.url` | `/web-stories/` | The hub; stories live at `<url><slug>/`. |
 | `web_stories.pages` | `4` | Most photo pages between the cover and the last page. |
 | `web_stories.min_images` | `2` | Distinct images (featured included) a post needs. |
 | `web_stories.cta` | `Read the full article` | Last page's link text (overrides the i18n catalog). |
+| `web_stories.background_audio` | — | The stories' soundtrack, a site path or URL. A post's `story_audio:` overrides it (`false`: silent) (1.9.5). |
+| `web_stories.narration` | `false` | Record each page's text through `tts:`; pages advance with it (1.9.4). |
 
 Images are WebP when `webp: true` or `image_formats` includes `webp`, JPEG otherwise.
+
+#### Story mode
+
+A reading companion and fullscreen presentation on articles, with narrator,
+music, share and deep links, feeding the same slides to the Web Story (1.9.4).
+See [STORY.md](STORY.md).
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `story.enabled` | `false` | `story: true` turns it on; a mapping turns it on unless it says `enabled: false`. |
+| `story.sections` | `[posts]` | `posts`, `pages`, or a content directory (`posts/recipes`). |
+| `story.rules` | — | `{when: {category, tags, section, contains}, set: {…}}`: settings for the pages a rule matches. |
+| `story.*` | — | Every other key goes to the page script: `progress`, `stage`, `slides`, `widgets`, `audio`, `narrator`, `slideshow`, `share`, `analytics`, `labels`, `theme`… snake_case or camelCase. |
+
+A post adds its own settings in `story:` front matter or in
+`<name>.story.yaml` beside its source; `story: false` keeps it out.
 
 #### A résumé
 
@@ -1849,6 +2013,83 @@ The bundled `ssgtheme` uses the page's own `featured_image` when it has one and
 this default otherwise, and drops `twitter:card` to `summary` when there is no
 image at all, so the tag describes what is actually there.
 
+### A card for every page (`og_cards`)
+
+One site-wide picture makes every shared link look the same. `og_cards` draws
+a card for each page that has no `featured_image` of its own. It is off unless
+the site asks for it, and the site has to say how its cards look: there are no
+default colours, because a card is the site's own look. Each card shows the page's title,
+its category above it and the site's name below, 1200×630, drawn at build time. It is
+done in Go, so there is no browser, no external tool and no service to run.
+Shared links show the card on Facebook, LinkedIn, X, Slack, Discord, Telegram,
+WhatsApp and iMessage.
+
+```yaml
+og_cards:
+  text_color: "#FFFFFF"   # required
+  background: "#202124"   # required, unless background_image is set
+  accent_color: "#8AB4F8" # the bar on the left and the category line; default text_color
+  dir: og                 # output directory → /og/<page>-<key>.png
+  sections: [posts, pages]
+  width: 1200
+  height: 630
+  background_image: assets/card-bg.jpg   # may replace `background`; cropped to fill
+  overlay: 0.6            # 0..1: how strongly `background` covers the image
+  logo: static/logo.png   # optional; bottom-right, up to 72 px tall
+  font: assets/Inter-Bold.ttf            # optional TTF/OTF; default Go Bold
+  format: png             # or jpeg
+  quality: 85             # jpeg only
+```
+
+| Key | Default | Notes |
+|-----|---------|-------|
+| `dir` | `og` | Under the output directory |
+| `sections` | `posts`, `pages` | Which pages get a card |
+| `width`, `height` | `1200`, `630` | The text scales with the height |
+| `text_color` | **required** | `#rgb` or `#rrggbb` |
+| `background` | **required** without `background_image` | `#rgb` or `#rrggbb`; with an image, the colour of the overlay (black if not set) |
+| `accent_color` | `text_color` | Bar on the left and the category line |
+| `background_image` | none | PNG or JPEG, path from the project root |
+| `overlay` | `0.6` | `0` shows the image untouched |
+| `logo` | none | PNG or JPEG |
+| `font` | Go Bold | Covers Latin (with Polish, Czech, …), Greek and Cyrillic. For CJK, Arabic or Hebrew, name a font that has the glyphs |
+| `format` | `png` | `jpeg` is smaller when `background_image` is a photo |
+| `quality` | `85` | JPEG quality |
+
+**What a card shows.** The title is set as large as the space allows, from 76 px
+down to 40 px, and wrapped at spaces. A title still too long at 40 px ends in an
+ellipsis. The line above the title is the page's `category`, or the name of its
+first category. The footer is the site's `title`, else `marketing.og_site_name`,
+else the domain.
+
+**Precedence.** A page's `featured_image` always wins. The card comes next,
+and `marketing.og_image` is the fallback for pages without either (a section
+left out of `sections`, listings). With SEO injection on (`seo: true`), the
+generator writes `og:image`, `twitter:image`, `og:image:width`/`height` and the
+JSON-LD `image`. A theme that writes its own tags reads the card's URL as
+`.Page.OGCard` / `.Post.OGCard` (see [TEMPLATES.md](TEMPLATES.md)). The bundled
+`ssgtheme` already does.
+
+**Required values.** `og_cards: true` on its own, or a mapping without
+`text_color`, or without both `background` and `background_image`, stops the
+build with a message naming the key to add. Nothing is drawn with colours the
+site did not choose.
+
+**Colours and contrast.** If the colours fall under 4.5:1 (WCAG 2.2 AA), the
+build says so. The check is skipped over a `background_image`, where the photo
+decides. It does not stop the build. For example, Google Grey 900 `#202124` with
+white text (16:1) and a Blue 200 `#8AB4F8` accent (7.6:1) passes.
+
+**Format.** The platforms do not render SVG previews, and LinkedIn and WhatsApp
+are unreliable with WebP. So the cards are PNG or JPEG, and the `webp`/`avif`
+passes leave the card directory alone.
+
+**Rebuilds.** The file name carries a key built from the layout (colours, the
+bytes of the font, logo and background) and the page's words. The platforms
+cache `og:image` by URL for weeks, so a changed title gets a new URL and is
+fetched again. An unchanged card already in the output is not touched. A clean
+output copies cards from `.ssg-cache/ogcards/` instead of drawing them again.
+
 ### An empty canonical is always reported
 
 Separate from the sitemap, and needing no configuration: every build says so when
@@ -1893,17 +2134,47 @@ small site.
 ```yaml
 sitemaps:
   - path: /sitemap-blog.xml
-    source: blog                        # a content_sources path / content folder
+    source: blog                        # a content folder, MDDB section or external source
 
   - path: /sitemap-archives.xml
     include: [categories, tags, authors]
 ```
 
-Selectable in `include:`: `home`, `listing`, `pages`, `posts`, `static`,
-`categories`, `tags`, `authors`, `taxonomies`. An unknown name fails the build
-rather than writing an empty file. Narrowings combine with **AND**, and a spec
-with none of them claims everything still unclaimed — which is how a catch-all
-is written.
+Three narrowings, all optional:
+
+| Key | Selects |
+|---|---|
+| `source` | Documents from a content folder (that folder and everything beneath it), an MDDB section, or an `external_sources` entry by name (1.9.0) |
+| `include` | Kinds of URL: `home`, `listing`, `pages`, `posts`, `static`, `categories`, `tags`, `series`, `authors`, `taxonomies` |
+| `prefix` | URL path prefix, or a list of them (1.9.0). Compared after `base_path` and after any language prefix, whole segments only: `/net/` does not claim `/netbsd/x/`. Works for every kind |
+
+An unknown `include:` kind, and a `source:` that is neither a content folder
+nor an `external_sources` entry, fail the build rather than writing an empty
+file. Narrowings combine with **AND**, and a spec with none of them claims
+everything still unclaimed — which is how a catch-all is written.
+
+**A generated site, split per section.** Pages built from `external_sources`
+in `mode: content` used to be one block of `pages`, so a site made almost
+entirely of them had nothing to split on. Each such page now carries its
+source's name, and `prefix:` splits within a source:
+
+```yaml
+sitemaps:
+  - path: /sitemap-compare.xml
+    source: compare              # an external_sources entry
+  - path: /sitemap-openbsd.xml
+    prefix: /openbsd/
+  - path: /sitemap-netbsd.xml
+    prefix: [/netbsd/, /pkgsrc/]
+  - path: /sitemap-people.xml
+    include: [taxonomies]
+  - path: /sitemap-freebsd.xml
+    source: ports                # what is left of ports after the prefixes above
+  # everything else -> sitemap-main.xml
+```
+
+A declared file over 50,000 URLs or 50 MB is still split
+(`sitemap-freebsd-1.xml`, …) and indexed.
 
 Selection is a **partition, not a set of views**: a URL lands in the first spec
 that matches it, so order matters like a routing table, and no URL is listed
@@ -2067,7 +2338,7 @@ schema:
   publisher:
     "@type": Organization
     name: Acme Inc.
-    logo: https://acme.example/logo.png
+    logo: https://example.com/logo.png
 ```
 
 ```yaml
@@ -2151,8 +2422,8 @@ Non-default languages are written below `/<lang>/`. Templates receive `.Lang`,
 `.Languages`, `.DefaultLanguage`, `.Translations` and `.Hreflang`. Timezones
 affect permalink calendar tokens and template dates; feeds and sitemap remain UTC.
 
-For the opt-in expanded multilingual system, translation dictionaries and
-prefix/fallback policies, see [I18N.md](I18N.md).
+For the opt-in expanded multilingual system (the `i18n:` block), translation
+dictionaries and prefix/fallback policies, see [I18N.md](I18N.md).
 
 ### A language for a whole section (`language_sections`)
 
@@ -2277,6 +2548,12 @@ Commands are argv-split, time-limited to 60 seconds, and never loaded from
 content. Hooks receive `SSG_OUTPUT_DIR`, `SSG_PHASE`, and for page hooks
 `SSG_PAGE_PATH`, plus exported custom variables.
 
+Before rendering, ssg looks up the program of every `pre_build` and
+`post_build` hook and stops at once if one is missing (since 1.9.2), rather than
+after every page has rendered. The **snap** cannot run programs installed on
+the host, so a hook that calls `node`, `python` or similar needs another
+install method — see [INSTALL.md](INSTALL.md#hooks-cannot-run-host-programs-in-the-snap).
+
 ## MDDB content
 
 MDDB replaces local Markdown with remote documents:
@@ -2307,6 +2584,7 @@ mddb:
 | `mddb.lang` | empty | `--mddb-lang` |
 | `mddb.api_key` | empty | `--mddb-key` |
 | `mddb.allow_http` | `false` | — |
+| `mddb.trusted` | `false` | `--mddb-trusted` |
 | `mddb.timeout` | `30` | `--mddb-timeout` |
 | `mddb.batch_size` | `1000` | `--mddb-batch-size` |
 | `mddb.watch` | `false` | `--mddb-watch` |
@@ -2361,8 +2639,16 @@ HTTP commonly uses `http://localhost:11023`; gRPC commonly uses
 `localhost:11024`. MDDB watch polls the collection checksum and rebuilds when it
 changes. Values beginning with `$` are resolved only inside `variables`, not in
 arbitrary configuration fields. In CI, pass an MDDB secret at runtime, for
-example `--mddb-key="$MDDB_API_KEY"`. Use `sanitize_html` when remote content is
-not fully trusted.
+example `--mddb-key="$MDDB_API_KEY"`.
+
+**Content from MDDB is sanitized by default** (since 1.9.0). Markdown renders
+raw HTML, so a compromised or shared MDDB server could otherwise plant a
+`<script>` in every generated page. An MDDB build therefore applies
+`sanitize_html` on its own. When the server holds only your own authors'
+content and pages need raw HTML that the UGC policy strips (inline `<script>`,
+`<iframe>` outside the protected shortcodes, `style` attributes), set
+`mddb.trusted: true` or pass `--mddb-trusted`. `sanitize_html: true` still
+forces the sanitizer, trusted or not.
 
 ### Structured frontmatter through MDDB's flat meta
 
@@ -2483,7 +2769,7 @@ ai:
   cache_dir: .ssg-cache/ai    # commit it for reproducible, key-free CI builds
   models:                     # endpoints — the connection
     fast:
-      url: https://api.openai.com/v1/chat/completions
+      url: https://ai.example.com/v1/chat/completions
       key: $OPENAI_KEY
       model: gpt-4o-mini
       system: "Answer in one short paragraph."   # house style, inherited by agents
@@ -2545,7 +2831,7 @@ never fires unless you pass `--notify`, so local dev builds stay quiet.
 notify_state: .ssg-notifications.json   # commit it — CI needs the sent-history
 notifications:
   - name: zapier
-    url: https://hooks.zapier.com/hooks/catch/…   # fans out to X / LinkedIn / …
+    url: https://hooks.example.com/catch/…   # fans out to X / LinkedIn / …
     headers: { X-Token: $ZAP_TOKEN }
 ```
 
@@ -2601,15 +2887,28 @@ Presentation does not live in templates alone — the theme, the syntax-highligh
 style, whether diagrams render. So the designer gets `designer_config_read` and
 `designer_config_set` over a **narrow allow-list** of presentation settings:
 
-`template`, `templates_dir`, `static_dir`, `mermaid`, `mermaid_theme`,
-`mermaid_background`, `highlight`, `highlight_style`, `highlight_line_numbers`,
-`math`, `toc`, `toc_depth`, `minify_html`, `minify_css`, `minify_js`,
-`minify_all`, `pretty_html`, `sourcemap`, `fingerprint`, `paginate`, `webp`,
-`webp_quality`, `image_sizes_attr`.
+| Kind | Keys |
+|---|---|
+| Site | `title`, `description` |
+| Theme and rendering | `template`, `templates_dir`, `static_dir`, `mermaid`, `mermaid_theme`, `mermaid_background`, `highlight`, `highlight_style`, `highlight_line_numbers`, `math`, `toc`, `toc_depth`, `paginate` |
+| Text | `clean_special_chars`, `autolink_list_items`, `strip_md_link_text` |
+| Output | `minify_html`, `minify_css`, `minify_js`, `minify_all`, `pretty_html`, `sourcemap`, `fingerprint` |
+| Images | `webp`, `webp_quality`, `image_formats`, `image_sizes_attr` |
+| Switches (1.9.6) | `story`, `listen`, `print`, `cook_mode`, `heading_anchors`, `og_cards`, `breadcrumbs` |
+| For agents (1.9.6) | `markdown_publish`, `site_graph`, `webmcp`, `search_index`, `outputs` |
+| Share identity (1.9.6) | `marketing.og_site_name`, `marketing.og_image`, `marketing.twitter_site`, `marketing.theme_color`, `marketing.logo`, `marketing.favicon`, `marketing.apple_touch_icon` |
+
+A **switch** takes `true` or `false` and writes `<key>.enabled`, so the
+feature's other settings (a story's slideshow, the Listen button's voice) stay
+as you wrote them. A switch you wrote as `heading_anchors: true` stays a
+scalar. `designer_config_read` shows a switch by its `enabled` alone. **Lists**
+(`image_formats`, `outputs`) are given comma-separated, `"webp,avif"`. A list
+never replaces a mapping: `outputs:` written per content type is refused, and
+you edit it in the file.
 
 Every other key is refused by construction — secrets (API keys, tokens,
-`jwt_secret`, auth), deployment, server, endpoints, hooks, `sass_binary` (an
-executable path) and all content/URL structure. `designer_config_read` shows only
+`jwt_secret`, auth, `marketing.verification`), deployment, server, endpoints,
+hooks, `sass_binary` (an executable path) and all content/URL structure. `designer_config_read` shows only
 the writable keys, so the rest of the file is never even surfaced to the model.
 
 Three properties make this safe to hand over:
@@ -2702,7 +3001,7 @@ dynamic bits for free. Empty `endpoints:` ⇒ a pure-static build, unchanged.
 | Key | Notes |
 |---|---|
 | `path` | Request path handled by this endpoint, e.g. `/api/quote` (exact match) |
-| `type` | `redirect`, `proxy` or `form` |
+| `type` | `redirect`, `proxy`, `form` or `auth` |
 | `to` / `status` | `redirect`: destination and 3xx code (default `302`) |
 | `target` | `proxy`: upstream URL; the client's path is replaced by the target's |
 | `methods` | `proxy`: allowed HTTP methods (empty = any) |
@@ -2788,6 +3087,10 @@ self-hosted server (on a platform the upstream runs at the edge).
 | `worker.routes_include` | `["/api/*"]` | paths that invoke the Function |
 | `worker.routes_exclude` | empty | paths carved back out to static |
 | `worker.wrangler_config` | empty | wrangler config outside the project root |
+| `worker.source` | empty | Fetch the worker from a repo or ZIP URL into `dir` instead of vendoring it |
+| `worker.auth` | empty | Credentials for a private `source`: `type` `bearer`, `basic` or `header`; secret fields must be `$ENV` references |
+| `worker.config` | empty | Free-form per-worker settings, passed to the worker phase as-is |
+| `workers` | empty | A list of worker definitions (each with a `name` plus the keys above); supersedes `worker:` when set |
 
 Wires a Cloudflare Pages Function into the build for transactional endpoints
 (payments, forms, dynamic pricing, tracking). Scaffold one with `ssg new worker
@@ -2799,6 +3102,45 @@ worker:
   mode: functions
   routes_include:
     - /api/*
+```
+
+### Web Push (`web_push`)
+
+| Key | Default | Notes |
+|---|---:|---|
+| `web_push` | `false` | `true`, or a mapping; a mapping turns it on unless it says `enabled: false` |
+| `web_push.endpoint` | `/api/push` | where the `web-push` worker answers |
+
+Browser notifications about new posts need a server: someone has to keep the
+subscriptions and sign every message with a private key. The `web-push` worker
+does that (`ssg new worker web-push`, see
+[its README](../workers/web-push/README.md)) and ships `sw.js` and `push.js`.
+`web_push: true` makes the site ready for it:
+
+- writes `/manifest.webmanifest` from `.Site.Title`, `marketing.theme_color` and
+  the site's icons, unless the output already has one (from `static/` or the
+  theme). iOS delivers push only to a site added to the home screen, which needs
+  the manifest;
+- puts `<link rel="manifest">` and `<script src="/push.js" defer>` in every
+  page's `<head>`, skipping either one the theme already has;
+- warns when `push.js` or `sw.js` is missing from the output, because the worker
+  is not configured.
+
+The theme adds only the button. `push.js` shows it in a browser that supports
+push, and asks for permission only when it is clicked:
+
+```html
+<button data-push-subscribe hidden data-label-on="Notify me about new posts"
+        data-label-off="Stop notifications">Notify me about new posts</button>
+```
+
+```yaml
+web_push: true
+feed: true            # the worker reads /feed.xml to find new posts
+worker:
+  dir: workers/web-push
+  routes_include:
+    - /api/push/*
 ```
 
 ## Complete example

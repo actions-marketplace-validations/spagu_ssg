@@ -1,6 +1,6 @@
 .\" SSG - Static Site Generator
 .\" Man page for ssg(1)
-.TH SSG 1 "2026-07-15" "1.8.82" "SSG Manual"
+.TH SSG 1 "2026-07-15" "1.9.6" "SSG Manual"
 .SH NAME
 ssg \- fast static site generator written in Go
 .SH SYNOPSIS
@@ -24,6 +24,9 @@ ssg \- fast static site generator written in Go
 .br
 .B ssg new worker
 .I template
+.br
+.B ssg new wrangler
+.RB [ \-\-config=\fIFILE\fR ]
 .br
 .B ssg init
 .RI [ source-name ]
@@ -67,6 +70,11 @@ ssg \- fast static site generator written in Go
 .B ssg daemon
 .RB [ \-\-config\ \fIFILE\fR ]
 .RB [ \-\-once ]
+.br
+.B ssg mcp
+.RB [ \-\-role=\fIROLE\fR ]
+.RB [ \-\-listen=\fIADDR\fR ]
+.RB [ \-\-no\-watch | \-\-watch ]
 .SH DESCRIPTION
 .B ssg
 is a fast and flexible static site generator that converts Markdown content
@@ -105,7 +113,19 @@ paths, regex-constrained params) are reported on stderr, never dropped silently.
 .B ssg new worker \fItemplate\fR
 Scaffold a Cloudflare Pages Functions template into \fB./workers/\fItemplate\fR
 and print the \fBworker:\fR config block. Templates: \fBcontact-form\fR,
-\fBstripe-checkout\fR, \fBdynamic-price\fR, \fBconversions-proxy\fR.
+\fBstripe-checkout\fR, \fBdynamic-price\fR, \fBconversions-proxy\fR,
+\fBcookie-consent\fR, \fBcomments\fR, \fBrepublish-trigger\fR, \fBnewsletter\fR,
+\fBrate-limit\fR and \fBweb-push\fR (browser notifications about new posts; the
+config key \fBweb_push: true\fR writes \fBmanifest.webmanifest\fR and puts the
+subscribe script in every page's head). Run without a template name it lists
+the templates and exits 2.
+.TP
+.B ssg new wrangler \fR[\fB\-\-config=\fIFILE\fR]
+Write a starter \fBwrangler.toml\fR for the workers the configuration declares
+(\fBworker:\fR or \fBworkers:\fR), with binding stubs to review before
+\fBwrangler pages dev\fR. An existing file is left untouched. Exits 1 when no
+worker is configured. The same file is written automatically before
+\fB\-\-wrangler\fR starts, when workers are configured and none exists.
 .TP
 .B ssg self-update-check
 Report whether a newer release exists. Prints the running version and how this
@@ -119,7 +139,8 @@ the check could not be made.
 .B ssg mddb push-theme \fR[\fB\-\-dry\fR] [\fB\-\-lang=\fICODE\fR] [\fB\-\-no\-validate\fR]
 Upsert every template and static asset into the MDDB collection named by
 \fBmcp.search.mddb_collection\fR, keyed by project-relative path, and delete
-documents whose file no longer exists. This is what lets \fBdesigner_find\fR
+documents whose file no longer exists (\fB\-\-dry\-run\fR is an alias of
+\fB\-\-dry\fR). This is what lets \fBdesigner_find\fR
 answer a question phrased as a sentence; without it the find tools scan the
 project locally, which needs no setup. \fB\-\-dry\fR reports without writing. Each document is checked against the
 collection before it is stored (MDDB 2.12.0+), so lost structured frontmatter is
@@ -130,10 +151,11 @@ endpoint is detected once and skipped silently.
 .TP
 .B ssg cache \fR{\fBstats\fR|\fBclean\fR|\fBgc\fR} [\fB\-\-namespace=\fINAME\fR] [\fB\-\-dry\fR]
 Operate on every SSG disk cache under \fB.ssg-cache/\fR (images,
-external-sources, ai, graph, markdown). \fBstats\fR prints entries and size per namespace;
+external-sources, ai, graph, markdown, tts). \fBstats\fR prints entries and size per namespace;
 \fBclean\fR removes a namespace (or all); \fBgc\fR reclaims expired
 external-source entries (image GC needs the build manifest — use
-\fB\-\-images\-gc\fR on a build). The pre-1.8.27 \fB.ai-cache\fR root is shown
+\fB\-\-images\-gc\fR on a build). \fB\-\-dry\fR makes \fBclean\fR and \fBgc\fR
+report what they would remove and remove nothing. The pre-1.8.27 \fB.ai-cache\fR root is shown
 as \fBai (legacy)\fR while it exists.
 .TP
 .B ssg config \fR{\fBview\fR|\fBset\fR|\fBunset\fR} [\fIpath\fR] [\fIvalue\fR] [\fB\-\-effective\fR] [\fB\-\-string\fR] [\fB\-\-json\fR] [\fB\-\-config=\fIFILE\fR]
@@ -196,6 +218,18 @@ selected with \fB\-\-custom\-types\fR \fIslug,slug\fR or skipped with
 \fB\-\-no\-custom\-types\fR. Menus reach templates as
 \fB.Site.Menus.\fIlocation\fR.
 .IP
+\fB\-\-no\-crawl\fR skips the SEO/marketing crawl (faster; no tracking ids,
+social profiles or icons in \fBmetadata.json\fR). \fB\-\-user\-agent\fR \fIS\fR
+identifies the engine as \fIS\fR \(em bot protection commonly matches the
+engine's default agent and answers every request with a 500, which looks
+exactly like a broken REST API. \fB\-\-rate\-limit\fR \fIMS\fR waits that many
+milliseconds between the engine's requests. \fB\-\-engine\-arg\fR \fIA\fR hands
+\fIA\fR to the engine verbatim; it is repeatable, a flag and its value are
+separate arguments, and it comes after everything ssg derives, so it can
+override it. The engine's own \fB\-\-no\-posts\fR, \fB\-\-no\-pages\fR,
+\fB\-\-no\-media\fR, \fB\-\-no\-comments\fR and \fB\-\-no\-products\fR are refused
+with a hint naming the \fB\-\-content\fR selection that means the same.
+.IP
 The engine that runs is the newest one ssg can reach, and the report names it.
 \fB\-\-engine\fR \fIPATH\fR (or \fBSSG_WPEXPORTER\fR) chooses one outright; a
 named binary that cannot be run is an error, never a silent fall back. Otherwise
@@ -225,7 +259,7 @@ language\fR holding markup in a document that carries raw markup outside it as
 well. A deliberate sample is written as \fB```html\fR and does not sit in a page
 otherwise made of divs. Front matter and list continuations are never touched.
 .TP
-.B ssg mcp \fR[\fB\-\-role\fR=\fIROLE\fR] [\fB\-\-listen\fR=\fIADDR\fR] [\fB\-\-token\fR=\fISECRET\fR] [\fB\-\-no\-stdio\fR] [\fB\-\-watch\fR]
+.B ssg mcp \fR[\fB\-\-role\fR=\fIROLE\fR] [\fB\-\-listen\fR=\fIADDR\fR] [\fB\-\-token\fR=\fISECRET\fR] [\fB\-\-allow\-origin\fR=\fIORIGIN\fR] [\fB\-\-no\-stdio\fR] [\fB\-\-watch\fR|\fB\-\-no\-watch\fR]
 Model Context Protocol development server for AI-assisted editing. Speaks
 \fBstdio\fR by default, so an assistant launches it. \fB\-\-listen\fR additionally
 serves the MCP endpoint at \fBhttp://\fIADDR\fB/mcp\fR over Streamable HTTP, the
@@ -249,18 +283,21 @@ access tokens from that issuer only when they are signed with its keys,
 unexpired, have an audience naming \fBresource\fR and carry the scopes. No token
 is minted then. See \fIdocs/MCP_TRANSPORTS.md\fR.
 .IP
+Edits made through MCP rebuild the site; \fB\-\-no\-watch\fR edits only, with no
+rebuilds. \fB\-\-role\fR is \fBdesigner\fR or \fBcontent\fR and may be repeated.
 \fB\-\-watch\fR additionally polls the filesystem, so edits made outside MCP rebuild
 and reload the \fB\-\-http\fR preview as well; one process then serves the preview,
 serves the MCP endpoint and watches the tree, with every rebuild serialised. See
 \fBdocs/MCP.md\fR and \fBdocs/MCP_TRANSPORTS.md\fR.
 .TP
-.B ssg daemon \fR[\fB\-\-config\fR \fIFILE\fR] [\fB\-\-once\fR] [\fB\-\-quiet\fR]
+.B ssg daemon \fR[\fB\-\-config\fR \fIFILE\fR] [\fB\-\-once\fR] [\fB\-\-quiet\fR] [\fB\-\-cpu\-limit\fR=\fIN\fR] [\fB\-\-mem\-limit\fR=\fISIZE\fR]
 Watch several projects from one process. Reads \fB.ssg_projects\fR (YAML,
 override with \fB\-\-config\fR), which lists each project's directory and
 optionally its own config file, port, host and extra flags; a port implies a
 server, and \fBdisabled: true\fR keeps a project in the file without running it.
 Each project runs an ordinary \fBssg \-\-watch\fR in its own directory, with its
-output tagged by project name.
+output tagged by project name, under its own \fBresources:\fR block; the
+daemon's \fB\-\-cpu\-limit\fR and \fB\-\-mem\-limit\fR limit the daemon itself.
 .IP
 Editing the projects file reloads the fleet in place: a project whose settings
 did not change keeps running and keeps its port, and only what changed is
@@ -268,8 +305,8 @@ restarted. \fBSIGHUP\fR reloads on demand; \fBSIGINT\fR and \fBSIGTERM\fR stop
 everything. A projects file that no longer parses leaves the running projects
 alone rather than stopping them over a typo. A project that exits by itself is
 restarted; one that will not start is named and skipped so the rest come up.
-\fB\-\-once\fR prints what would run and exits, which checks a projects file in
-CI. See \fBdocs/DAEMON.md\fR.
+\fB\-\-once\fR (alias \fB\-\-check\fR) prints what would run and exits, which
+checks a projects file in CI. See \fBdocs/DAEMON.md\fR.
 .TP
 .B ssg init \fR[\fIsource-name\fR] [\fB\-\-domain\fR \fIexample.com\fR]
 Scaffold a ready-to-build project in the current directory — config, a content
@@ -295,7 +332,13 @@ Non-Go engines render the theme's own templates verbatim in that engine's syntax
 .TP
 .BR \-\-online\-theme =\fIURL
 Download theme from a URL. Supports GitHub, GitLab repositories, or direct
-ZIP file URLs.
+ZIP file URLs. A repository URL may pin a tag, branch or commit as
+\fIrepo\fB@\fIref\fR; without one the moving main branch is fetched.
+.TP
+.BR \-\-online\-theme\-sha256 =\fIHEX
+Expected SHA-256 of the theme archive (\fBonline_theme_sha256\fR). A mismatch
+stops the build before anything is extracted; without it the build warns and
+prints the archive's sum so it can be pinned.
 .SS MDDB Content Source
 .TP
 .BR \-\-mddb\-url =\fIURL
@@ -329,6 +372,10 @@ Watch MDDB for content changes and rebuild automatically.
 .TP
 .BR \-\-mddb\-watch\-interval =\fISEC
 Polling interval for MDDB watch mode in seconds (default: 30).
+.TP
+.B \-\-mddb\-trusted
+Trust the MDDB server's content (\fBmddb.trusted\fR). Without it an MDDB build
+runs rendered content through the HTML sanitizer, as \fB\-\-sanitize\-html\fR does.
 .SS Server & Development
 .TP
 .B \-\-http
@@ -348,6 +395,10 @@ a privileged port, exhausted descriptors — still stops the server immediately.
 .B \-\-watch
 Watch content and template directories for file changes and rebuild
 automatically.
+.TP
+.BR \-\-auto\-reload ", " \-\-no\-auto\-reload
+Live reload of the browser after a rebuild. On by default under
+\fB\-\-watch\fR; \fB\-\-no\-auto\-reload\fR turns it off.
 .TP
 .B \-\-wrangler
 In watch mode, launch the Cloudflare Wrangler emulator in the background (\fBnpx wrangler dev\fR). Automatically sets \fB\-\-watch\fR.
@@ -416,8 +467,25 @@ gzip-compress responses when the client sends \fBAccept\-Encoding: gzip\fR.
 .BR \-\-max\-conns =\fIN
 Cap the number of simultaneous connections (\fB0\fR = unlimited).
 .TP
+.BR \-\-workers =\fIN
+Parallel build workers (default: one per usable CPU; \fB0\fR = sequential).
+Capped at \fB\-\-cpu\-limit\fR.
+.TP
 .BR \-\-mem\-limit =\fISIZE
-Runtime GC soft memory target, e.g. \fB512MiB\fR, \fB1GiB\fR.
+Soft memory limit for the whole process, e.g. \fB512MiB\fR, \fB1GiB\fR, or
+\fBnone\fR. Applies to every command (build, \fB\-\-watch\fR, \fB\-\-http\fR,
+\fBmcp\fR, \fBdaemon\fR, \fBmigrate\fR). Unset, ssg fits 90% of a cgroup v2
+\fBmemory.max\fR. Config: \fBresources.memory\fR (alias \fBmem_limit\fR).
+The limit is soft: the collector works harder near it, it does not refuse
+allocations.
+.TP
+.BR \-\-cpu\-limit =\fIN
+Use at most \fIN\fR CPUs (\fBGOMAXPROCS\fR) and at most \fIN\fR workers, which
+also bounds the external image encoders. Config: \fBresources.cpu\fR.
+.TP
+.BR \-\-gc\-percent =\fIN
+Garbage-collector heap headroom (Go default \fB100\fR; lower = smaller heap,
+more GC work; \fB\-1\fR = off). Config: \fBresources.gc_percent\fR.
 .SS Output Control
 .TP
 .B \-\-sitemap\-off
@@ -436,6 +504,10 @@ following frontmatter conditions are met:
 .TP
 .B \-\-robots\-off
 Disable robots.txt generation.
+.TP
+.B \-\-not\-found\-off
+Disable the generated \fB404.html\fR. A page slugged \fB404\fR still wins;
+without either, static hosts answer unknown paths with \fBindex.html\fR and a 200.
 .TP
 .BR \-\-pretty\-html ", " \-\-pretty
 Clean up generated HTML by removing all blank lines, without aggressive
@@ -526,7 +598,8 @@ pages that use it.
 .TP
 .B \-\-sanitize\-html
 Sanitize raw HTML embedded in markdown through the bluemonday UGC policy
-(strips \fB<script>\fR and other unsafe markup).
+(strips \fB<script>\fR and other unsafe markup). On by default for MDDB
+builds unless \fB\-\-mddb\-trusted\fR is given.
 .TP
 .BR \-\-timezone =\fIZONE
 Render content dates (permalink \fB:year/:month/:day\fR tokens and the
@@ -548,6 +621,11 @@ Maximum heading level included in the TOC (default: 3). The config key
 \fBheading_anchors: true\fR (no flag) appends a \fB#\fR link to its own id
 on each h1\(enh3 of the page body; a mapping sets \fBlevels\fR, \fBsymbol\fR,
 \fBclass\fR and \fBlabel\fR.
+A custom taxonomy's \fBoutputs\fR (or \fBoutputs_index\fR / \fBoutputs_term\fR)
+writes formats from \fBoutputs_custom\fR beside its index and term pages, and
+announces them in the page head. A \fBfeeds:\fR entry with
+\fBformat: google-merchant\fR writes a Google Merchant Center product feed
+from the pages' Product JSON-LD.
 .SS Feeds, SEO and Search
 .TP
 .B \-\-feed
@@ -562,6 +640,30 @@ Maximum items per feed (default: 20).
 Validate internal links against the output \(em \fBhref\fR and \fBsrc\fR in HTML,
 \fBurl()\fR and \fB@import\fR in stylesheets, the latter reported with the
 stylesheet and line; \fBstrict\fR fails the build on a dead link.
+.TP
+.BR \-\-check\-images "[=" \fIstrict\fR|\fIstrict\-decorative ]
+Report images with no \fBalt\fR attribute; \fBstrict\fR fails the build and
+\fBstrict\-decorative\fR also reports \fBalt=""\fR.
+.TP
+.BR \-\-check\-meta "[=" \fIstrict ]
+Validate title and description on indexable pages.
+.TP
+.BR \-\-check\-schema "[=" \fIstrict ]
+Validate emitted JSON\-LD against its required properties.
+.TP
+.BR \-\-check\-orphans "[=" \fIstrict ]
+Report indexable pages that no other page links to.
+.TP
+.BR \-\-check\-redirects "[=" \fIstrict ]
+Report links the host would redirect (needs \fBpretty_urls\fR).
+.PP
+Each bare \fB\-\-check\-*\fR flag means \fBwarn\fR; \fB=strict\fR fails the build.
+.TP
+.B \-\-route\-manifest
+Write \fBroutes.json\fR, so the route contract ships with the site.
+.TP
+.B \-\-notify
+Announce new and changed posts to the channels configured under \fBnotify:\fR.
 .TP
 .B \-\-strict
 Escalate soft build problems into failures: \fBcontent_schemas\fR violations,
@@ -763,6 +865,13 @@ Opt in to generator-level OpenGraph/Twitter/JSON-LD injection into pages that la
 their own tags (non-destructive). Off by default since v1.8.2; the legacy
 \fB\-\-seo\-off\fR flag and \fBseo_off\fR config key force it off and print a
 deprecation warning.
+The config key \fBog_cards\fR (no flag; off by default) draws a 1200\(mu630 PNG card
+(title, category, site name) for every page without a \fBfeatured_image\fR,
+at build time, under \fB/og/\fR, and names it in \fBog:image\fR,
+\fBtwitter:image\fR and the JSON-LD \fBimage\fR. \fBtext_color\fR and
+\fBbackground\fR (or \fBbackground_image\fR) are required; font, accent,
+overlay, logo and format are optional. Cards are cached in
+\fB.ssg\-cache/ogcards/\fR and skipped by the WebP/AVIF passes.
 .SS Internationalization
 .TP
 .BR \-\-languages =\fILIST
@@ -785,10 +894,20 @@ Convert images to WebP format. Requires \fBcwebp\fR to be installed.
 .BR \-\-webp\-quality =\fIN
 WebP compression quality, 1\-100 (default: 60).
 .TP
+.BR \-\-image\-formats =\fIa,b
+Publish images in these formats, best first (e.g. \fBavif,webp\fR). AVIF needs
+the optional \fBavifenc\fR; a missing encoder is skipped with a warning and the
+site still publishes WebP and the originals.
+.TP
+.BR \-\-avif\-quality =\fIN
+AVIF quality, 1\-100 (default: 45).
+.TP
 .B \-\-webp\-keep\-original
 Emit each \fB.webp\fR next to its original instead of replacing it. Safe for
 themes with hardcoded \fB.png\fR/\fB.jpg\fR references (favicons, logos,
-og:image). The default replaces originals (historical behaviour).
+og:image). The default replaces originals (historical behaviour). With it,
+\fBog:image\fR and \fBtwitter:image\fR keep pointing at the original, which
+link-preview consumers without WebP support need.
 .TP
 .B \-\-reconvert\-images
 Force reconversion of images even if WebP versions already exist.
@@ -835,8 +954,9 @@ An \fBftp://\fR/\fBsftp://\fR URL, or a git remote for github-pages.
 .PP
 Required environment per provider: \fBcloudflare\fR — CLOUDFLARE_API_TOKEN,
 CLOUDFLARE_ACCOUNT_ID; \fBgithub-pages\fR — GITHUB_TOKEN (https) or an SSH key;
-\fBnetlify\fR — NETLIFY_AUTH_TOKEN (+ NETLIFY_SITE_ID); \fBvercel\fR — VERCEL_TOKEN,
-VERCEL_ORG_ID; \fBftp\fR — FTP_USERNAME, FTP_PASSWORD; \fBsftp\fR — SSH_USERNAME,
+\fBnetlify\fR — NETLIFY_AUTH_TOKEN (site via \fB\-\-deploy\-project\fR or
+NETLIFY_SITE_ID); \fBvercel\fR — VERCEL_TOKEN (project via \fB\-\-deploy\-project\fR
+or VERCEL_PROJECT_ID; VERCEL_ORG_ID optional, for team scope); \fBftp\fR — FTP_USERNAME, FTP_PASSWORD; \fBsftp\fR — SSH_USERNAME,
 SSH_PASSWORD or SSH_KEY_FILE (the host must be present in known_hosts).
 .PP
 When a \fBcloudflare\fR deploy target's output contains a \fBfunctions/\fR
@@ -878,7 +998,11 @@ into the \fB.Data.*\fR template namespace, nested by subdirectory.
 Suppress all output; only exit codes indicate success or failure.
 .TP
 .BR \-\-version ", " \-v
-Print the version and exit.
+Print the version, then a line naming the license, and exit.
+.TP
+.B \-\-license
+Print the license (Business Source License 1.1, BUSL-1.1), what it allows and
+where its text is, and exit.
 .TP
 .BR \-\-help ", " \-h
 Print usage information and exit.
@@ -1016,12 +1140,16 @@ Templates get \fB.SSG.Version\fR beside \fB.BuildTime\fR.
 \fB\-\-build\-report\fR[=\fIFILE\fR] (\fBbuild_report:\fR) writes the build's version,
 duration and page count to \fIFILE\fR (default \fBbuild.json\fR) in the output
 directory.
-.SH PRINT, COOK MODE AND WEB STORIES
+.SH PRINT, COOK MODE, WEB STORIES AND STORY MODE
 \fBprint.enabled: true\fR adds a Print / PDF button and print stylesheet, and a
 recipe card on Recipe pages. \fBcook_mode: true\fR adds a step-by-step view on
 Recipe pages. \fBweb_stories.enabled: true\fR (with \fBpublisher_logo\fR)
-makes a Google Web Story from each selected post. See
-docs/PRINT_AND_COOK_MODE.md and docs/WEB_STORIES.md.
+makes a Google Web Story from each selected post; \fBweb_stories.narration:
+true\fR records each page through \fBtts:\fR. \fBstory: true\fR turns articles
+into a reading companion and fullscreen presentation (reading bar, photo stage,
+widgets, narrator with pronunciation rules, music by date, share); a post adds
+settings in \fBstory:\fR front matter or \fI<name>.story.yaml\fR. See
+docs/PRINT_AND_COOK_MODE.md, docs/WEB_STORIES.md and docs/STORY.md.
 .SH RESUME
 \fBresume.file\fR names a Schema Resume (schema-resume.org) JSON document.
 It becomes a page at \fBresume.url\fR (default \fB/cv/\fR) that renders in
@@ -1216,12 +1344,17 @@ Modern dark theme with glassmorphism effects, purple gradient accents, and
 micro-animations.
 .TP
 .B krowy
-Light green farm theme inspired by krowy.net, with natural colors and
-organic design.
+Light green farm theme with a sidebar for recent posts and categories,
+natural colors and organic design.
 .TP
 .B apidoc
 Documentation theme: guides and API references in one sidebar, search,
 an "On this page" column, light and dark schemes.
+.PP
+These three are embedded in the binary and scaffolded into an empty theme
+directory the first time one is named. Two more live in the repository and are
+copied into \fBtemplates/\fR by hand: \fBimd\fR (a corporate landing page) and
+\fBssgtheme\fR (the documentation theme). See \fBdocs/TEMPLATES.md\fR.
 .SH EXIT STATUS
 .TP
 .B 0
@@ -1357,7 +1490,11 @@ Credentials for the FTP deployment provider.
 Credentials and settings for the SFTP deployment provider.
 .TP
 .B SSG_OUTPUT_DIR ", " SSG_PHASE ", " SSG_PAGE_PATH
-Context variables supplied to custom build hooks during execution.
+Context variables supplied to custom build hooks during execution. The program
+of every \fBpre_build\fR and \fBpost_build\fR hook is looked up before the
+build renders anything; a missing one stops it at once. The snap build cannot
+run programs installed on the host, so hooks calling \fBnode\fR, \fBpython\fR
+and the like need another install method.
 .PP
 Additionally, any custom variables defined under the
 .B variables
@@ -1379,4 +1516,10 @@ Full documentation: https://github.com/spagu/ssg
 .br
 Redirects and headers: docs/DEPLOYMENT.md; Workers: docs/WORKERS.md
 .SH LICENSE
-BSD 3-Clause License. See LICENSE file for details.
+Business Source License 1.1 (from 1.9.0; 1.8.85 and earlier: BSD 3-Clause).
+Production use is free. A commercial site keeps the "Built with ssg" notice
+ssg writes; \fBattribution: false\fR is permitted on non-commercial sites, and
+on commercial ones under a commercial license only. Offering ssg itself as a
+hosted service, inside a paid product or as a white-labelled copy needs a
+commercial license. Each version becomes BSD-3-Clause four years
+after its release. See LICENSE and docs/LICENSING.md.

@@ -29,6 +29,9 @@ import (
 type feedFormat struct {
 	mime   string
 	render func(g *Generator, page feedPage) string
+	// unlisted keeps a feed out of the pages' autodiscovery links: a product
+	// feed is for Merchant Center, not for a reader to subscribe to (#196).
+	unlisted bool
 }
 
 // feedFormats is the supported set. Podcast and news shapes are deliberately
@@ -39,6 +42,8 @@ var feedFormats = map[string]feedFormat{
 	"atom": {mime: "application/atom+xml", render: renderAtomFeed},
 	"rss":  {mime: "application/rss+xml", render: renderRSSFeed},
 	"json": {mime: "application/feed+json", render: renderJSONFeed},
+	// The products, not the posts: written by writeMerchantFeed (#196).
+	merchantFormat: {mime: "application/rss+xml", unlisted: true},
 }
 
 // feedFormatOf resolves a spec's format, defaulting to atom.
@@ -49,7 +54,7 @@ func feedFormatOf(f models.FeedSpec) (feedFormat, string, error) {
 	}
 	format, ok := feedFormats[name]
 	if !ok {
-		return feedFormat{}, name, fmt.Errorf("feeds: %q has unsupported format %q (supported: atom, rss, json)", f.Path, f.Format)
+		return feedFormat{}, name, fmt.Errorf("feeds: %q has unsupported format %q (supported: atom, rss, json, google-merchant)", f.Path, f.Format)
 	}
 	return format, name, nil
 }
@@ -86,9 +91,12 @@ func (g *Generator) writeDeclaredFeed(spec models.FeedSpec) error {
 	if rel == "" {
 		return fmt.Errorf("feeds: path is required")
 	}
-	format, _, err := feedFormatOf(spec)
+	format, name, err := feedFormatOf(spec)
 	if err != nil {
 		return err
+	}
+	if name == merchantFormat {
+		return g.writeMerchantFeed(spec, rel)
 	}
 
 	full := g.config.FeedFullContent
@@ -221,12 +229,15 @@ func (g *Generator) selectFeedPosts(spec models.FeedSpec) []models.Page {
 	source := strings.TrimSpace(spec.Source)
 	cats := lowerSet(spec.Categories)
 	tags := lowerSet(spec.Tags)
-	if source == "" && len(cats) == 0 && len(tags) == 0 {
+	if source == "" && !spec.Prefix.Set() && len(cats) == 0 && len(tags) == 0 {
 		return pool
 	}
 	out := make([]models.Page, 0, len(pool))
 	for _, p := range pool {
 		if source != "" && !pageInSource(p, source) {
+			continue
+		}
+		if spec.Prefix.Set() && !spec.Prefix.MatchesPath(g.sitePath(g.servedCanonical(p))) {
 			continue
 		}
 		if len(cats) > 0 && !g.pageInCategories(p, cats) {
@@ -243,9 +254,17 @@ func (g *Generator) selectFeedPosts(spec models.FeedSpec) []models.Page {
 // pageInSource reports whether a page came from a content root, matching the
 // directory itself and anything beneath it, so `source: blog` covers
 // blog/2026/post.md as well as blog/post.md. A page with a named section, an
-// MDDB document, matches that section the same way (#361).
+// MDDB document, matches that section the same way (#361), and a page an
+// external source built matches that source's name (#386).
 func pageInSource(p models.Page, source string) bool {
-	return sourceDirMatches(p.SourceDir, source) || sourceDirMatches(p.Section, source)
+	return inSource(p.SourceDir, p.Section, p.ExternalSource, source)
+}
+
+// inSource is that test on the three things a document can come from, shared
+// by feeds and sitemaps so `source:` means one thing in both (#86).
+func inSource(dir, section, external, source string) bool {
+	return sourceDirMatches(dir, source) || sourceDirMatches(section, source) ||
+		(external != "" && external == strings.Trim(strings.TrimSpace(source), "/"))
 }
 
 // sourceDirMatches is that test on the directory alone, so a declared sitemap
@@ -460,10 +479,9 @@ func renderJSONFeed(g *Generator, p feedPage) string {
 		}
 		doc.Items = append(doc.Items, ji)
 	}
-	b, err := json.MarshalIndent(doc, "", "  ")
-	if err != nil {
-		return "{}"
-	}
+	// Strings, string slices and a nested struct of strings: nothing here
+	// can fail to marshal.
+	b, _ := json.MarshalIndent(doc, "", "  ")
 	return string(b) + "\n"
 }
 

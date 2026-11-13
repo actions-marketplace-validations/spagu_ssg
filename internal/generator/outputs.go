@@ -56,6 +56,10 @@ type OutputFormat struct {
 	Render func(g *Generator, page models.Page) ([]byte, error)
 	// Custom marks a format the site defined with a template.
 	Custom bool
+	// renderView runs a custom format's template on a view that is not a page —
+	// a taxonomy index or term archive (#367). Nil for the built-in formats,
+	// which only know how to represent a page.
+	renderView func(data interface{}) ([]byte, error)
 }
 
 // CustomOutput is a format a site defines for itself.
@@ -169,15 +173,19 @@ func (g *Generator) loadOutputs(funcs template.FuncMap) error {
 		if suffix == "" {
 			suffix = "index." + name
 		}
+		execute := func(data interface{}) ([]byte, error) {
+			var buf bytes.Buffer
+			if err := tmpl.Execute(&buf, data); err != nil {
+				return nil, err
+			}
+			return buf.Bytes(), nil
+		}
 		reg.formats[name] = OutputFormat{
 			Name: name, Suffix: suffix, MIME: c.MIME, Custom: true,
 			Render: func(g *Generator, page models.Page) ([]byte, error) {
-				var buf bytes.Buffer
-				if err := tmpl.Execute(&buf, g.pageOutputContext(page)); err != nil {
-					return nil, err
-				}
-				return buf.Bytes(), nil
+				return execute(g.pageOutputContext(page))
 			},
+			renderView: execute,
 		}
 	}
 
@@ -341,10 +349,13 @@ func (g *Generator) formatsFor(page models.Page) []string {
 			list = g.outputs.perType[""]
 		}
 	}
+	// A page the site keeps out of search gets no Markdown copy from the
+	// site-wide list (#393); its own outputs: list may still ask for one.
+	hidden := len(page.Outputs) == 0 && excludeFromSitemap(page)
 	out := make([]string, 0, len(list))
 	for _, name := range list {
 		name = strings.ToLower(strings.TrimSpace(name))
-		if name == FormatHTML || name == "" {
+		if name == FormatHTML || name == "" || (hidden && name == FormatMarkdown) {
 			continue
 		}
 		if _, ok := g.outputs.formats[name]; ok {
@@ -399,10 +410,7 @@ func (g *Generator) alternateLinks(page models.Page, existing string) string {
 // extension. That is the convention GO-085 established for Markdown, kept here
 // so every format is addressed the same way.
 func outputURLFor(page models.Page, format OutputFormat) string {
-	url := page.GetURL()
-	if url == "" {
-		return ""
-	}
+	url := page.GetURL() // never empty: every address starts with "/"
 	if strings.HasSuffix(url, "/") {
 		// A page with no slug resolves to "//" rather than "/", and a doubled
 		// slash in a published href is a different URL from the one meant.
@@ -449,20 +457,34 @@ func (g *Generator) writePageOutputs(page models.Page, htmlPath string) {
 		if len(data) == 0 {
 			continue
 		}
-		path := outputFilePath(htmlPath, format)
-		if err := g.ensureWithinOutput(path); err != nil {
-			g.warnOutput(fmt.Sprintf("output %s for %q: %v", name, page.Slug, err))
-			continue
-		}
-		// #nosec G306,G703 -- a published representation of the page beside it
-		if err := os.WriteFile(path, data, 0o644); err != nil {
-			g.warnOutput(fmt.Sprintf("output %s for %q: %v", name, page.Slug, err))
+		if !g.writeOutputFile(outputFilePath(htmlPath, format), data, fmt.Sprintf("output %s for %q", name, page.Slug)) {
 			continue
 		}
 		if name == FormatMarkdown {
 			g.writeFlatMarkdownSibling(htmlPath, data)
 		}
 	}
+}
+
+// writeOutputFile writes one representation, warning under what's name when it
+// cannot, and reports whether the file was written.
+func (g *Generator) writeOutputFile(path string, data []byte, what string) bool {
+	if err := g.ensureWithinOutput(path); err != nil {
+		g.warnOutput(fmt.Sprintf("%s: %v", what, err))
+		return false
+	}
+	// A taxonomy view writes its formats before its HTML (#370), so the
+	// directory may not exist yet. Cached, so a page pays nothing for it.
+	if err := g.ensureParent(path); err != nil {
+		g.warnOutput(fmt.Sprintf("%s: %v", what, err))
+		return false
+	}
+	// #nosec G306,G703 -- a published representation of the page beside it
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		g.warnOutput(fmt.Sprintf("%s: %v", what, err))
+		return false
+	}
+	return true
 }
 
 // writeFlatMarkdownSibling keeps GO-085's `/section.md` beside

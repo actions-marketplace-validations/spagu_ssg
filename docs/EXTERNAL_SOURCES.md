@@ -62,13 +62,14 @@ Source names must match `[a-z][a-z0-9_-]*`. Sources load in deterministic
 (name-sorted) order, up to `max_concurrent_sources` at a time. A `required`
 source's failure aborts the build; an optional one (`required: false`) warns
 and is skipped. Every failure names the source, its type and the stage
-(`config`, `read`, `fetch`, `parse`, `transform`, `connect`, `query`,
-`import`) — and never contains credentials.
+(`config`, `read`, `fetch`, `cache`, `parse`, `transform`, `connect`,
+`query <name>`, `import`, `content_map`) — and never contains credentials.
 
-**Secrets come only from the environment.** Values written as `"$NAME"`
-resolve from the environment at build time; literal secrets in `dsn`, `auth`
-and `jwt`-style fields are rejected outright, and a referenced-but-unset
-variable fails the build naming the variable (never a value).
+**Secrets come only from the environment.** Values written as `"$NAME"` or
+`"${NAME}"` resolve from the environment at build time; literal secrets in `dsn` and the
+`auth` secret fields (`token`, `password`, `value`) are rejected outright, and
+a referenced-but-unset variable fails the build naming the variable (never a
+value).
 
 ### Environment variables in values
 
@@ -98,11 +99,13 @@ Rules:
   `defaults.required: false`) the source is **skipped with a warning** — so a
   shared config can carry an env-driven source nobody else has to set up.
 - `dsn` and `auth` secret fields keep the stricter whole-value form
-  (`dsn: "$PRODUCT_DB_DSN"`); a literal there is still rejected.
+  (`dsn: "$PRODUCT_DB_DSN"` or `dsn: "${PRODUCT_DB_DSN}"`); a literal there is
+  still rejected, and so is anything else starting with `$` that is not one
+  whole reference (`"$DSN/x"`, `"${DSN"`).
 
 ## Local files (`type: file`)
 
-Formats: YAML, JSON, TOML, CSV, XML — inferred from the extension or forced
+Formats: YAML, JSON, TOML, CSV, XML, `feed` and `changelog` (below) — inferred from the extension or forced
 with `format:`. Files are size-capped by `max_response_size`.
 
 ```yaml
@@ -135,7 +138,7 @@ external_sources:
   sources:
     mddb:
       type: http
-      url: https://mddb.tradik.com/feed.xml
+      url: https://blog.example.com/feed.xml
       format: feed
 ```
 
@@ -209,14 +212,14 @@ is joined back into one entry.
 products_api:
   type: http
   url: https://api.example.com/products
-  format: json          # json | csv | xml (yaml/toml also work)
+  format: json          # json | csv | xml | feed (yaml/toml also work); inferred from the URL extension when omitted
   headers:
     Accept: application/json
   query:
     page: "1"
   auth:
     type: bearer        # bearer | basic | header
-    token: "$API_TOKEN"
+    token: "$API_TOKEN"   # basic: username + password: "$PASS"; header: header + value: "$KEY"
   timeout: 10s
   cache_ttl: 1h
   stale_ttl: 24h
@@ -267,7 +270,11 @@ never silent. Pages are aggregated into a single JSON array before transforms;
 each page request reuses the standard auth/retry/size-cap machinery, and the
 aggregated result is what lands in the disk cache.
 
-Retries with linear backoff cover network errors, 429 and 5xx. Successful
+Pagination requires `format: json`; `mode` is mandatory once the block is
+present.
+
+Retries with linear backoff (`retry_backoff` × attempt) cover network errors,
+429 and 5xx; other statuses fail immediately. Successful
 payloads land in the shared disk cache (`<hash>.body` + `<hash>.meta.json`,
 sha256-verified; corrupted entries are evicted). Within `cache_ttl` the cache
 is served without touching the network; after that, a failed refetch can serve
@@ -431,6 +438,28 @@ does not parse is warned about, record by record.
   mapping names but the record does not have** is warned about and left empty.
   `content_errors: strict` promotes both to build failures.
 
+### A sitemap and a feed per source
+
+Every page a source builds remembers the source's name (1.9.0), so `source:`
+in [`sitemaps:`](CONFIGURATION.md#splitting-the-sitemap-sitemaps-sitemap_max_urls)
+and `feeds:` selects it like a content folder, and `prefix:` splits a source
+further by URL:
+
+```yaml
+sitemaps:
+  - path: /sitemap-openbsd.xml
+    prefix: /openbsd/
+  - path: /sitemap-ports.xml
+    source: ports        # the external_sources entry, minus what /openbsd/ took
+```
+
+Each `<url>` keeps its record's date wherever it lands: `content_map.modified`,
+falling back to `content_map.date`. In `sitemap.xml`, each split file's entry
+gets the newest date among its URLs. A record with neither field mapped has no
+`<lastmod>`, the same as a Markdown page without a date. The build time is
+never used. Map `modified:` to the field your data updates, so each URL's
+`<lastmod>` changes when its record does.
+
 ### `content_format`
 
 `markdown` (the default) and `html` both pass the body to the same renderer
@@ -460,7 +489,8 @@ dependencies is still what its page is about.
 
 ## SQL (`type: sql`)
 
-Drivers: `mysql`, `mariadb`, `postgres`, `sqlite` (pure Go, no cgo). Queries
+Drivers: `mysql`, `mariadb`, `postgres`, `sqlite` (pure Go, no cgo). SQLite
+takes a local file path in `database:` instead of a `dsn`. Queries
 live **only** in configuration — never in templates — and are statically
 validated: a single statement, `SELECT` (or `WITH … SELECT`) only, no
 piggybacked statements. Each query runs under the source `timeout` with a hard
@@ -483,6 +513,28 @@ inventory:
 
 ```gotemplate
 {{ range .ExternalData.inventory.products }}{{ .name }}: {{ .price }}{{ end }}
+```
+
+With `mode: content` and a `content_map`, each row becomes a page. A source
+with one query needs nothing else — its rows are the records. With several
+queries, name the one whose rows become pages with `transform.select`
+(config fails otherwise, listing the queries):
+
+```yaml
+inventory:
+  type: sql
+  driver: postgres
+  dsn: "${INVENTORY_DSN}"
+  queries:
+    products: { sql: "SELECT name, slug, description FROM products" }
+    brands:   { sql: "SELECT name FROM brands" }
+  transform:
+    select: products       # these rows become pages
+  mode: content
+  content_map:
+    title: name
+    slug: slug
+    content: description
 ```
 
 Operational rules: use a dedicated read-only database user, and TLS for remote
@@ -557,8 +609,8 @@ movable_type:
 ```
 
 With `include_comments: true` each imported entry carries its approved
-(`comment_visible = 1`) comments as a list of maps (author, email, url,
-created_on, text) under `.Extra["comments"]`, ready for templates. Unapproved
+(`comment_visible = 1`) comments as a list of maps (`author`, `email`,
+`url`, `date`, `body`) under `.Extra["comments"]`, ready for templates. Unapproved
 and spam comments are never imported. Default `false` — identical behaviour
 to previous releases.
 
@@ -581,7 +633,10 @@ transform:
   select: data.items    # dot path into the parsed structure
 ```
 
-`select` unwraps API envelopes before the data reaches templates. There is
+`select` unwraps API envelopes before the data reaches templates (and before
+`content_map`). It applies to `file`, `http` and `sql` sources; SQL results
+are keyed by query name, so `select: products` narrows a SQL source (data view
+and pages alike) to that query's rows. There is
 deliberately no scripting, `eval` or embedded query runtime.
 
 ## Migration notes

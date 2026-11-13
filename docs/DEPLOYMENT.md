@@ -112,7 +112,10 @@ ssg my-blog simple example.com \
 
 `--deploy-branch` optionally selects the Pages branch. SSG uses Cloudflare's
 Direct Upload API, hashes the output manifest and uploads the required files; it
-does not require Wrangler.
+does not require Wrangler. The exception is an output with a `functions/` tree
+(a `worker:`/`workers:` entry in `mode: functions`): Direct Upload cannot compile
+Pages Functions, so SSG runs `npx wrangler pages deploy` from the output
+directory instead, which needs Node.js — see [WORKERS.md](WORKERS.md#deploy).
 
 ### Generated `_headers` and `_redirects`
 
@@ -223,8 +226,9 @@ generate one.
 
 #### The built-in server serves both files
 
-Since 1.8.47, `ssg --http` and `ssg serve` read `<output>/_redirects` and
-`<output>/_headers` and answer with them, re-reading both after every rebuild.
+Since 1.8.47, the preview server (`ssg --http`, also under `--watch` and
+`ssg mcp --http`) reads `<output>/_redirects` and `<output>/_headers` and
+answers with them, re-reading both after every rebuild.
 So a redirect can be checked before it is published — which matters most where
 it is easiest to get wrong: after a migration, where every rule is a URL
 somebody else published, and where a site whose redirects are all broken looks
@@ -621,7 +625,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Build with SSG
         id: ssg
         uses: spagu/ssg@v1
@@ -649,6 +653,10 @@ including behaviour changes. For production sites, pin it:
 Since v1.8.5 the action logs the resolved version on every run (a `::notice::`
 when `latest` was used) and exposes it as the `version` output, so unpinned
 builds are at least traceable.
+
+Since 1.9.0 the action checks the downloaded archive against the release's
+`checksums.sha256` before extracting it, as `install.sh` does. A mismatch, or a
+release without an entry for the archive, fails the step.
 
 ### Building a config-driven site
 
@@ -685,11 +693,14 @@ The action intentionally exposes a stable subset of the complete CLI:
 | `output-dir` | no | `output` | Generated destination |
 | `webp` | no | `false` | Enable WebP conversion |
 | `webp-quality` | no | `60` | WebP quality |
+| `image-formats` | no | empty | Comma-separated formats in preference order, e.g. `avif,webp`; listing `avif` installs the AVIF encoder |
+| `webp-keep-original` | no | `false` | Keep the original images beside the `.webp` files |
 | `zip` | no | `false` | Create ZIP archive |
 | `minify` | no | `false` | Enable all minification |
 | `clean` | no | `false` | Clean before build |
 | `engine` | no | `go` | Template engine |
-| `online-theme` | no | empty | Theme download URL |
+| `online-theme` | no | empty | Theme download URL; `repo@ref` pins a tag or commit |
+| `online-theme-sha256` | no | empty | Expected SHA-256 of the theme archive; a mismatch fails the build |
 | `deploy` | no | empty | Native provider |
 | `deploy-project` | no | empty | Provider project/site |
 | `deploy-branch` | no | empty | Provider branch |

@@ -18,7 +18,8 @@ It is compliant, not decorative:
 - **Keyboard-safe modal.** Per the ARIA APG modal dialog pattern, Tab and
   Shift+Tab cycle inside the dialog instead of escaping to the page behind, and
   closing it (a choice, or Escape) returns focus to the element that opened it —
-  a `data-cookie-settings` link, say.
+  a `data-cookie-settings` link, say. Opening it moves focus to its first
+  button without scrolling the page.
 - **Localised.** English, Polish, German, French and Hindi built in, picked
   from `<html lang>` (falling back to `defaultLang`); `i18n.<lang>` in the
   config overrides single strings or adds a language.
@@ -35,7 +36,8 @@ workers/cookie-consent/
 ├── functions/api/consent/geo.ts   GET  — is the banner required for this visitor?
 ├── functions/api/consent/log.ts   POST — optional proof-of-consent audit record
 ├── public/cookie-consent.js       the banner (served from your site root)
-├── public/cookie-consent.css       its styles
+├── public/cookie-consent.css      its styles
+├── wrangler.snippet.toml          optional CONSENT_LOG KV + [vars] stub for `ssg new wrangler`
 └── cookie-policy.md               a starter policy page — edit to list your services
 ```
 

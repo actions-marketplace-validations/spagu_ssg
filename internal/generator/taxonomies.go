@@ -371,9 +371,25 @@ func (g *Generator) generateTaxonomyArchives(def taxonomy.Definition, lang strin
 		SSG SSGInfo
 		// Modified is the newest lastmod of any post with a term (#339).
 		Modified time.Time
+		// The archive-shaped fields every other archive carries (see
+		// archiveData). The index chain ends at archive.html → category.html,
+		// and a theme without taxonomy.html rendered the index with a template
+		// that reads .Category, .Posts, .Kind, .Name or .Pager — a template
+		// error on a struct without them, and the index was lost (#377). The
+		// taxonomy stands in for the category; the index lists terms, not
+		// posts, so Posts is empty and the pager is a single page.
+		Category models.Category
+		Kind     string
+		Name     string
+		Posts    []models.Page
+		Pager    Pager
 	}{g.siteData, info, views, lang, g.config.Domain, g.config.Variables, g.data,
 		g.externalData, g.buildTime, g.archiveCanonical(base, Pager{}), g.ssgInfo(),
-		g.taxonomyLastmod(def.Name, lang)}
+		g.taxonomyLastmod(def.Name, lang),
+		models.Category{Name: def.Label, Slug: def.Path}, def.Name, def.Label,
+		[]models.Page{}, Pager{Current: 1, Total: 1}}
+	// The formats first, so the page announces only what was written (#370).
+	g.writeViewOutputs(def.OutputsIndex, indexOut, base, "taxonomy "+base, indexData)
 	if err := g.renderTaxonomyPage(g.taxonomyIndexChain(def), indexOut, indexData); err != nil {
 		return err
 	}
@@ -436,22 +452,34 @@ func (g *Generator) renderTermArchive(def taxonomy.Definition, lang string, info
 	if def.Paginate > 0 {
 		perPage = def.Paginate
 	}
+	// The custom formats are written once, beside the first page, and list
+	// every post of the term: an API client wants the term, not one page of
+	// it (#367). Before the HTML, so page 1 can announce them (#370).
+	if len(def.OutputsTerm) > 0 {
+		data := g.termData(def, lang, info, term, slug, posts, Pager{Current: 1, Total: 1, PerPage: perPage})
+		g.writeViewOutputs(def.OutputsTerm, filepath.Join(root, indexHTMLName), term.URL, "term "+term.URL, data)
+	}
 	for _, chunk := range paginateTerm(posts, perPage, term.URL) {
 		outPath := filepath.Join(root, indexHTMLName)
 		if chunk.Pager.Current > 1 {
 			outPath = filepath.Join(root, "page", fmt.Sprintf("%d", chunk.Pager.Current), indexHTMLName)
 		}
-		data := g.archiveData(def.Name, term.Name,
-			models.Category{Name: term.Name, Slug: slug}, chunk.Posts, chunk.Pager, lang, term.URL)
-		// A custom taxonomy also names the term's own definition and info, which
-		// only this view has.
-		data["Taxonomy"] = info
-		data["Term"] = term
+		data := g.termData(def, lang, info, term, slug, chunk.Posts, chunk.Pager)
 		if err := g.renderTaxonomyPage(chain, outPath, data); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// termData is what a term archive's templates receive. A custom taxonomy also
+// names the term's own definition and info, which only this view has.
+func (g *Generator) termData(def taxonomy.Definition, lang string, info TaxonomyInfo, term TaxonomyTerm, slug string, posts []models.Page, pager Pager) map[string]interface{} {
+	data := g.archiveData(def.Name, term.Name,
+		models.Category{Name: term.Name, Slug: slug}, posts, pager, lang, term.URL)
+	data["Taxonomy"] = info
+	data["Term"] = term
+	return data
 }
 
 // termPageURL returns the URL of page n of a term archive (page 1 is the term root).
@@ -503,7 +531,8 @@ func (g *Generator) hasTemplate(name string) bool {
 
 // taxonomyIndexChain is the index-page template fallback order: explicit
 // config override, then taxonomy-<name>.html → taxonomy.html → archive.html →
-// category.html (the shared archive fallback every theme has).
+// category.html (the shared archive fallback every theme has). The index view
+// carries the archive-shaped fields those last two read (#377).
 func (g *Generator) taxonomyIndexChain(def taxonomy.Definition) []string {
 	var chain []string
 	if def.Template != "" {

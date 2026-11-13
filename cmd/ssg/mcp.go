@@ -46,7 +46,7 @@ type mcpArgs struct {
 // runMCP itself starts servers and blocks.
 func parseMCPArgs(args []string) mcpArgs {
 	p := mcpArgs{roles: map[string]bool{}, watch: true, rest: []string{}}
-	for _, a := range args {
+	for _, a := range joinMCPValueFlags(args) {
 		switch {
 		case strings.HasPrefix(a, "--listen="):
 			p.netCfg.listen = strings.TrimPrefix(a, "--listen=")
@@ -77,6 +77,26 @@ func parseMCPArgs(args []string) mcpArgs {
 	return p
 }
 
+// mcpValueFlags are `ssg mcp`'s own flags that take a value.
+var mcpValueFlags = map[string]bool{"--listen": true, "--token": true, "--allow-origin": true, "--role": true}
+
+// joinMCPValueFlags rewrites "--listen 127.0.0.1:8080" as "--listen=127.0.0.1:8080",
+// so `ssg mcp` takes both spellings like every other value flag (GO-053, #374).
+// A flag with nothing after it is left alone and falls through to the build
+// parser, which reports it.
+func joinMCPValueFlags(args []string) []string {
+	out := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		if mcpValueFlags[args[i]] && i+1 < len(args) {
+			out = append(out, args[i]+"="+args[i+1])
+			i++
+			continue
+		}
+		out = append(out, args[i])
+	}
+	return out
+}
+
 // runMCP implements `ssg mcp [flags] [dir]`.
 func runMCP(args []string) int {
 	parsed := parseMCPArgs(args)
@@ -87,6 +107,10 @@ func runMCP(args []string) int {
 
 	cfg := loadConfig(rest)
 	parseFlags(rest, cfg)
+	// stdout is the MCP stdio channel, so the limits are named on stderr.
+	if !applyResources(resourceRequest(cfg), cfg.Quiet, func(f string, a ...any) { errf(f, a...) }) {
+		return 2
+	}
 	applyMinifyAll(cfg)
 	setupTemplateEngine(cfg)
 	downloadOnlineTheme(cfg)

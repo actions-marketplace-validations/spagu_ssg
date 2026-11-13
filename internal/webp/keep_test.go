@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -112,5 +113,58 @@ func TestConvertDirectoryParallel(t *testing.T) {
 		if _, e := os.Stat(base + ".png"); !os.IsNotExist(e) {
 			t.Errorf("original %s.png must be removed in replace mode", base)
 		}
+	}
+}
+
+// TestConvertDefaultsAndAllSkipped runs on any machine: with the stub cwebp,
+// quality 0 falls back to the default, and a directory whose images are all
+// converted already reports the skip instead of converting (#380 gate: these
+// branches were covered only where a real cwebp was installed).
+func TestConvertDefaultsAndAllSkipped(t *testing.T) {
+	withFakeCwebp(t)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.png"), []byte("PNG"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if n, _, err := ConvertDirectory(dir, ConvertOptions{Quality: 0, Quiet: true, KeepOriginal: true}); err != nil || n != 1 {
+		t.Fatalf("quality 0: %d, %v", n, err)
+	}
+	if n, _, err := ConvertDirectory(dir, ConvertOptions{Quality: 0, KeepOriginal: true}); err != nil || n != 0 {
+		t.Fatalf("all done already: %d, %v", n, err)
+	}
+}
+
+// TestConvertWithoutCwebp names the missing tool.
+func TestConvertWithoutCwebp(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	if _, _, err := ConvertDirectory(t.TempDir(), ConvertOptions{}); err == nil || !strings.Contains(err.Error(), "cwebp tool not found") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+// TestUpdateReferencesOnSiteKeepOriginal covers #385: with webp_keep_original
+// the PNG share card is still published, so og:image and twitter:image keep
+// pointing at it (some link-preview consumers do not render WebP), while the
+// page body and JSON-LD still move to the .webp.
+func TestUpdateReferencesOnSiteKeepOriginal(t *testing.T) {
+	tmpDir := t.TempDir()
+	writeWebpFixtures(t, tmpDir, "images/og-card.webp")
+	html := `<meta property="og:image" content="https://example.com/images/og-card.png" />
+<meta name="twitter:image" content="/images/og-card.png" />
+<img src="/images/og-card.png">
+<script type="application/ld+json">{"image":"https://example.com/images/og-card.png"}</script>`
+	want := `<meta property="og:image" content="https://example.com/images/og-card.png" />
+<meta name="twitter:image" content="/images/og-card.png" />
+<img src="/images/og-card.webp">
+<script type="application/ld+json">{"image":"https://example.com/images/og-card.webp"}</script>`
+	htmlPath := filepath.Join(tmpDir, "index.html")
+	if err := os.WriteFile(htmlPath, []byte(html), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpdateReferencesOnSite(tmpDir, "https://example.com", true); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(htmlPath); string(got) != want {
+		t.Errorf("got:\n%s\nwant:\n%s", got, want)
 	}
 }

@@ -28,6 +28,14 @@ ssg mcp --config=.ssg.yaml
 | `--no-watch` | Do not rebuild after each change |
 | `--watch` | Also watch the filesystem, so edits made outside MCP rebuild too |
 | `--config=FILE` | Site config (default `.ssg.yaml`) |
+| `--http` | Also serve the site preview, with live reload on every rebuild |
+| `--listen=ADDR` | Also serve the MCP endpoint over Streamable HTTP (a bare port binds `127.0.0.1`) |
+| `--token=SECRET` | Bearer token for `--listen` (else `$SSG_MCP_TOKEN`, else minted) |
+| `--allow-origin=URL` | Accept one browser origin on `--listen`; repeatable |
+| `--no-stdio` | Serve only the `--listen` endpoint |
+
+The network flags and OAuth 2.1 (`mcp.oauth`) are covered in
+[MCP_TRANSPORTS.md](MCP_TRANSPORTS.md).
 
 Both roles are exposed by default. Narrow with `--role` when an agent should not
 be able to touch the other half.
@@ -60,7 +68,12 @@ Writes are confined to the template and asset directories. The designer cannot
 edit content, delete files, or write outside those directories.
 
 `designer_config_set` is deliberately narrow — an allow-list of presentation
-keys such as the theme, the Mermaid theme, the highlight style and minification.
+keys such as the theme, the highlight style and minification. It also covers
+switches for story mode, the Listen, Print and Cook Mode buttons, heading
+anchors, share cards and breadcrumbs, and the files published for agents
+(`markdown_publish`, `site_graph`, `webmcp`). A switch writes `<key>.enabled`
+and leaves the feature's other settings alone. The full list is in
+[CONFIGURATION.md](CONFIGURATION.md#designer-owned-configuration-keys).
 **Secrets, deployment, server, endpoints, hooks and URL structure are neither
 readable nor writable.** Call `designer_config_read` first: it returns the key
 names, the current values and what each one does.

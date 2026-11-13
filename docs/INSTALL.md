@@ -34,37 +34,38 @@ accounts for most of that size; no external libraries or runtimes are needed.
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/spagu/ssg/main/install.sh | bash
+```
 
 The installer downloads over HTTPS only and verifies the tarball's SHA-256
 against the release's `checksums.sha256` before anything is moved into place —
 a mismatch stops it before `sudo` is ever asked for. `SSG_VERSION` pins a
 release, `SSG_INSTALL_DIR` changes the target directory.
+
+### Linux binary
+
+Every release also ships plain tarballs: `ssg-linux-amd64.tar.gz`,
+`ssg-linux-arm64.tar.gz` and `ssg-linux-armv7.tar.gz` (32-bit ARM, e.g. a
+Raspberry Pi on a 32-bit OS):
+
+```bash
+curl -LO https://github.com/spagu/ssg/releases/latest/download/ssg-linux-armv7.tar.gz
+tar -xzf ssg-linux-armv7.tar.gz
+sudo mv ssg /usr/local/bin/
 ```
 
 ---
 
 ## Linux - Debian/Ubuntu (DEB)
 
-### Add Repository (Recommended)
+There is no APT repository: each release attaches the `.deb` files, and you
+install the one you download.
 
-```bash
-# Add GPG key
-curl -fsSL https://github.com/spagu/ssg/releases/latest/download/ssg-apt.gpg | sudo gpg --dearmor -o /usr/share/keyrings/ssg-keyring.gpg
-
-# Add repository
-echo "deb [signed-by=/usr/share/keyrings/ssg-keyring.gpg] https://apt.ssg.dev stable main" | sudo tee /etc/apt/sources.list.d/ssg.list
-
-# Update and install
-sudo apt update
-sudo apt install ssg
-```
-
-### Manual Download
+### Download
 
 ```bash
 # Pick the version you want — see all releases (incl. previous versions):
 # https://github.com/spagu/ssg/releases
-VERSION=1.8.82
+VERSION=1.9.6
 
 # AMD64 (x86_64)
 wget https://github.com/spagu/ssg/releases/download/v${VERSION}/ssg_${VERSION}_amd64.deb
@@ -88,29 +89,15 @@ sudo apt install webp
 
 ## Linux - Fedora/RHEL/CentOS (RPM)
 
-### Add Repository (Fedora/RHEL 8+)
+There is no RPM repository: each release attaches the `.rpm` files, and you
+install the one you download.
 
-```bash
-# Add repository
-sudo tee /etc/yum.repos.d/ssg.repo << 'EOF'
-[ssg]
-name=SSG Repository
-baseurl=https://rpm.ssg.dev/stable/$basearch
-enabled=1
-gpgcheck=1
-gpgkey=https://github.com/spagu/ssg/releases/latest/download/ssg-rpm.gpg
-EOF
-
-# Install
-sudo dnf install ssg
-```
-
-### Manual Download
+### Download
 
 ```bash
 # Pick the version you want — see all releases (incl. previous versions):
 # https://github.com/spagu/ssg/releases
-VERSION=1.8.82
+VERSION=1.9.6
 
 # AMD64 (x86_64)
 wget https://github.com/spagu/ssg/releases/download/v${VERSION}/ssg-${VERSION}-1.x86_64.rpm
@@ -183,6 +170,23 @@ Build into a directory under your home instead. In CI, or anywhere else a
 script builds to a temporary directory, use the DEB package, the binary or
 Docker.
 
+### Hooks cannot run host programs in the snap
+
+Strict confinement also hides the programs installed on your machine. A
+`hooks:` entry such as `node scripts/build-redirects.mjs` or
+`python3 tools/report.py` fails inside the snap even when `node` or `python3`
+is on your `PATH`. Since 1.9.2 ssg checks every `pre_build` and `post_build`
+hook before it renders anything, and says so:
+
+```text
+❌ Error: generating site: post_build hook: hook "node scripts/build-redirects.mjs" (post_build): exec: "node": executable file not found in $PATH — this ssg is the snap (/snap/static-site-generator/…), and strict confinement hides programs installed on the host; install ssg another way …
+```
+
+Sites whose hooks call `node`, `python` or other host tools should install ssg
+with `install.sh`, the DEB/RPM package, Homebrew or `go install`. Many hook
+jobs need no hook at all: `redirects:` writes `_redirects` from the config
+(see [CONFIGURATION.md](CONFIGURATION.md)).
+
 ---
 
 ## macOS - Homebrew
@@ -239,9 +243,14 @@ pkg install ssg
 
 ### From Ports
 
+The port is not in the official ports tree; its Makefile ships in this
+repository as `packaging/freebsd/Makefile`:
+
 ```bash
+mkdir -p /usr/ports/www/ssg
+cp packaging/freebsd/Makefile /usr/ports/www/ssg/
 cd /usr/ports/www/ssg
-make install clean
+make makesum install clean
 ```
 
 ### Manual Download
@@ -264,9 +273,14 @@ mv ssg /usr/local/bin/
 
 ### From Ports
 
+The port is not in the official ports tree; its Makefile ships in this
+repository as `packaging/openbsd/Makefile`:
+
 ```bash
-cd /usr/ports/www/ssg
-make install
+mkdir -p /usr/ports/mystuff/www/ssg
+cp packaging/openbsd/Makefile /usr/ports/mystuff/www/ssg/
+cd /usr/ports/mystuff/www/ssg
+make makesum install
 ```
 
 ### Manual Download
@@ -302,12 +316,6 @@ doas mv ssg /usr/local/bin/
    [System.Environment]::SetEnvironmentVariable("Path", $env:Path, "Machine")
    ```
 
-### Using Scoop (Community)
-
-```powershell
-scoop install ssg
-```
-
 ---
 
 ## From Source
@@ -341,8 +349,9 @@ Where there is no package for the release yet — a FreeBSD jail, say — Go
 installs a tagged version straight from the module:
 
 ```bash
-go install github.com/spagu/ssg/cmd/ssg@v1.8.74
-ssg --version        # ssg version 1.8.74
+go install github.com/spagu/ssg/cmd/ssg@v1.9.1
+ssg --version        # ssg version 1.9.1
+                     # License: Business Source License 1.1 (BUSL-1.1); …
 ```
 
 Since 1.8.74 such a binary reports the version it was installed at; before,
@@ -356,8 +365,9 @@ binary lands in `$(go env GOPATH)/bin`.
 After installation, verify SSG is working:
 
 ```bash
-# Check version
+# Check the version and the license
 ssg --version
+ssg --license
 
 # Quick test
 mkdir -p test-site/{content/my-site,templates/simple}

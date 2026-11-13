@@ -13,8 +13,9 @@ content-addressed cache** with atomic publishing.
 <img src="{{ $image.URL }}" width="{{ $image.Width }}" height="{{ $image.Height }}" alt="">
 ```
 
-Sources are looked up in order: `assets/` → the static dir → the content source
-dir → the theme dir. Paths are canonicalized; `..` traversal, absolute paths and
+Sources are looked up in order: `assets/` (relative to the working directory) →
+the static dir → the content source dir (`content_dir/source`) → the theme dir
+(`templates_dir/template`) → every `content_sources` path. Paths are canonicalized; `..` traversal, absolute paths and
 symlink escapes are rejected. Source files are **never modified**. Variants are
 published to `/<output>/processed_images/<base>.<hash>.<ext>` and cached in
 `.ssg-cache/images/` — the same request never processes twice, and any change to
@@ -34,8 +35,8 @@ dimensions.
 |--------|------|---------|-------|
 | `width`, `height` | int | 0 | per-mode requirements below |
 | `mode` | string | `fit` | `scale` · `fit_width` · `fit_height` · `fit` · `fill` |
-| `format` | string | `auto` | `auto` keeps the source format (alpha never silently flattened to JPEG) |
-| `quality` | int | 82 | 1–100 (JPEG/WebP) |
+| `format` | string | `auto` | `auto` keeps the source format (alpha never silently flattened to JPEG); a GIF source becomes PNG |
+| `quality` | int | JPEG 82 · WebP `webp_quality` (60) · AVIF `avif_quality` (45) | 1–100 (JPEG/WebP/AVIF; PNG is lossless and ignores it) |
 | `resample` | string | `lanczos` | `nearest` · `linear` · `catmullrom` · `mitchell` · `lanczos` |
 | `upscale` | bool | `false` | growing beyond the source is refused unless set |
 | `anchor` | string | `center` | used by `fill` |
@@ -45,7 +46,8 @@ Unknown keys are rejected (`unknown option "widht"`).
 
 - **scale** — exact dimensions, aspect distortion allowed (needs both).
 - **fit_width / fit_height** — one exact dimension, the other calculated.
-- **fit** — largest size fitting inside the box, aspect preserved.
+- **fit** — largest size fitting inside the box, aspect preserved (width
+  and/or height).
 - **fill** — resize + crop to exact dimensions (anchor or focal point).
 
 ### `imageCrop path dict`
@@ -83,9 +85,12 @@ ever published.
      width="{{ $set.Default.Width }}" height="{{ $set.Default.Height }}" alt="">
 ```
 
-Widths are sorted and deduplicated; invalid ones dropped; widths above the
-source are skipped unless `upscale`; up to 20 variants per source; `Default`
-is the largest generated variant unless `defaultWidth` picks another.
+Options: `widths` (required), `defaultWidth`, `mode` (default `fit_width`) plus
+`format`, `quality`, `resample`, `upscale`, `anchor`. Widths are sorted and
+deduplicated; non-positive ones dropped; widths above the source are skipped
+unless `upscale` (an error if that leaves none); more than 20 distinct widths
+is an error; `Default` is the largest generated variant unless `defaultWidth`
+picks another. `.Images` lists every variant.
 
 ### `imagePicture path dict`
 
@@ -108,21 +113,36 @@ The last encodable format becomes the `<img>` fallback; earlier formats become
 `<source>` elements. **A format whose encoder is not installed is skipped with
 a warning, not a build failure** — so the same template works on a machine
 without `avifenc`/`cwebp` (the AVIF `<source>` simply drops out). `formats`
-defaults to `["webp", "jpeg"]`.
+defaults to `["webp", "jpeg"]`; `widths` is required; a top-level `format` is
+rejected (use `formats`). The `<img>` carries `src` (the fallback's largest
+variant), `width`/`height`, a `srcset` of the fallback format's widths (so a
+browser that falls back still picks a fitting size), `sizes`, `alt`,
+`loading="lazy"` and `decoding="async"`.
 
 Result object: `.Sources` (each `.Format`/`.Type`/`.SrcSet`), `.Fallback` (an
-image result for the `<img>`), `.Sizes`, `.Alt`, `.Skipped` (formats dropped for
+image result for the `<img>`), `.FallbackSrcSet` (the `<img>`'s `srcset`), `.Sizes`, `.Alt`, `.Skipped` (formats dropped for
 a missing encoder) and `.HTML` (the ready-to-emit markup; pipe through
 `safeHTML`).
 
 ## Result object
 
-`.URL` `.StaticPath` `.Width` `.Height` `.OriginalWidth` `.OriginalHeight`
-`.Format` `.FileSize` `.CacheKey` — no absolute filesystem paths.
+`.URL` `.StaticPath` `.SourcePath` `.Width` `.Height` `.OriginalWidth`
+`.OriginalHeight` `.Format` `.FileSize` `.CacheKey` — no absolute filesystem
+paths (`.SourcePath` is the path as passed to the helper).
 
 ## Formats & policies
 
-- **Output**: `jpg`/`jpeg`, `png`, `webp`, `avif` (`auto` = keep source format).
+- **Input**: JPEG, PNG, GIF and WebP only, detected from the file's bytes, not
+  its extension (SEC-013: TIFF/BMP are refused before any decode).
+- **Output**: `jpg`/`jpeg`, `png`, `webp`, `avif` (`auto` = keep source format;
+  there is no GIF encoder, so a static GIF under `auto` is published as PNG,
+  and a WebP source kept as WebP needs `cwebp`). AVIF is encoded with
+  `avifenc -q <quality> -s 5`.
+- **Quality**: a call without `quality` uses the site's settings — the same
+  `webp_quality` (`--webp-quality`, default 60) and `avif_quality`
+  (`--avif-quality`, default 45) the `--webp`/`image_formats` pipeline uses;
+  JPEG defaults to 82. The configured value is part of the cache key, so
+  changing it regenerates the affected variants.
   WebP encoding uses the **optional `cwebp` tool** and AVIF the **optional
   `avifenc` tool** (from libavif) — same optional-binary approach, no CGO, the
   binary stays static. Requesting a format without its tool is a descriptive
@@ -138,12 +158,15 @@ a missing encoder) and `.HTML` (the ready-to-emit markup; pipe through
 
 ## Cache & GC
 
-Key = `sha256(source bytes + normalized ops JSON + processor version)` → name
-`<base>.<hash10>.<ext>`. Repeated and clean builds produce identical filenames;
+Key = `sha256(source bytes + normalized ops JSON [+ configured WebP/AVIF quality
+when the call sets none] + processor version)` → name `<base>.<hash10>.<ext>`.
+A cached AVIF is verified from its own `ftyp`/`ispe` header (Go has no AVIF
+decoder), so a second build reuses it instead of running `avifenc` again. Repeated and clean builds produce identical filenames;
 concurrent identical requests process once.
 
 Garbage collection (GO-057): `--images-gc` (config `images_gc: true`) deletes
-cache entries the just-finished build no longer references; `--images-gc-dry`
+files in `.ssg-cache/images/` the just-finished build no longer references
+(left-over `tmp-` files included; the output directory is not touched); `--images-gc-dry`
 (`images_gc_dry: true`) only reports the file count and bytes that would be
 reclaimed. GC runs after generation and never fails the build — errors are
 reported as warnings.

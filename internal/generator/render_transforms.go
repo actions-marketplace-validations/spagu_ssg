@@ -49,10 +49,8 @@ func minifyHTMLString(s string, keepComments []string) string {
 		return placeholder
 	}
 	s = minIgnoreBlockRe.ReplaceAllStringFunc(s, func(match string) string {
-		if inner := minIgnoreBlockRe.FindStringSubmatch(match); len(inner) > 1 {
-			return preserve(inner[1])
-		}
-		return match
+		// The pattern has one group, so a match always carries it.
+		return preserve(minIgnoreBlockRe.FindStringSubmatch(match)[1])
 	})
 	s = minPreserveTagRe.ReplaceAllStringFunc(s, preserve)
 	s = minHTMLCommentRe.ReplaceAllStringFunc(s, func(match string) string {
@@ -163,11 +161,12 @@ func (g *Generator) seoHTMLString(s string, page models.Page, isPost bool) strin
 	}
 	// The site's own identity, discovered when the content was migrated:
 	// icons, social defaults and verification tokens (GO-100 follow-up). Only
-	// what the theme has not already emitted.
-	b.WriteString(g.buildMarketingHead(s))
+	// what the theme has not already emitted — nor this block: the page's own
+	// og:image above wins over the site-wide fallback (#371).
+	b.WriteString(g.buildMarketingHead(s + b.String()))
 	// The site palette as CSS custom properties, so a theme can style against
 	// the source site's colours instead of the author copying hex codes (#128).
-	b.WriteString(g.buildPaletteHead(s))
+	b.WriteString(g.buildPaletteHead(s + b.String()))
 	// Fall back to the front-matter description when the theme emitted no usable
 	// one (#76). Nothing is invented here — the author already wrote it, it just
 	// never reached the output because the template interpolated a different
@@ -225,7 +224,7 @@ func (g *Generator) transformHTMLPage(s string, page *models.Page, isPost bool) 
 		// home/listing context carries no Content, so it is skipped and never
 		// advertises a file that was not written.
 		if page.Content != "" {
-			if g.config.MarkdownPublish {
+			if g.publishesMarkdown(*page) {
 				s = injectMarkdownAlternate(s, markdownLeaf(page.GetURL()))
 			}
 			s = injectAlternates(s, g.alternateLinks(*page, s))
@@ -238,6 +237,8 @@ func (g *Generator) transformHTMLPage(s string, page *models.Page, isPost bool) 
 	s = g.injectComponentAssets(s)
 	// Print / PDF and Cook Mode, before Listen so the buttons read in order (1.8.72).
 	s = g.pageToolsHTMLString(s, page, isPost)
+	// The reading companion and presentation, where story: selects the page (1.9.4).
+	s = g.storyHTMLString(s, page, isPost)
 	// The article read aloud: the MP3 player or the browser button, where the
 	// theme did not place one, and the button's script (1.8.65).
 	s = g.listenHTMLString(s, page)
@@ -252,11 +253,14 @@ func (g *Generator) transformHTMLPage(s string, page *models.Page, isPost bool) 
 	// site with `seo: false` got none at all despite having consented. The two
 	// were always separate decisions; only the code had them tangled.
 	s = g.injectAnalytics(s)
+	// The licence's one condition, written into the page (1.9.0).
+	s = g.injectAttribution(s)
 	// Feed autodiscovery is injected for every page, not only those with a page
 	// context. The SEO block runs only for posts and pages, so the site homepage
 	// — the first place a reader or a subscription tool looks — never advertised
 	// a feed at all (#86).
 	s = g.injectFeedLinks(s, lang)
+	s = g.injectWebPush(s)
 	if g.config.Math {
 		s = mathHTMLString(s)
 	}
@@ -311,6 +315,7 @@ func (g *Generator) renderPageTemplate(templateName, outputPath string, data int
 	if strings.HasSuffix(strings.ToLower(outputPath), ".html") {
 		themeLD := strings.Contains(out, "application/ld+json")
 		out = g.transformHTMLPage(out, page, isPost)
+		out = g.injectViewAlternates(out, outputPath)
 		out = g.injectStructuredData(out, structuredDataOf(data), themeLD)
 		g.noteEmptyCanonical(outputPath, out)
 		// Re-encode the finished HTML to the page's output encoding, keeping the

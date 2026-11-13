@@ -21,6 +21,10 @@ With this on, every page is published a second time as clean Markdown:
 - A root **`llms.txt`** index listing every page and pointing at its Markdown
   copy (the [llms.txt](https://llmstxt.org) convention).
 
+Pages the site keeps out of search are left out of all four. That means
+`robots: noindex`, `sitemap: no`, redirects and the 404 page, the same rule as
+the sitemap (1.9.0). Agents are not sent where crawlers were told not to go.
+
 The published copy is the Markdown you wrote — an H1 title followed by the body
 — not an HTML→Markdown round-trip, so nothing is lost or re-guessed. Listing
 pages (the home page, archives) carry no source Markdown and are skipped.
@@ -57,6 +61,14 @@ taxonomy listings, the home page and `404.html`:
 | `listByTag(tag)` | Every document carrying that tag |
 | `getDocument(url)` | One document's title, excerpt, tags, language and text |
 | `navigate(url)` | Opens one of **this site's own** documents |
+
+On a site with `api_docs` ([API_DOCS.md](API_DOCS.md)) two more are registered,
+answering from `api.json` (fetched on first call, like the index):
+
+| Tool | Answers |
+|---|---|
+| `findSymbol(query, limit)` | Documented code symbols whose name contains `query` (default 20) |
+| `getSymbol(id)` | One symbol by id: signatures, types, documentation; members as a list |
 
 `navigate` refuses any URL not in the site's own index. An agent can move a
 reader around the site it is already on and nowhere else.

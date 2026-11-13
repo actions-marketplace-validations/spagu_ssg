@@ -19,6 +19,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -333,17 +334,26 @@ type Config struct {
 	SanitizeOutput string
 	// ImageMetadata is "strip" (default) or "keep" for generated derivatives.
 	ImageMetadata string
+	// WebPQuality/AVIFQuality are webp_quality/avif_quality, so the image*
+	// template helpers encode at the same settings as the build pipeline (#375).
+	// Zero falls back to the pipeline defaults (60/45).
+	WebPQuality int
+	AVIFQuality int
 	// Schema holds site-wide JSON-LD defaults merged into every page's generated
 	// structured data (publisher, etc.); per-page schema: overrides it (#61).
 	Schema         map[string]interface{}
 	SchemaDefaults map[string]map[string]interface{} // per-section structured-data defaults (#110)
 	// CheckLinks/CheckImages/CheckMeta are post-build validation modes: "" (off),
 	// "warn" or "strict"; Strict escalates any enabled one to fatal (#75, #76).
-	CheckLinks  string
-	CheckImages string
-	CheckMarkup string
-	CheckMeta   string
-	CheckSchema string // validate emitted JSON-LD: "" | warn | strict (#111)
+	CheckLinks string
+	// PendingImageFormats are the formats the post-build pass writes beside
+	// each raster image (webp, avif): a link to x.webp resolves when x.jpg is
+	// there, since the link check runs before that pass (#405).
+	PendingImageFormats []string
+	CheckImages         string
+	CheckMarkup         string
+	CheckMeta           string
+	CheckSchema         string // validate emitted JSON-LD: "" | warn | strict (#111)
 	// CheckSchemaRecommended also lists missing recommended properties, as
 	// advice that never fails the build.
 	CheckSchemaRecommended bool
@@ -365,6 +375,9 @@ type Config struct {
 	// FeedAutodiscovery injects the <link rel="alternate"> elements; nil/true
 	// keeps the default behaviour (#86).
 	FeedAutodiscovery *bool
+	// Attribution keeps the "Built with ssg" notice in every page; nil/true is
+	// on (1.9.0, see docs/LICENSING.md).
+	Attribution *bool
 	// SitemapPruneCanonical opts into dropping non-self-canonical pages from the
 	// sitemap; noindex pages are dropped regardless (#78).
 	SitemapPruneCanonical bool
@@ -396,12 +409,20 @@ type Config struct {
 	Listen ListenOptions
 	// WebStories makes an AMP web story from each selected post (1.8.72).
 	WebStories WebStoriesOptions
+	// Story adds the reading companion and presentation to articles (1.9.4).
+	Story StoryOptions
 	// Print adds the Print / PDF button and print stylesheet; CookMode the
 	// step-by-step recipe view (1.8.72).
 	Print    PrintOptions
 	CookMode CookModeOptions
 	// HeadingAnchors appends a self-link to each heading with an id (#364).
 	HeadingAnchors HeadingAnchorsOptions
+	// OGCards draws a social preview card for each page without a featured
+	// image (1.9.0).
+	OGCards OGCardOptions
+	// WebPush writes the manifest and the subscribe script for the web-push
+	// worker (#368).
+	WebPush WebPushOptions
 	// Breadcrumbs shapes the derived JSON-LD BreadcrumbList (1.8.73, #335).
 	Breadcrumbs BreadcrumbOptions
 	// APIDocs documents JavaScript/TypeScript packages as pages (GO-107);
@@ -558,6 +579,7 @@ type Generator struct {
 	bracketRes        map[string]bracketShortcodeRes // per-shortcode bracket regexes, compiled once (PERF-006)
 	shortcodeFailures []string                       // shortcodes that failed to render (issue #37)
 	webStories        storySet                       // this build's web stories (1.8.72)
+	storyUsed         atomic.Bool                    // a page got the story presentation (1.9.4)
 	linkRewriteKeys   []string                       // link_rewrites prefixes, longest first (LINK-002)
 	linkRewriteOnce   sync.Once                      // built on the render pool, so memoize under a Once
 	gitOnce           sync.Once                      // guards the single git-log scan (PERF-001)
@@ -699,6 +721,9 @@ type Generator struct {
 	// outputCache holds each page's rendered output formats between the
 	// <head> asking whether one exists and the file being written (#355).
 	outputCache sync.Map
+	// viewAlternates holds the <head> links a taxonomy page announces for the
+	// formats written beside it, keyed by the HTML's output path (#370).
+	viewAlternates sync.Map
 
 	// graph records what this build depended on; prevGraph is the previous
 	// build's, and plan is what the two say can be skipped (GO-094). pending
@@ -1082,6 +1107,9 @@ func (g *Generator) Generate() error {
 	// graph is only useful if it describes the build that actually ran (GO-094).
 	g.startGraph()
 
+	if err := g.checkHookCommands(); err != nil {
+		return err
+	}
 	if err := g.runHooks("pre_build", nil); err != nil {
 		return fmt.Errorf("pre_build hook: %w", err)
 	}
@@ -1112,6 +1140,10 @@ func (g *Generator) Generate() error {
 	if err := g.profile.Measure("Web stories", g.generateWebStories); err != nil {
 		return err
 	}
+	// Before rendering, so og:image and templates can name each page's card.
+	if err := g.profile.Measure("Social cards", g.generateOGCards); err != nil {
+		return err
+	}
 
 	if err := g.runStep("🏗️  Generating site...", g.generateSite, "generating site"); err != nil {
 		return err
@@ -1137,6 +1169,9 @@ func (g *Generator) Generate() error {
 		return err
 	}
 
+	if err := g.profile.Measure("Story assets", g.writeStoryAssets); err != nil {
+		return fmt.Errorf("writing story assets: %w", err)
+	}
 	if err := g.profile.Measure("Sitemap and robots", g.generateSitemapAndRobots); err != nil {
 		return err
 	}
@@ -1175,6 +1210,10 @@ func (g *Generator) Generate() error {
 
 	if err := g.runStep("☁️  Generating Cloudflare Pages files...", g.generateCloudflareFiles, "generating Cloudflare files"); err != nil {
 		return err
+	}
+
+	if err := g.profile.Measure("Web push", g.writeWebPush); err != nil {
+		return fmt.Errorf("writing %s: %w", webManifestName, err)
 	}
 
 	if err := g.profile.Measure("Assets and checks", g.assetPhase); err != nil {
@@ -1330,7 +1369,7 @@ func (g *Generator) runHooks(phase string, extraEnv map[string]string) error {
 		err := cmd.Run()
 		cancel()
 		if err != nil {
-			return fmt.Errorf("hook %q (%s): %w", cmdline, phase, err)
+			return hookError(cmdline, phase, err)
 		}
 	}
 	return nil
@@ -1554,6 +1593,9 @@ func (g *Generator) finalizeLoadedContent() error {
 	g.recordContentInputs()
 	g.planIncremental()
 	g.pending = g.incrementalOutputs()
+	if err := g.checkHiddenFrontPage(); err != nil {
+		return err
+	}
 	if !g.config.I18n.Enabled {
 		// i18n has a stricter check of its own below, aliases and root included.
 		return g.detectPathCollisions()
@@ -2124,10 +2166,9 @@ func (g *Generator) loadContentFromMddb() error {
 		return err
 	}
 
-	// Load metadata (categories, media, users) from mddb
-	if err := g.loadMetadataFromMddb(client); err != nil {
-		return fmt.Errorf("loading metadata from mddb: %w", err)
-	}
+	// Load metadata (categories, media, users) from mddb. Every collection is
+	// optional and a missing one is only a warning, so this cannot fail.
+	_ = g.loadMetadataFromMddb(client)
 
 	// Resolve flexible author/category fields (string → ID lookup)
 	g.siteData.ResolveFlexibleFields()
@@ -2567,6 +2608,7 @@ func (g *Generator) renderWithEngine(templateName, outputPath string, data inter
 	if strings.HasSuffix(strings.ToLower(outputPath), ".html") {
 		themeLD := strings.Contains(out, "application/ld+json")
 		out = g.transformHTMLPage(out, page, isPost)
+		out = g.injectViewAlternates(out, outputPath)
 		out = g.injectStructuredData(out, structuredDataOf(data), themeLD)
 		g.noteEmptyCanonical(outputPath, out)
 	}
@@ -2733,10 +2775,8 @@ var mdLinkRe = regexp.MustCompile(`href="([^"#?]*\.md)([#?][^"]*)?"`)
 
 func (g *Generator) rewriteMdLinks(html string, mdLinkMap map[string]map[string]string) string {
 	return mdLinkRe.ReplaceAllStringFunc(html, func(match string) string {
+		// match is itself a match of mdLinkRe, so every group is present.
 		parts := mdLinkRe.FindStringSubmatch(match)
-		if len(parts) < 3 {
-			return match
-		}
 		// An absolute URL to another host is not an in-repository link, however
 		// it ends (#107). Without this check, a link to the file's own history
 		// on GitHub — .../content/site/pages/privacy.md — was matched on its
@@ -3304,10 +3344,8 @@ func (g *Generator) processBracketShortcodesWith(content string, render func(Sho
 		}
 		// First: closing-tag with optional attrs [name ...]...[/name]
 		content = res.closing.ReplaceAllStringFunc(content, func(match string) string {
+			// match is itself a match, so both groups are present.
 			parts := res.closing.FindStringSubmatch(match)
-			if len(parts) < 3 {
-				return match
-			}
 			sc := g.shortcodeWithOverrides(baseSc, parts[1], parts[2])
 			sc.Raw = match
 			return render(sc)
@@ -3315,10 +3353,8 @@ func (g *Generator) processBracketShortcodesWith(content string, render func(Sho
 
 		// Second: self-closing with attrs [name attr="val"]
 		content = res.selfAttrs.ReplaceAllStringFunc(content, func(match string) string {
+			// match is itself a match, so the group is present.
 			parts := res.selfAttrs.FindStringSubmatch(match)
-			if len(parts) < 2 {
-				return match
-			}
 			sc := g.shortcodeWithOverrides(baseSc, parts[1], "")
 			sc.Raw = match
 			return render(sc)
@@ -4297,9 +4333,9 @@ func (g *Generator) writePageAt(page models.Page, outputPath, templateName strin
 
 	// Co-located assets go only to the directory-style path, to avoid duplicates.
 	if page.SourceDir != "" && strings.HasSuffix(outputPath, indexHTMLName) {
-		if err := g.copyColocatedAssets(page.SourceDir, outputDir, page.Content); err != nil {
-			fmt.Printf("   ⚠️  Warning: couldn't copy co-located assets for page %s: %v\n", page.Slug, err)
-		}
+		// Its only failure is creating outputDir, which ensureDir above has
+		// just done; a file that cannot be copied is reported inside.
+		_ = g.copyColocatedAssets(page.SourceDir, outputDir, page.Content)
 	}
 
 	// Render + per-file transforms (SEO/math/relative/prettify/minify) in a
@@ -4367,9 +4403,9 @@ func (g *Generator) generatePost(post models.Page) error {
 
 		// Copy co-located assets only to the directory-style path (avoid duplicates)
 		if post.SourceDir != "" && strings.HasSuffix(outputPath, indexHTMLName) {
-			if err := g.copyColocatedAssets(post.SourceDir, outputDir, post.Content); err != nil {
-				fmt.Printf("   ⚠️  Warning: couldn't copy co-located assets for post %s: %v\n", post.Slug, err)
-			}
+			// Its only failure is creating outputDir, which ensureDir above has
+			// just done; a file that cannot be copied is reported inside.
+			_ = g.copyColocatedAssets(post.SourceDir, outputDir, post.Content)
 		}
 
 		// Render + per-file transforms in a single write (PERF-005).
@@ -4569,8 +4605,10 @@ func (g *Generator) socialMeta(page models.Page, isPost bool) string {
 			}
 		}
 	}
-	if page.FeaturedImage != "" {
-		fmt.Fprintf(&b, `<meta property="og:image" content="%s">`+"\n", stdhtml.EscapeString(g.socialURL(page.FeaturedImage)))
+	image := pageImage(page)
+	if image != "" {
+		fmt.Fprintf(&b, `<meta property="og:image" content="%s">`+"\n", stdhtml.EscapeString(g.socialURL(image)))
+		b.WriteString(g.ogCardSizeMeta(page))
 	}
 	fmt.Fprintf(&b, `<meta name="twitter:card" content="summary_large_image">`+"\n")
 	fmt.Fprintf(&b, `<meta name="twitter:title" content="%s">`+"\n", stdhtml.EscapeString(title))
@@ -4580,8 +4618,8 @@ func (g *Generator) socialMeta(page models.Page, isPost bool) string {
 	// twitter:image mirrors og:image so summary_large_image cards render the
 	// featured image; both stay as authored and are extension-rewritten to the
 	// emitted .webp by the webp reference pass, same as in-content <img> (#64).
-	if page.FeaturedImage != "" {
-		fmt.Fprintf(&b, `<meta name="twitter:image" content="%s">`+"\n", stdhtml.EscapeString(g.socialURL(page.FeaturedImage)))
+	if image != "" {
+		fmt.Fprintf(&b, `<meta name="twitter:image" content="%s">`+"\n", stdhtml.EscapeString(g.socialURL(image)))
 	}
 	return b.String()
 }
@@ -4830,6 +4868,11 @@ func (g *Generator) pageToTemplateData(page models.Page, isPost bool) map[string
 		"Robots":         page.Robots,
 		"Sitemap":        page.Sitemap,
 		"FeaturedImage":  page.FeaturedImage,
+		// The drawn share card and the source a page was built from, which
+		// TEMPLATES.md lists beside FeaturedImage; the flat map lacked both,
+		// so `{{.OGCard}}` was empty in page templates (#395).
+		"OGCard":         page.OGCard,
+		"ExternalSource": page.ExternalSource,
 		"Tags":           page.Tags,
 		"Category":       page.Category,
 		"Layout":         page.Layout,
@@ -5259,10 +5302,8 @@ var (
 // wp-image-ID classes in content to their local /media/ paths.
 func buildWPMediaReplacements(content string, media map[int]models.MediaItem) map[string]string {
 	replacements := map[string]string{}
+	// Every match carries the regexp's one group.
 	for _, match := range wpImageIDRe.FindAllStringSubmatch(content, -1) {
-		if len(match) < 2 {
-			continue
-		}
 		var id int
 		_, _ = fmt.Sscanf(match[1], "%d", &id)
 		mediaItem, ok := media[id]
@@ -5293,10 +5334,8 @@ func fixMediaPaths(content string, media map[int]models.MediaItem) string {
 		// One pass over all src URLs; each candidate URL is matched against the
 		// known media filenames (PERF-006: no per-image full-document rescans).
 		content = wpSrcURLRe.ReplaceAllStringFunc(content, func(m string) string {
+			// m is itself a match, so all three groups are present.
 			parts := wpSrcURLRe.FindStringSubmatch(m)
-			if len(parts) < 4 {
-				return m
-			}
 			for nameNoExt, localPath := range replacements {
 				if strings.Contains(parts[2], nameNoExt) {
 					return parts[1] + localPath + parts[3]
@@ -5362,10 +5401,8 @@ func processWPShortcodesWith(content string, emit func(string) string) string {
 	}
 	for _, re := range wpVideoShortcodeRes {
 		content = re.ReplaceAllStringFunc(content, func(match string) string {
+			// match is itself a match of re, so the ID group is present.
 			submatches := re.FindStringSubmatch(match)
-			if len(submatches) < 2 {
-				return match
-			}
 			return emit(youtubeEmbedHTML(submatches[1]))
 		})
 	}
@@ -5618,6 +5655,8 @@ func (g *Generator) documentEntries(docs []models.Page, claimed map[string]bool,
 			priority:   g.pagePriority(doc, priority),
 			kind:       kind,
 			source:     doc.SourceDir,
+			section:    doc.Section,
+			external:   doc.ExternalSource,
 		})
 	}
 	return out
@@ -6113,10 +6152,8 @@ func writeWithSourceMap(path, original, minified string) error {
 		Names:          []string{},
 		Mappings:       identityLineMappings(lineCount),
 	}
-	mapJSON, err := json.Marshal(sm)
-	if err != nil {
-		return err
-	}
+	// Strings, a slice of them and an int: encoding cannot fail.
+	mapJSON, _ := json.Marshal(sm)
 
 	comment := "js"
 	if strings.EqualFold(filepath.Ext(path), ".css") {
@@ -6192,10 +6229,8 @@ func (g *Generator) fingerprintAssets() error {
 		return err
 	}
 
-	mj, err := json.MarshalIndent(manifest, "", "  ")
-	if err != nil {
-		return err
-	}
+	// A map of strings: encoding cannot fail.
+	mj, _ := json.MarshalIndent(manifest, "", "  ")
 	// #nosec G306 -- manifest is public build metadata served with the site
 	return os.WriteFile(filepath.Join(g.config.OutputDir, "assets-manifest.json"), mj, 0644)
 }

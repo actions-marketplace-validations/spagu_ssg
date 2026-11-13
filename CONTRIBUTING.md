@@ -24,7 +24,7 @@ review workflow. By participating, you agree to follow the
 - Optional Dart Sass for SCSS integration paths
 - Optional `golangci-lint`, `gosec` and `govulncheck` for extended checks
 
-CI enforces a **96 % statement-coverage floor twice**: on the whole module, and
+CI enforces a **97 % statement-coverage floor twice**: on the whole module, and
 on every package individually. Both are computed without the generated protobuf
 under `internal/mddb/proto` (the same exclusion `codecov.yml` uses). A pull
 request that drops either below the floor fails the `Test` job;
@@ -34,7 +34,9 @@ request that drops either below the floor fails the `Test` job;
 go test -cover ./... | sort -t: -k2 -n
 ```
 
-shows the per-package one. The second gate exists because the first was being
+shows the per-package one, rounded: `go test -cover` prints 96.98 % as 97.0 %,
+so compute the exact figure from a coverprofile when a package is near the
+floor. The second gate exists because the first was being
 held up by packages at 99–100 % while others sat in the eighties, which is
 exactly the shape a single number hides. gosec runs in CI too, with
 results in the repository's Security tab.
@@ -192,6 +194,18 @@ make version-check
 Do not create tags or publish packages as part of an ordinary contribution.
 Maintainers handle releases. User-visible changes should be recorded in
 `CHANGELOG.md` under the appropriate release section.
+
+### How often CI tests a release (maintainers)
+
+Tests run once per release, on the pull request. The merge commit pushed to
+`main` and the tag pushed at it start with an **Already tested** job
+(`.github/actions/already-tested`): when the PR head passed Test, Lint and TTS
+server on the same code, those jobs are skipped and the tag goes straight to
+the build. "Same code" means `main` differs from the PR head only in files CI
+ignores (docs, blog, `*.md`), so a code commit landed on `main` meanwhile
+makes the checks run again. To force a full run, use *Run workflow*: manual
+runs always test. Merge with a merge commit, not squash or rebase — the
+lookup needs the PR head as the merge commit's second parent.
 
 ### Republishing the Homebrew tap (maintainers)
 

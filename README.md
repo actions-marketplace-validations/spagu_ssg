@@ -5,7 +5,9 @@
 [![Go Report Card](https://goreportcard.com/badge/github.com/spagu/ssg)](https://goreportcard.com/report/github.com/spagu/ssg)
 [![codecov](https://codecov.io/gh/spagu/ssg/branch/main/graph/badge.svg)](https://codecov.io/gh/spagu/ssg)
 [![GitHub Release](https://img.shields.io/github/v/release/spagu/ssg?style=flat&color=blue)](https://github.com/spagu/ssg/releases)
-[![License](https://img.shields.io/badge/License-BSD_3--Clause-blue.svg)](LICENSE)
+[![Docker](https://github.com/spagu/ssg/actions/workflows/docker.yml/badge.svg)](https://github.com/spagu/ssg/actions/workflows/docker.yml)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/spagu/ssg/badge)](https://scorecard.dev/viewer/?uri=github.com/spagu/ssg)
+[![License](https://img.shields.io/badge/License-BUSL--1.1-blue.svg)](LICENSE)
 
 SSG is a fast static site generator written in Go. It turns Markdown with YAML
 frontmatter into a complete website with clean URLs, templates, feeds, search,
@@ -22,7 +24,8 @@ documentation, company sites, portfolios and landing pages.
 
 - Fast, deterministic builds with a single Go binary
 - Markdown content with YAML frontmatter
-- Built-in `simple`, `krowy` and `apidoc` (documentation) themes
+- Built-in `simple`, `krowy` and `apidoc` (documentation) themes, plus `imd` and
+  `ssgtheme` in the repository ([docs/TEMPLATES.md](docs/TEMPLATES.md))
 - Go, Pongo2, Mustache and Handlebars template engines
 - Sitemap, robots.txt, Atom feeds, search index and SEO metadata
 - WebP conversion, responsive images, SCSS, minification and fingerprinting
@@ -164,6 +167,29 @@ This reads `content/my-blog/`, uses the `krowy` theme, treats
 All three values may instead be provided by a configuration file. In MDDB mode,
 content is fetched remotely and the source argument is optional.
 
+Subcommands are recognised only on a known verb (or verb + noun), so a content
+source named `new`, `cache` or `migrate` still builds (`--source=migrate` for
+the reserved single verbs):
+
+| Command | Purpose |
+|---|---|
+| `ssg init [name] [--domain example.com]` | Scaffold a ready-to-build project without overwriting anything |
+| `ssg new worker <template>` | Scaffold a Cloudflare Pages Functions template into `workers/<template>/` |
+| `ssg new wrangler` | Write a starter `wrangler.toml` for the configured workers |
+| `ssg import redirects <file>` | Convert a Next.js `redirects()` rule set into a `redirects:` block |
+| `ssg migrate <provider> <url>` | Migrate a live site into a project ([docs/MIGRATE.md](docs/MIGRATE.md)) |
+| `ssg repair [path...] [--fix]` | Find (and fix) markup an export left indented or fenced |
+| `ssg graph [path] [--dot\|--json]` | What a change rebuilds, and why a build cannot be narrowed |
+| `ssg profile page /url/` | What one page cost in the last `--profile=json` build |
+| `ssg config view\|set\|unset` | Read and edit the config file, comments intact |
+| `ssg cache stats\|clean\|gc` | Inspect or prune `.ssg-cache/` (images, external-sources, ai, graph, markdown, tts) |
+| `ssg mddb push-theme [--dry]` | Upsert templates and assets into MDDB for MCP search |
+| `ssg mcp` | Development MCP server for AI-assisted editing ([docs/MCP.md](docs/MCP.md)) |
+| `ssg daemon [--once]` | Watch every project in `.ssg_projects` from one process ([docs/DAEMON.md](docs/DAEMON.md)) |
+| `ssg self-update-check` | Say whether a newer release exists and how to upgrade this install |
+
+`man ssg` (installed by `make install` and the packages) documents every flag.
+
 ## Content model
 
 SSG uses explicit locations and predictable output rules. These rules are useful
@@ -227,7 +253,7 @@ For predictable results, pages and posts should define `title`, `status` and
 | `aliases` | list | Previous paths that `301` to this item (and, by default, get a redirect stub) |
 | `alias_stubs` | bool | Per-page override: `false` = 301 only (no duplicate copy), `true` = force a stub |
 | `schema` | map | Override/extend this page's generated JSON-LD (deep-merged, per-page wins) |
-| `featured_image` | string | Hero image; also the `og:image`, `twitter:image` and JSON-LD `image` (follows WebP conversion) |
+| `featured_image` | string | Hero image; also the `og:image`, `twitter:image` and JSON-LD `image` (follows WebP conversion). Without one, `og_cards` draws a card |
 | `layout` | string | Page layout name; `redirect` also marks sitemap exclusion |
 | `template` | string | Page template file override |
 | `robots` | string | Robots directive; `noindex` also excludes from sitemap |
@@ -290,10 +316,12 @@ Common options:
 | Clean output first | `clean: true` | `--clean` |
 | Minify HTML/CSS/JS | `minify_all: true` | `--minify-all` |
 | Convert images to WebP | `webp: true` | `--webp` |
+| Publish AVIF and WebP, best first | `image_formats: [avif, webp]` | `--image-formats=avif,webp` |
 | Responsive images | `image_sizes: [480, 960]` | `--image-sizes=480,960` |
 | Fingerprint CSS/JS | `fingerprint: true` | `--fingerprint` |
 | Compile SCSS | `scss: true` | `--scss` |
 | Generate Atom feeds | `feed: true` | `--feed` |
+| Publish a Google Merchant Center product feed | `feeds: [{path: /merchant.xml, format: google-merchant}]` | config only |
 | Generate search index | `search_index: true` | `--search-index` |
 | Declare the site's tools to a browser agent | `webmcp: true` | `--webmcp` |
 | Add SEO metadata | `seo: true` | `--seo` |
@@ -315,6 +343,8 @@ Common options:
 | Name relations between pages, and version a document | `relations:` / `version_of:` in frontmatter | config only |
 | Publish a page as JSON, Markdown, text or your own format | `outputs: {page: [html, json]}` | `--outputs=html,json` |
 | Validate internal links | `check_links: strict` | `--check-links=strict` |
+| Check alt text, meta, JSON-LD, orphans, redirects | `check_images: warn` (and `check_meta`, `check_schema`, `check_orphans`, `check_redirects`) | `--check-images` … `--check-redirects[=strict]` |
+| Skip the generated `404.html` | `not_found_off: true` | `--not-found-off` |
 | Fail on unrenderable shortcodes | `shortcode_errors: strict` | `--shortcode-errors=strict` |
 | Pull Markdown from other folders | `content_sources: [{path: docs}]` | `--content-source=docs` |
 | Derive missing excerpts | `auto_excerpt: true` | `--auto-excerpt` |
@@ -361,7 +391,8 @@ and accepted values live in [.ssg.yaml.example](.ssg.yaml.example).
 | Blog | Pagination, tags, categories, series, reading time, Atom feeds, related content |
 | API docs from code | `api_docs:` reads JavaScript (and TypeScript declarations) with their doc comments into pages of the site — packages, modules, classes, cross-links, source links — plus `api.json`, `check_api`, and MCP/WebMCP tools for agents; no Node needed for JS. `@example` blocks can run in the browser (`playground:`) ([docs/API_DOCS.md](docs/API_DOCS.md)) |
 | API docs for Go, PHP, Python | The same pages from Go (standard library parser), PHP and Python (built-in declaration scanners): nothing to install, language detected from `go.mod`, `composer.json`, `pyproject.toml` ([docs/API_LANGUAGES.md](docs/API_LANGUAGES.md)) |
-| Web Stories | Google Web Stories (AMP) from your posts: cover, captioned photo pages, a link back to the article, a hub page and sitemap entries ([docs/WEB_STORIES.md](docs/WEB_STORIES.md)) |
+| Web Stories | Google Web Stories (AMP) from your posts: cover, captioned photo pages, a link back to the article, a hub page and sitemap entries; with `narration: true` each page is read aloud ([docs/WEB_STORIES.md](docs/WEB_STORIES.md)) |
+| Story mode | Articles as a reading companion and fullscreen presentation: reading bar, photo stage, widgets, narrator with pronunciation rules, music by date, share and deep links, the same slides as the Web Story ([docs/STORY.md](docs/STORY.md)) |
 | Print / PDF and Cook Mode | A print button with a clean print stylesheet and a printable recipe card, and a full-screen step-by-step recipe view that keeps the screen awake; every theme, built from the Recipe structured data ([docs/PRINT_AND_COOK_MODE.md](docs/PRINT_AND_COOK_MODE.md)) |
 | Résumé / CV | A [Schema Resume](https://schema-resume.org) JSON document as a page in any theme, with ProfilePage/Person JSON-LD and the document at `/cv/resume.json`; contact details stay private by default ([docs/RESUME.md](docs/RESUME.md)) |
 | Recipes and structured data | Recipe fields from the post (ingredients, method, category), `faq:` → FAQPage, ItemList on listings, ProfilePage for authors, Organization from `marketing:` ([docs/CONFIGURATION.md](docs/CONFIGURATION.md#recipes)) |
@@ -369,23 +400,24 @@ and accepted values live in [.ssg.yaml.example](.ssg.yaml.example).
 | `apidoc` theme | A documentation-only theme: guides and references in one sidebar, search, "On this page", light/dark, WCAG 2.2 AA ([templates/apidoc/README.md](templates/apidoc/README.md)) |
 | Read aloud | A "Listen" button with the visitor's own browser voice, and/or an MP3 per article from a TTS API at build time — cached, with a jingle, a fallback when the API is down, a podcast feed, and a self-hostable Docker TTS server ([docs/AUDIO.md](docs/AUDIO.md)) |
 | Taxonomies | Custom dynamic taxonomies with term archives, metadata, per-term feeds and template helpers ([docs/TAXONOMIES.md](docs/TAXONOMIES.md)) |
-| SEO and migration | Sitemap, robots.txt, aliases, configurable permalinks, canonical URLs, link checking, `.md` link rewriting |
+| SEO and migration | Sitemap (split per content folder, external source or URL prefix with `sitemaps:`), robots.txt, aliases, configurable permalinks, canonical URLs, link checking, `.md` link rewriting; a social preview card (`og:image`) drawn at build time for every page without its own image (`og_cards`, [docs/CONFIGURATION.md](docs/CONFIGURATION.md#a-card-for-every-page-og_cards)) |
 | Site migration | `ssg migrate wordpress <url>` — scaffold + content pull (wpexporter) + build in one command; completes `title`/`description`/`timezone`/`colors` from the source site; pages, posts, media, a theme's own post types and reader comments; `--watch --http` migrates live in the browser ([docs/MIGRATE.md](docs/MIGRATE.md)) |
 | Front page | A content page at `/` (what a WordPress static front page exports as) becomes the site's front page; `posts_page:` gives the generated listing a home of its own |
 | Content repair | `ssg repair --fix` rewrites source Markdown a page-builder export left indented **or fenced** into a code block; `check_markup` reports both on every build ([docs/CONFIGURATION.md](docs/CONFIGURATION.md#validating-the-built-output)) |
 | Several projects at once | `ssg daemon` watches every project in `.ssg_projects` from one process; editing the file reloads the fleet in place, leaving untouched projects running ([docs/DAEMON.md](docs/DAEMON.md)) |
 | Staying current | Every build's first line names the binary that produced it; `ssg self-update-check` says whether a newer release is out and prints the upgrade command for **your** install — snap, Homebrew, apt, dnf, Docker or the releases page. It never self-updates and never contacts the network on its own ([docs/INSTALL.md](docs/INSTALL.md#staying-up-to-date)) |
 | Redirects | `redirects:` → real Cloudflare/Netlify `_redirects` (splats, chain flattening, aliases as 301s), **served by the built-in preview** so a rule can be checked before it ships, `ssg import redirects` from a JS `redirects()` config ([docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)) |
-| Dynamic endpoints | Cloudflare Pages Functions via `worker:` + `ssg new worker` templates (contact form, Stripe, dynamic pricing, conversions proxy, cookie consent, comments, newsletter sign-up, rate limit, republish trigger), configurable `_headers` ([docs/WORKERS.md](docs/WORKERS.md)) |
+| Dynamic endpoints | Cloudflare Pages Functions via `worker:` + `ssg new worker` templates (contact form, Stripe, dynamic pricing, conversions proxy, cookie consent, comments, newsletter sign-up, web push notifications, rate limit, republish trigger), configurable `_headers` ([docs/WORKERS.md](docs/WORKERS.md)) |
 | Assets | WebP, responsive variants, build-time image helpers, SCSS, bundles, minification, source maps, fingerprinting |
 | Data | YAML/JSON data files, custom variables and static passthrough files |
 | External sources | Unified `.ExternalData` from local files (YAML/JSON/TOML/CSV/XML), HTTP APIs with a hardened client + disk cache, read-only SQL (MySQL/MariaDB/PostgreSQL/SQLite) and CMS imports (WordPress, Drupal, Movable Type) ([docs/EXTERNAL_SOURCES.md](docs/EXTERNAL_SOURCES.md)) |
 | Localisation | Full i18n: translation keys, dictionaries + `t`, language routing, `hreflang`/`x-default` in the head and in the sitemap (front pages and post listings included), per-language feeds each advertised on its own language's pages, search, `language_sections:` to assign a language to a whole directory, `upper`/`lower`/`title` for a switcher's labels ([docs/I18N.md](docs/I18N.md)) |
 | Content sources | Local Markdown or MDDB over HTTP/gRPC, including watched remote content |
 | Output | Directory/flat pages, JSON output, feeds, search index, ZIP, tar.gz and tar.xz |
-| Server | File watching, gzip, TLS, automatic certificates, HTTP/2, HTTP/3, resource limits, basic/JWT auth, IP allow/block lists and per-IP rate limiting |
+| Server | File watching, gzip, TLS, automatic certificates, HTTP/2, HTTP/3, basic/JWT auth, IP allow/block lists and per-IP rate limiting |
+| Resource limits | `resources:` caps CPUs and memory for every command — build, watch, server, `mcp`, `daemon`, `migrate` — and fits a container's cgroup memory limit by itself; `--profile` reports peak RSS and GC cycles ([docs/CONFIGURATION.md](docs/CONFIGURATION.md#running-on-a-small-machine-resources)) |
 | Automation | Lifecycle hooks, Git-derived modification dates, GitHub Action and native deployment |
-| AI assistance | Build-time `[ai …]` shortcode (models + agents with rules/skills, cached answers), `ssg mcp` development server with designer and content-manager roles, find-then-edit tools that cost the size of the change rather than the file, an optional MDDB-backed search, and an approve-then-PR git flow ([docs/MCP.md](docs/MCP.md)) |
+| AI assistance | Build-time `[ai …]` shortcode (models + agents with rules/skills, cached answers), `ssg mcp` development server with designer and content-manager roles (the designer can also switch on story mode, Listen, share cards and the files published for agents), find-then-edit tools that cost the size of the change rather than the file, an optional MDDB-backed search, and an approve-then-PR git flow ([docs/MCP.md](docs/MCP.md)) |
 
 ## Templates
 
@@ -420,7 +452,8 @@ templates/my-theme/
 ```
 
 Missing standard templates receive built-in fallbacks. Themes may also be
-downloaded with `--online-theme=<URL>`.
+downloaded with `--online-theme=<URL>` — pin one with `repo@ref` and
+`--online-theme-sha256=<sum>`, since its templates run during the build.
 
 Common Go template values:
 
@@ -455,6 +488,7 @@ output/
 ├── media/
 ├── sitemap.xml
 ├── robots.txt
+├── 404.html
 ├── feed.xml
 └── search-index.json
 ```
@@ -471,8 +505,8 @@ are read from environment variables, never from content files.
 |---|---|---|
 | Cloudflare Pages | `--deploy=cloudflare` | `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` |
 | GitHub Pages | `--deploy=github-pages` | `GITHUB_TOKEN` or SSH credentials |
-| Netlify | `--deploy=netlify` | `NETLIFY_AUTH_TOKEN` |
-| Vercel | `--deploy=vercel` | `VERCEL_TOKEN` (optional `VERCEL_ORG_ID` for team scope) |
+| Netlify | `--deploy=netlify` | `NETLIFY_AUTH_TOKEN`; site via `--deploy-project` or `NETLIFY_SITE_ID` |
+| Vercel | `--deploy=vercel` | `VERCEL_TOKEN`; project via `--deploy-project` or `VERCEL_PROJECT_ID` (optional `VERCEL_ORG_ID` for team scope) |
 | FTP | `--deploy=ftp` | `FTP_USERNAME`, `FTP_PASSWORD` |
 | SFTP | `--deploy=sftp` | `SSH_USERNAME` + `SSH_PASSWORD` or `SSH_KEY_FILE` |
 
@@ -560,15 +594,14 @@ Useful targets — `make help` lists every one of them:
 | `make version-sync` | Propagate `VERSION` into every file that states it |
 | `make package-all` | Build the DEB, RPM and Snap packages |
 | `make release VERSION=v1.2.3` | Tag and push a release |
+| `make all` | Dependencies, lint, tests and build |
 
-CI holds a **96% statement-coverage floor twice**: on the module as a whole and
+CI holds a **97% statement-coverage floor twice**: on the module as a whole and
 on every package individually, both computed without the generated protobuf. A
 pull request that drops either fails the `Test` job — see
 [CONTRIBUTING.md](CONTRIBUTING.md) for the exact check and how to run it
 locally. `BENCH_INCREMENTAL=1 make bench` times a one-post edit under
 `--incremental` beside a full build.
-| `make all` | Dependencies, lint, tests and build |
-| `make install` | Install the binary and manual page |
 
 `make golden` and `make determinism` guard the two properties the test suite
 cannot express as unit tests: that a change did not alter generated output, and
@@ -590,6 +623,7 @@ Development workflow and review requirements are in
 | [docs/API_DOCS.md](docs/API_DOCS.md) | API documentation from JavaScript/TypeScript code: configuration, doc comments, links, live examples, themes, `api.json`, agents |
 | [docs/API_LANGUAGES.md](docs/API_LANGUAGES.md) | API docs for Go, PHP and Python: what each reader understands and its limits |
 | [docs/WEB_STORIES.md](docs/WEB_STORIES.md) | Google Web Stories from posts: what is generated, images, theming, validation |
+| [docs/STORY.md](docs/STORY.md) | Story mode: the presentation on articles, its settings, rules, narrator, pronunciation, music, events |
 | [docs/PRINT_AND_COOK_MODE.md](docs/PRINT_AND_COOK_MODE.md) | The Print / PDF button, the printable recipe card and Cook Mode |
 | [docs/RESUME.md](docs/RESUME.md) | A CV from a Schema Resume document: page, structured data, privacy |
 | [docs/REST_API_DOCS.md](docs/REST_API_DOCS.md) | REST API documentation from OpenAPI: pages, the Try it console, checks, theming |
@@ -605,6 +639,7 @@ Development workflow and review requirements are in
 | [docs/MIGRATE.md](docs/MIGRATE.md) | `ssg migrate`: providers, content selection, live `--watch --http` mode |
 | [docs/DAEMON.md](docs/DAEMON.md) | `ssg daemon`: several projects watched by one process, reloaded in place |
 | [docs/MCP_TRANSPORTS.md](docs/MCP_TRANSPORTS.md) | `ssg mcp` over stdio and Streamable HTTP, and how to expose it safely |
+| [docs/LICENSING.md](docs/LICENSING.md) | The Business Source License in practice: free use with the "Built with ssg" notice, your sites are yours, BSD after four years |
 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) | Configuration and advanced feature guide |
 | [docs/I18N.md](docs/I18N.md) | Internationalisation: translations, dictionaries, language routing |
 | [docs/TAXONOMIES.md](docs/TAXONOMIES.md) | Dynamic taxonomies: definitions, term metadata, archives, helpers |
@@ -613,7 +648,7 @@ Development workflow and review requirements are in
 | [docs/TEMPLATE_HELPERS.md](docs/TEMPLATE_HELPERS.md) | Go template helper reference |
 | [docs/IMAGES.md](docs/IMAGES.md) | Build-time image processing |
 | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Native providers, archives and GitHub Actions |
-| [docs/STYLES.md](docs/STYLES.md) | Built-in theme style guide |
+| [docs/STYLES.md](docs/STYLES.md) | Style and colour guidelines: built-in theme palettes, typography, WCAG 2.2 contrast |
 | [examples/README.md](examples/README.md) | Example projects and workflows |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Development and contribution workflow |
 | [CHANGELOG.md](CHANGELOG.md) | Release history and migration notes |
@@ -632,4 +667,19 @@ and [deployment-aware local preview](blog/local-preview-should-not-lie.md).
 
 ## License
 
-SSG is distributed under the [BSD 3-Clause License](LICENSE).
+From 1.9.0 SSG is distributed under the [Business Source License 1.1](LICENSE):
+free to use, modify and redistribute, including in production. Non-commercial
+sites have no further condition; a commercial site keeps the "Built with ssg"
+notice the generator writes (a theme may place its own, marked
+`data-ssg-attribution`), unless a commercial license says otherwise. Selling ssg
+itself — as a hosted service, inside a paid product or as a white-labelled copy
+— needs a commercial license; building sites for clients does not.
+Your content and the sites you generate are yours. Each version becomes
+BSD-3-Clause again four years after its release. There is no price list: the
+launch grant is free; if that ever changes it will be announced ahead and apply
+to new versions only. Details, the FAQ and how to remove the notice under a
+commercial license: [docs/LICENSING.md](docs/LICENSING.md). Versions up to
+1.8.85 remain BSD-3-Clause.
+
+`ssg --version` names the license on its second line, and `ssg --license`
+prints the terms in brief.

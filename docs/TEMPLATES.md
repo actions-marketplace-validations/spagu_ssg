@@ -81,6 +81,19 @@ GitHub, GitLab and direct ZIP URLs are accepted. Only ZIP archives are
 extracted — a tar URL is rejected up front rather than downloaded in full and
 then failing.
 
+A theme's templates run during the build, so pin what you download. Append
+`@ref` to a repository URL to fetch a tag, branch or commit instead of the
+moving main branch, and give the archive's SHA-256:
+
+```bash
+ssg my-blog some-theme example.com \
+  --online-theme=https://github.com/user/some-theme@v1.2.0 \
+  --online-theme-sha256=<sha256 of the archive>
+```
+
+A wrong sum stops the build before anything is extracted. Without a sum the
+build warns and prints the sum it saw, so the first run tells you what to pin.
+
 **Themes laid out for other generators often work.** An archive whose templates
 live under `layouts/` alongside `static/` or `assets/` — the conventional
 layout for Hugo themes — is converted into SSG's structure during extraction, so
@@ -100,7 +113,6 @@ The rest of this guide is for writing or modifying a theme.
 
 ```text
 templates/my-theme/
-├── base.html
 ├── index.html
 ├── page.html
 ├── post.html
@@ -128,6 +140,9 @@ Standard template roles:
 | `category.html` | Categories and fallback for other archives |
 | `tag.html` | Tag archive when present |
 | `author.html` | Author archive when present |
+| `series.html` | Series archive when present |
+| `layouts/<name>.html` | A page with frontmatter `layout: <name>` — the file may define either `<name>.html` or `layouts/<name>.html`; both resolve |
+| `<name>.html` | A page with frontmatter `template: <name>` |
 
 **Define names must match file names.** Templates are selected by their
 *define* name, not the file name. If your theme wraps templates in
@@ -137,16 +152,15 @@ enough — the copy still defines `category.html`. Rename the define to
 gracefully (never a blank page) and the build prints a warning naming the fix.
 Themes without `{{define}}` blocks are matched by file name and need no
 renaming.
-| `series.html` | Series archive when present |
-| `layouts/<name>.html` | A page with frontmatter `layout: <name>` — the file may define either `<name>.html` or `layouts/<name>.html`; both resolve |
-| `<name>.html` | A page with frontmatter `template: <name>` |
 
 Custom `layout` and `template` selection currently applies to pages. Posts use
 `post.html`. If a page's selected custom template is absent, SSG falls back to
 `page.html`.
 
-For the Go engine, when the theme root contains no `.html` files, SSG creates
-the five standard templates. If any root HTML template exists, the theme is
+For the Go engine, when the theme root contains no `.html` files, SSG extracts
+the embedded theme of that name (`simple`, `krowy`, `apidoc`) or otherwise writes
+a starter set: `index.html`, `page.html`, `post.html`, `category.html` and
+`partials.html`. If any root HTML template exists, the theme is
 treated as intentional and missing files are not individually scaffolded.
 Non-Go engines never receive generated templates and must ship all templates
 they need.
@@ -192,6 +206,22 @@ last and overwrites the theme's copy. Use this to override a single theme asset
 per project; keep static paths clear of the theme's `css/`, `js/` and `images/`
 if you do not intend to shadow it.
 
+## The "Built with ssg" notice
+
+From 1.9.0 every page carries `<meta name="generator">` and a visible
+`Built with <a href="https://ssg.tradik.com/">ssg</a>` before `</body>` — the
+one condition of the [license](LICENSING.md). A theme that wants the notice in
+its own footer writes it there and marks the element with
+`data-ssg-attribution`; the generator then adds nothing:
+
+```html
+<footer>… <p data-ssg-attribution>Built with <a href="https://ssg.tradik.com/" rel="generator">ssg</a></p></footer>
+```
+
+Any link to `https://ssg.tradik.com/` in the page counts as well. The generated
+notice has the class `ssg-attribution`, for the theme's CSS. `attribution: false`
+removes it; a commercial site may do that under a commercial license only.
+
 ## Template loading and sharing
 
 Three directories are parsed, in this order, into **one** template set:
@@ -236,9 +266,9 @@ Notes that save a debugging session:
   That is exactly what makes `partials/chrome.html` work — and why a
   `category.html` copied to `author.html` still needs its define renamed (see
   the warning described above).
-- **`base.html`** is part of the scaffolded starter themes and is only used by
-  a theme that chooses to define and call it; it is not a required file and SSG
-  never invokes it implicitly.
+- **`base.html`** is not a role template: SSG never invokes it, and since #208
+  the scaffold no longer writes one. A theme may still define and call it like
+  any other partial.
 - Templates are parsed once per build, after content is loaded, so site data is
   fully available to every helper.
 - **An HTML comment written in a template does not reach the output.** Go's
@@ -405,10 +435,12 @@ Rely on the tables below rather than assuming every value exists everywhere.
 |---|---|---|
 | `.Site` | site data | All pages, posts, categories, media and authors |
 | `.Posts` | list | Posts on the current pagination page |
-| `.Pages` | list | All pages |
+| `.Pages` | list | All pages (the current language's with i18n) |
 | `.Domain` | string | Canonical host |
 | `.Vars` | map | Custom configuration variables |
 | `.Data` | map | YAML/JSON data files |
+| `.ExternalData`, `.ExternalDataMeta` | map | `external_sources` data and its fetch metadata |
+| `.HomePagesLimit`, `.HomePostsLimit` | int | `home_pages_limit` / `home_posts_limit` resolved against the list length (6 when unset, all when negative) |
 | `.Pager` | pager | Pagination state |
 | `.BuildTime` | time | When this build ran — one value for the whole build |
 | `.Modified` | time | The newest `modified` (or `date`) of the listed posts, for `dateModified`; zero when none is dated |
@@ -418,6 +450,7 @@ Rely on the tables below rather than assuming every value exists everywhere.
 | `.Description` | string | The site's description |
 | `.Translations` | list | The listing in every language: `Lang`, `Locale`, `Title` (language name), `URL`, `Canonical`, `IsCurrent`, `IsDefault` |
 | `.Hreflang` | HTML | `<link rel="alternate" hreflang>` for every language plus `x-default`, built from `.Translations` |
+| `.StructuredData` | list | The listing's JSON-LD (an `ItemList`, plus the `Organization` on the front listing) |
 
 A shared `<head>` partial can therefore treat a listing like a page:
 
@@ -427,7 +460,8 @@ A shared `<head>` partial can therefore treat a listing like a page:
 {{ range .Translations }}{{ if not .IsCurrent }}<a href="{{ .URL }}" hreflang="{{ .Lang }}">{{ .Title }}</a>{{ end }}{{ end }}
 ```
 
-`.Pager` contains `Current`, `Total`, `PerPage`, `PrevURL` and `NextURL`:
+`.Pager` contains `Current`, `Total`, `PerPage`, `PrevURL`, `NextURL` and
+`Pages` (see [numbered pagination](TEMPLATE_HELPERS.md#numbered-pagination)):
 
 ```gotemplate
 {{ if gt .Pager.Total 1 }}
@@ -444,6 +478,7 @@ Individual content fields are flattened at the root:
 | Value | Meaning |
 |---|---|
 | `.Site`, `.Domain`, `.Vars`, `.Data` | Global site/configuration data |
+| `.ExternalData`, `.ExternalDataMeta` | `external_sources` data and its fetch metadata |
 | `.BuildTime` | When this build ran (see below) |
 | `.SSG.Version` | The ssg that built the site (see below) |
 | `.ID`, `.Title`, `.Slug`, `.Status`, `.Type` | Identity fields |
@@ -451,10 +486,40 @@ Individual content fields are flattened at the root:
 | `.Content`, `.Excerpt`, `.Description`, `.Keywords` | Body and metadata text |
 | `.URL`, `.CanonicalURL`, `.OutputPath` | Computed destinations |
 | `.Link`, `.Canonical`, `.Robots`, `.Sitemap` | Explicit URL/SEO values |
+| `.URLFormat`, `.PageFormat`, `.SourceDir` | Per-page URL/output overrides and the source directory |
 | `.Author` | `int` — a metadata ID, **not** a name. Resolve with `getAuthorName .Author` |
 | `.Categories` | `[]int` — metadata IDs. Resolve each with `getCategoryName` / `getCategorySlug` |
 | `.Category` | `string` — the primary category name |
 | `.Tags` | `[]string` — names already |
+| `.FeaturedImage` | Hero/social image |
+| `.OGCard` | Site-relative URL of the social card drawn for a page without `.FeaturedImage` when `og_cards` is on; empty otherwise. A theme writing its own `og:image` uses `(or .FeaturedImage .OGCard)` in any template, or `(or .Page.FeaturedImage .Page.OGCard)`. The flat form works in page templates from 1.9.1 (#395) |
+| `.ExternalSource` | Name of the `external_sources` entry a `mode: content` page was built from; empty for content files and MDDB documents (1.9.0) |
+| `.Layout`, `.Template` | Content template selection fields |
+| `.WordCount`, `.ReadingTime` | Computed reading statistics |
+| `.HasMath`, `.TOC` | Optional authoring output |
+| `.Series` | Series name |
+| `.SeriesPrevURL`, `.SeriesPrevTitle` | Previous series item |
+| `.SeriesNextURL`, `.SeriesNextTitle` | Next series item |
+| `.Sticky` | The post is pinned, as the source CMS marked it |
+| `.IsFrontPage` | The page is written at the output root (`/index.html`) |
+| `.Comments` | Migrated readers' comments for this page, threaded (see [MIGRATE.md](MIGRATE.md)) |
+| `.Schema` | The merged JSON-LD ssg would inject (see [structured data](TEMPLATE_HELPERS.md#structured-data)) |
+| `.BreadcrumbSchema` | The derived `BreadcrumbList`; nil where there is none |
+| `.Lang`, `.Locale`, `.TranslationKey`, `.Languages`, `.DefaultLanguage` | Language state |
+| `.Translations`, `.Hreflang` | Language switching/alternate links. Each translation carries `.IsCurrent` for the page being rendered, as `.Page.Translations` does |
+| `.Page` / `.Post` | The `models.Page` struct (see below) |
+
+> ⚠️ The four do not behave alike. An exporter writes **names** in frontmatter
+> (`author: "Zonqor"`, `categories: ["Marsaskala"]`), but `.Author` and
+> `.Categories` hold the **IDs** those names resolved to. So
+> `{{ .Author }} · {{ range .Categories }}{{ . }}{{ end }}` renders `2 · 3, 4`.
+> It is not an error, just wrong output, which is why it survives review — use
+> `getAuthorName`, `getCategoryName` and `getCategorySlug`.
+
+> There is no `urlize` or `slugify` helper. To build a term URL use
+> `termURL "category" "Marsaskala"` — see
+> [TAXONOMIES.md](TAXONOMIES.md#template-helpers) for the taxonomy helper set,
+> which [TEMPLATE_HELPERS.md](TEMPLATE_HELPERS.md) cross-references.
 
 ### `.BuildTime` — the copyright year that stays current
 
@@ -499,27 +564,6 @@ modified checkout. How many pages the build wrote and how long it took cannot
 be in a page, which is written before the build ends; `build_report:` writes
 them to a file beside the pages (see CONFIGURATION.md).
 
-> ⚠️ The four do not behave alike. An exporter writes **names** in frontmatter
-> (`author: "Zonqor"`, `categories: ["Marsaskala"]`), but `.Author` and
-> `.Categories` hold the **IDs** those names resolved to. So
-> `{{ .Author }} · {{ range .Categories }}{{ . }}{{ end }}` renders `2 · 3, 4`.
-> It is not an error, just wrong output, which is why it survives review — use
-> `getAuthorName`, `getCategoryName` and `getCategorySlug`.
-
-> There is no `urlize` or `slugify` helper. To build a term URL use
-> `termURL "category" "Marsaskala"` — see
-> [TAXONOMIES.md](TAXONOMIES.md#template-helpers) for the taxonomy helper set,
-> which [TEMPLATE_HELPERS.md](TEMPLATE_HELPERS.md) cross-references.
-| `.FeaturedImage` | Hero/social image |
-| `.Layout`, `.Template` | Content template selection fields |
-| `.WordCount`, `.ReadingTime` | Computed reading statistics |
-| `.HasMath`, `.TOC` | Optional authoring output |
-| `.Series` | Series name |
-| `.SeriesPrevURL`, `.SeriesPrevTitle` | Previous series item |
-| `.SeriesNextURL`, `.SeriesNextTitle` | Next series item |
-| `.Lang`, `.Languages`, `.DefaultLanguage` | Language state |
-| `.Translations`, `.Hreflang` | Language switching/alternate links. Each translation carries `.IsCurrent` for the page being rendered, as `.Page.Translations` does |
-
 The `models.Page` struct is also available as a nested value — but the key differs
 by content type: **`.Page` in `page.html`, `.Post` in `post.html`.** A post
 template reaching for `.Page.Title` gets nothing, silently: no error, just an empty
@@ -559,10 +603,13 @@ cannot overwrite a standard value; under the nested struct they live in the
 {{/* page.html */}}  <h1>{{ .Page.Title }}</h1>{{ .Page.Content | safeHTML }}
 ```
 
-Note the `| safeHTML` in both: a content field is the **raw Markdown source**, and
-`safeHTML` is what converts it to HTML (see
-[docs/TEMPLATE_HELPERS.md](TEMPLATE_HELPERS.md)). Printing `{{ .Content }}`
-directly ships unrendered Markdown to the reader.
+Note the `| safeHTML` in both: the struct's `Content` field is the **raw
+Markdown source**, and `safeHTML` is what converts it to HTML (see
+[docs/TEMPLATE_HELPERS.md](TEMPLATE_HELPERS.md)). Printing
+`{{ .Post.Content }}` directly ships unrendered Markdown to the reader. The
+root `.Content` is different: since #127 it is already rendered through the
+same pipeline (a `template.HTML`), so `{{ .Content }}` is correct as it is and
+`{{ .Content | safeHTML }}` passes it through unchanged.
 
 ### Category, tag, author and series archives
 
@@ -570,14 +617,19 @@ directly ships unrendered Markdown to the reader.
 |---|---|
 | `.Site` | Complete site data |
 | `.Category` | Category-compatible name/slug object |
-| `.Kind` | `category`, `tag`, `author` or `series` |
+| `.Kind` | `category`, `tag`, `author`, `series`, `date`, `type`, or a custom taxonomy's name |
 | `.Name` | Display name |
 | `.Series` | Series name for compatibility |
 | `.Posts` | Posts in the archive |
-| `.Pager` | Pagination for this archive (`.Current`, `.Total`, `.Pages`) |
+| `.Pager` | Pagination for this archive (`.Current`, `.Total`, `.PerPage`, `.PrevURL`, `.NextURL`, `.Pages`) |
 | `.CanonicalURL` | Absolute URL of **this** archive page |
-| `.Lang`, `.BuildTime` | Language code and build timestamp |
-| `.Domain`, `.Vars`, `.Data` | Global values |
+| `.Lang`, `.BuildTime`, `.SSG.Version` | Language code, build timestamp, ssg version |
+| `.Modified` | The newest lastmod of the posts on this page; zero when none is dated |
+| `.StructuredData` | The archive's JSON-LD (`ItemList`; `ProfilePage` for an author) |
+| `.Domain`, `.Vars`, `.Data`, `.ExternalData` | Global values |
+| `.Taxonomy`, `.Term` | Custom taxonomy term archives only (see [TAXONOMIES.md](TAXONOMIES.md#templates)) |
+| `.DatePath` | Date archives only: the archive's path, e.g. `2024/05` |
+| `.ContentType` | Content-type archives only: the type slug |
 
 Category, tag and author posts are newest first. Series posts are oldest first
 to preserve reading order.
@@ -606,11 +658,20 @@ taxonomies only.
 
 ```text
 .Site.Domain
+.Site.Title, .Site.Description   # the site's name and tagline
+.Site.Colors       # palette by role, e.g. .Site.Colors.primary
 .Site.Pages
 .Site.Posts
 .Site.Categories   # map keyed by integer ID
+.Site.Tags         # map keyed by integer ID (exported tag terms)
 .Site.Media        # map keyed by integer ID
 .Site.Authors      # map keyed by integer ID
+.Site.Menus        # .Site.Menus.<location>.Items, nested and ordered
+.Site.Marketing, .Site.Analytics
+.Site.CustomTypes  # content types the source CMS registered
+.Site.Comments     # migrated comments keyed by page URL
+.Site.Language, .Site.Languages, .Site.DefaultLanguage
+.Site.LanguagePages, .Site.LanguagePosts   # the current language's lists
 ```
 
 Examples:
@@ -699,8 +760,8 @@ Helper groups include:
   `pluck`, `reverse`, `limit` and `offset`;
 - conditionals: `in`, `notIn`, `contains`, `startsWith`, `matches`, `isNil`,
   `isEmpty` and `ternary`;
-- content helpers: `latest`, `published`, `byTag`, `byCategory`, `byAuthor` and
-  `related`;
+- content helpers: `latest`, `published`, `byTag`, `byCategory`, `byAuthor`,
+  `relatedIn`, `related` and `relatedFromMddb`;
 - Markdown, URL, date and WordPress migration helpers;
 - build-time image helpers.
 
@@ -802,8 +863,9 @@ Configuration and supported forms are documented in
 ## Creating a theme
 
 1. Create `templates/<name>/`.
-2. Add all five standard templates, even though the Go engine can scaffold an
-   entirely empty theme. Explicit files make the theme portable and reviewable.
+2. Add the four role templates (`index.html`, `page.html`, `post.html`,
+   `category.html`), even though the Go engine can scaffold an entirely empty
+   theme. Explicit files make the theme portable and reviewable.
 3. Start with `index.html`, `page.html`, `post.html` and `category.html` using
    only the documented context for each.
 4. Put public assets below `css/`, `js/` or `images/`.

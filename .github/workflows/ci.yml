@@ -69,9 +69,43 @@ permissions:
   contents: read
 
 jobs:
+  # A release used to pass through these checks three times on the same code:
+  # on the pull request, on the merge commit pushed to main, and on the tag at
+  # that merge commit. The gate answers "did the PR already test exactly this?"
+  # (a merge whose PR head passed Test/Lint/TTS, with main bringing in only
+  # paths-ignored files). When it did, main and tag runs skip those jobs and a
+  # tag goes straight to the build. Pull requests and manual runs always test.
+  gate:
+    name: Already tested
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      checks: read
+    outputs:
+      tested: ${{ steps.gate.outputs.tested }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: .github/actions
+
+      - name: Look up the PR run
+        id: gate
+        uses: ./.github/actions/already-tested
+        with:
+          checks: |
+            Test
+            Lint
+            TTS server
+          # Same list as paths-ignore above.
+          ignore: '^(docs/|blog/|assets/|templates/ssgtheme/|docs-site\.yaml$|[^/]*\.md$|\.github/workflows/docs-site\.yml$)'
+
   test:
     name: Test
     runs-on: ubuntu-latest
+    needs: [gate]
+    if: needs.gate.outputs.tested != 'true'
     permissions:
       contents: read
     timeout-minutes: 20
@@ -102,7 +136,7 @@ jobs:
       - name: Run tests
         run: go test -v -race -coverprofile=coverage.out ./...
 
-      # The 96% floor the project holds itself to, enforced rather than reported
+      # The 97% floor the project holds itself to, enforced rather than reported
       # (TEST-002). Generated protobuf is excluded the same way codecov.yml
       # excludes it: 2,760 statements nobody writes, which dragged the number
       # 16 points below the truth. Codecov still uploads below, but a status
@@ -113,8 +147,8 @@ jobs:
           grep -v 'internal/mddb/proto' coverage.out > coverage.gate.out
           pct=$(go tool cover -func=coverage.gate.out | awk '/^total:/ { gsub("%", "", $3); print $3 }')
           echo "coverage excluding generated proto: ${pct}%"
-          awk -v p="$pct" 'BEGIN { exit !(p + 0 >= 96) }' \
-            || { echo "::error::coverage ${pct}% is below the 96% floor"; exit 1; }
+          awk -v p="$pct" 'BEGIN { exit !(p + 0 >= 97) }' \
+            || { echo "::error::coverage ${pct}% is below the 97% floor"; exit 1; }
 
       # The same floor, per package (TEST-001). The aggregate above was being
       # held up by the packages at 99-100% while cmd/ssg sat at 91 and
@@ -132,16 +166,16 @@ jobs:
             END {
               for (pkg in total) {
                 pct = 100 * covered[pkg] / total[pkg]
-                if (pct + 0 < 96) printf "%s %.1f%%\n", pkg, pct
+                if (pct + 0 < 97) printf "%s %.1f%%\n", pkg, pct
               }
             }' coverage.gate.out | sort)
           if [ -n "$below" ]; then
             echo "$below" | while read -r pkg pct; do
-              echo "::error::${pkg} is at ${pct}, below the 96% floor"
+              echo "::error::${pkg} is at ${pct}, below the 97% floor"
             done
             exit 1
           fi
-          echo "every package is at or above 96%"
+          echo "every package is at or above 97%"
 
       # A short fuzz pass on every push. Not to find something in 20 seconds —
       # to keep the targets compiling, keep the seed corpus exercised, and grow
@@ -198,6 +232,8 @@ jobs:
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    needs: [gate]
+    if: needs.gate.outputs.tested != 'true'
     permissions:
       contents: read
     timeout-minutes: 20
@@ -221,6 +257,8 @@ jobs:
   tts-server:
     name: TTS server
     runs-on: ubuntu-latest
+    needs: [gate]
+    if: needs.gate.outputs.tested != 'true'
     permissions:
       contents: read
     timeout-minutes: 20
@@ -243,8 +281,8 @@ jobs:
           go test -race -coverprofile=coverage.out ./...
           pct=$(go tool cover -func=coverage.out | awk '/^total:/ { gsub("%", "", $3); print $3 }')
           echo "tts-server coverage: ${pct}%"
-          awk -v p="$pct" 'BEGIN { exit !(p + 0 >= 96) }' \
-            || { echo "::error::tts-server coverage ${pct}% is below the 96% floor"; exit 1; }
+          awk -v p="$pct" 'BEGIN { exit !(p + 0 >= 97) }' \
+            || { echo "::error::tts-server coverage ${pct}% is below the 97% floor"; exit 1; }
 
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
@@ -255,6 +293,11 @@ jobs:
   security:
     name: Security Scan
     runs-on: ubuntu-latest
+    needs: [gate]
+    # Kept on pushes to main even when the PR passed it: the SARIF upload is
+    # what refreshes the default branch's code-scanning alerts. A tag at an
+    # already-tested merge commit skips it — main's run just did it.
+    if: needs.gate.outputs.tested != 'true' || !startsWith(github.ref, 'refs/tags/')
     permissions:
       contents: read
       security-events: write   # gosec SARIF → Security tab (OPS-008)
@@ -312,14 +355,20 @@ jobs:
     permissions:
       contents: read
     timeout-minutes: 20
-    needs: [test, lint, security]
+    needs: [gate, test, lint, security]
     # Tags only. This matrix ran on every PR and every push to main, building
     # eleven dev-versioned binaries nobody publishes — four full matrix runs
     # per release cycle before the one that ships. Cross-platform compile
     # breakage is still caught on every PR by the cross-compile check in the
     # test job, which costs one cached `go build` per GOOS instead of eleven
     # artifact builds.
-    if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.build_packages == 'true'
+    #
+    # always() lets the build run when the gate skipped the checks; a failed
+    # or cancelled check still stops it.
+    if: >-
+      always() && needs.gate.result == 'success'
+      && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled')
+      && (startsWith(github.ref, 'refs/tags/v') || github.event.inputs.build_packages == 'true')
     strategy:
       matrix:
         include:
@@ -431,7 +480,13 @@ jobs:
     # in principle carry different bytes than the released tarball. Downloading
     # the artifact makes the .deb provably the same binary.
     needs: [build]
-    if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.build_packages == 'true'
+    # Explicit results, not the implicit success(): that one also looks at
+    # every job further up, and the checks the gate skipped count as not
+    # successful — v1.9.2 built its binaries and then skipped the packages,
+    # the release and the tap.
+    if: >-
+      !cancelled() && needs.build.result == 'success'
+      && (startsWith(github.ref, 'refs/tags/v') || github.event.inputs.build_packages == 'true')
     strategy:
       matrix:
         arch: [amd64, arm64]
@@ -510,7 +565,13 @@ jobs:
     # Same provenance argument as build-deb: wrap the built artifact, don't
     # compile a fourth copy.
     needs: [build]
-    if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.build_packages == 'true'
+    # Explicit results, not the implicit success(): that one also looks at
+    # every job further up, and the checks the gate skipped count as not
+    # successful — v1.9.2 built its binaries and then skipped the packages,
+    # the release and the tap.
+    if: >-
+      !cancelled() && needs.build.result == 'success'
+      && (startsWith(github.ref, 'refs/tags/v') || github.event.inputs.build_packages == 'true')
     strategy:
       matrix:
         include:
@@ -586,7 +647,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     needs: [build, build-deb, build-rpm]
-    if: startsWith(github.ref, 'refs/tags/v') || github.event.inputs.build_packages == 'true'
+    # Explicit results, not the implicit success(): that one also looks at
+    # every job further up, and the checks the gate skipped count as not
+    # successful — v1.9.2 built its binaries and then skipped the packages,
+    # the release and the tap.
+    if: >-
+      !cancelled() && needs.build.result == 'success'
+      && needs.build-deb.result == 'success' && needs.build-rpm.result == 'success'
+      && (startsWith(github.ref, 'refs/tags/v') || github.event.inputs.build_packages == 'true')
     permissions:
       contents: write
     outputs:
@@ -657,7 +725,7 @@ jobs:
 
             ### Package Managers
             - **Homebrew**: `brew install spagu/tap/ssg`
-            - **Snap**: `snap install ssg`
+            - **Snap**: `snap install static-site-generator`
             - **Debian/Ubuntu**: Download `.deb` file below
             - **Fedora/RHEL**: Download `.rpm` file below
 
@@ -675,7 +743,13 @@ jobs:
   homebrew:
     name: Update Homebrew Tap
     needs: [release]
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Explicit results, not the implicit success(): that one also looks at
+    # every job further up, and the checks the gate skipped count as not
+    # successful — v1.9.2 built its binaries and then skipped the packages,
+    # the release and the tap.
+    if: >-
+      !cancelled() && needs.release.result == 'success'
+      && startsWith(github.ref, 'refs/tags/v')
     uses: ./.github/workflows/homebrew.yml
     with:
       version: ${{ needs.release.outputs.version }}
